@@ -22,7 +22,7 @@ import chess
 
 from capture_utils import run_calibration, load_board_config
 from template_builder import build_templates_from_starting_position, load_templates
-from board_reader import read_board_to_grid, grid_to_fen
+from board_reader import read_board_to_grid, grid_to_fen, save_debug_capture
 from engine_analysis import ChessCoachEngine
 from explain import explain_move_local, explain_move_via_api
 from overlay_ui import CoachOverlay
@@ -65,14 +65,18 @@ class CoachApp:
 
     def _run_one_analysis(self):
         try:
-            grid, min_score = read_board_to_grid()
+            grid, min_score, debug_info = read_board_to_grid()
             fen = grid_to_fen(grid, active_color=self.active_color)
             board = chess.Board(fen)
 
             if not board.is_valid():
+                debug_dir = save_debug_capture(
+                    debug_info, fen, reason="Position invalide"
+                )
                 self.overlay.show_error(
                     "Position illisible ou invalide (vérifie la calibration / "
-                    "que le plateau est bien visible)."
+                    "que le plateau est bien visible).\n"
+                    f"Détails sauvegardés dans : {debug_dir}"
                 )
                 return
 
@@ -102,6 +106,13 @@ class CoachApp:
                     "vérifie le résultat."
                 )
         except Exception as e:
+            debug_info_local = locals().get("debug_info")
+            fen_local = locals().get("fen", "?")
+            if debug_info_local is not None:
+                try:
+                    save_debug_capture(debug_info_local, fen_local, reason=f"Exception: {e}")
+                except Exception:
+                    pass  # ne pas planter sur le rapport de diagnostic lui-meme
             self.overlay.show_error(str(e))
 
     def run(self):

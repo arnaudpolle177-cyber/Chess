@@ -44,6 +44,13 @@ def build_templates_from_starting_position():
     Capture le plateau (qui doit être affiché en position de départ)
     et sauvegarde un template par pièce + 2 templates de cases vides
     (case claire vide et case sombre vide).
+
+    IMPORTANT : les templates de pièces sont enregistrés APRÈS avoir
+    soustrait l'arrière-plan de la case (claire ou sombre) où elles ont
+    été capturées. Sans ça, une pièce apprise sur une case claire (ex: la
+    dame blanche sur d1) n'est plus reconnue dès qu'elle se déplace sur une
+    case sombre — ce qui arrive quasi systématiquement après un seul coup,
+    et fait planter la lecture du plateau au bout de quelques coups.
     """
     config = load_board_config()
     if config is None:
@@ -54,33 +61,43 @@ def build_templates_from_starting_position():
     img = capture_region(config)
     squares = split_into_squares(img)
 
-    saved = set()
-    empty_light_saved = False
-    empty_dark_saved = False
-
+    # --- Passage 1 : cases vides (claire + sombre), servent aussi de
+    # référence de fond pour extraire la silhouette des pièces ensuite.
+    empty_bg = {}
     for (row, col), square_img in squares.items():
         piece = STARTING_POSITION[row][col]
-        is_light_square = (row + col) % 2 == 0
+        if piece != ".":
+            continue
+        color_key = "light" if (row + col) % 2 == 0 else "dark"
+        if color_key not in empty_bg:
+            empty_bg[color_key] = square_img
+            cv2.imwrite(os.path.join(TEMPLATES_DIR, f"empty_{color_key}.png"), square_img)
 
-        if piece == ".":
-            # Sauvegarde un exemple de case vide claire et une sombre
-            if is_light_square and not empty_light_saved:
-                cv2.imwrite(os.path.join(TEMPLATES_DIR, "empty_light.png"), square_img)
-                empty_light_saved = True
-            elif not is_light_square and not empty_dark_saved:
-                cv2.imwrite(os.path.join(TEMPLATES_DIR, "empty_dark.png"), square_img)
-                empty_dark_saved = True
-        else:
-            if piece not in saved:
-                # IMPORTANT : on ajoute "_white"/"_black" dans le nom de fichier.
-                # Sans ça, "piece_r.png" (tour noire) et "piece_R.png" (tour
-                # blanche) sont considérés comme LE MÊME FICHIER sur Windows
-                # (NTFS n'est pas sensible à la casse), et l'un écrase l'autre :
-                # on perdait alors la moitié des templates de pièces.
-                color = "white" if piece.isupper() else "black"
-                fname = f"piece_{piece.lower()}_{color}.png"
-                cv2.imwrite(os.path.join(TEMPLATES_DIR, fname), square_img)
-                saved.add(piece)
+    if "light" not in empty_bg or "dark" not in empty_bg:
+        raise RuntimeError(
+            "Impossible de capturer une case vide claire ET une case vide sombre. "
+            "Vérifie la calibration."
+        )
+
+    # --- Passage 2 : pièces, arrière-plan soustrait.
+    saved = set()
+    for (row, col), square_img in squares.items():
+        piece = STARTING_POSITION[row][col]
+        if piece == "." or piece in saved:
+            continue
+
+        color_key = "light" if (row + col) % 2 == 0 else "dark"
+        silhouette = cv2.absdiff(square_img, empty_bg[color_key])
+
+        # IMPORTANT : on ajoute "_white"/"_black" dans le nom de fichier.
+        # Sans ça, "piece_r.png" (tour noire) et "piece_R.png" (tour
+        # blanche) sont considérés comme LE MÊME FICHIER sur Windows
+        # (NTFS n'est pas sensible à la casse), et l'un écrase l'autre :
+        # on perdait alors la moitié des templates de pièces.
+        color = "white" if piece.isupper() else "black"
+        fname = f"piece_{piece.lower()}_{color}.png"
+        cv2.imwrite(os.path.join(TEMPLATES_DIR, fname), silhouette)
+        saved.add(piece)
 
     missing = set("rnbqkpRNBQKP") - saved
     if missing:
