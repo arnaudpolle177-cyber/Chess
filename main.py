@@ -14,6 +14,7 @@ Options utiles :
 """
 import argparse
 import os
+import sys
 import threading
 import time
 
@@ -120,6 +121,76 @@ def resolve_stockfish_path(cli_path):
     return "stockfish"  # suppose que c'est dans le PATH
 
 
+def _pause_avant_fermeture():
+    """Évite que la fenêtre se ferme instantanément si lancée en double-clic."""
+    input("\nAppuie sur Entrée pour quitter...")
+
+
+def interactive_menu():
+    """
+    Menu affiché quand le programme est lancé sans argument (typiquement en
+    double-cliquant sur le .exe). Reste ouvert et permet d'enchaîner
+    calibration -> apprentissage -> lancement du coach sans jamais avoir à
+    ouvrir un terminal séparé ni taper de commande.
+    """
+    while True:
+        print("\n" + "=" * 50)
+        print("  ♟  Coach d'échecs — Menu")
+        print("=" * 50)
+        config_ok = load_board_config() is not None
+        templates_ok = bool(load_templates())
+        print(f"  1. Calibrer l'échiquier          {'✅ déjà fait' if config_ok else '(à faire)'}")
+        print(f"  2. Apprendre les pièces          {'✅ déjà fait' if templates_ok else '(à faire)'}")
+        print("  3. Lancer le coach")
+        print("  4. Quitter")
+        choice = input("\nTon choix (1-4) : ").strip()
+
+        if choice == "1":
+            try:
+                config = run_calibration()
+                print(f"✅ Calibration sauvegardée : {config}")
+            except Exception as e:
+                print(f"⚠ Erreur pendant la calibration : {e}")
+
+        elif choice == "2":
+            if load_board_config() is None:
+                print("⚠ Fais d'abord l'étape 1 (calibration).")
+                continue
+            print("Affiche le plateau en position de DÉPART sur ton site, puis appuie sur Entrée.")
+            input()
+            try:
+                paths = build_templates_from_starting_position()
+                print(f"✅ {len(paths)} templates de pièces sauvegardés.")
+            except Exception as e:
+                print(f"⚠ Erreur pendant l'apprentissage : {e}")
+
+        elif choice == "3":
+            if load_board_config() is None:
+                print("⚠ Fais d'abord l'étape 1 (calibration).")
+                continue
+            if not load_templates():
+                print("⚠ Fais d'abord l'étape 2 (apprentissage des pièces).")
+                continue
+            sf_input = input(
+                "Chemin vers stockfish.exe (laisse vide pour utiliser "
+                "STOCKFISH_PATH ou le PATH système) : "
+            ).strip()
+            stockfish_path = resolve_stockfish_path(sf_input or None)
+            print("Lancement du coach... (ferme la fenêtre 'coach' pour revenir ici)")
+            try:
+                app = CoachApp(stockfish_path, interval=3.0, explain_mode="local")
+                app.run()
+            except Exception as e:
+                print(f"⚠ Erreur pendant le lancement du coach : {e}")
+
+        elif choice == "4":
+            print("À bientôt !")
+            break
+
+        else:
+            print("Choix invalide, entre un chiffre entre 1 et 4.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Coach d'échecs en temps réel")
     parser.add_argument("--calibrate", action="store_true", help="Recalibrer la zone de l'échiquier")
@@ -128,6 +199,11 @@ def main():
     parser.add_argument("--interval", type=float, default=3.0, help="Secondes entre 2 analyses auto")
     parser.add_argument("--explain-mode", choices=["local", "api"], default="local")
     args = parser.parse_args()
+
+    # Aucun argument passé (typiquement : double-clic sur le .exe) -> menu interactif.
+    if len(sys.argv) == 1:
+        interactive_menu()
+        return
 
     if args.calibrate:
         config = run_calibration()
@@ -157,4 +233,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"\n⚠ Erreur : {e}")
+        _pause_avant_fermeture()

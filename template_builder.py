@@ -8,8 +8,9 @@ import os
 import cv2
 import numpy as np
 from capture_utils import capture_region, load_board_config
+from app_paths import get_base_dir
 
-TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+TEMPLATES_DIR = os.path.join(get_base_dir(), "templates")
 
 # Position de départ standard, rangée par rangée (rang 8 en haut -> rang 1 en bas)
 # Majuscule = blanc, minuscule = noir, '.' = case vide

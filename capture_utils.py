@@ -8,7 +8,9 @@ import numpy as np
 import mss
 import tkinter as tk
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "board_config.json")
+from app_paths import get_base_dir
+
+CONFIG_PATH = os.path.join(get_base_dir(), "board_config.json")
 
 
 def capture_region(region):
