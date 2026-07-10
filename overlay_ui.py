@@ -79,10 +79,16 @@ class CoachOverlay:
 
     def update_content(self, lines, explanation):
         """
+        Thread-safe : peut être appelée depuis le thread d'analyse.
+        Planifie la mise à jour réelle des widgets sur le thread principal Tk.
+
         lines : liste de dicts (comme renvoyés par engine_analysis, triés du
         meilleur au moins bon), ex: [{"move_san": "e4", "score": "+0.35",
         "pv_san": ["e4", "e5", "Cf3"]}, ...]
         """
+        self.root.after(0, self._update_content_impl, lines, explanation)
+
+    def _update_content_impl(self, lines, explanation):
         for i, widgets in enumerate(self.line_labels):
             if i < len(lines):
                 entry = lines[i]
@@ -98,7 +104,18 @@ class CoachOverlay:
         self.explanation_text.delete("1.0", tk.END)
         self.explanation_text.insert(tk.END, explanation)
 
+    def append_warning(self, message):
+        """Thread-safe : ajoute une ligne d'avertissement à la suite de l'explication."""
+        self.root.after(0, self._append_warning_impl, message)
+
+    def _append_warning_impl(self, message):
+        self.explanation_text.insert("end", message)
+
     def show_error(self, message):
+        """Thread-safe : peut être appelée depuis le thread d'analyse."""
+        self.root.after(0, self._show_error_impl, message)
+
+    def _show_error_impl(self, message):
         for widgets in self.line_labels:
             widgets["move"].config(text="—")
             widgets["score"].config(text="—")

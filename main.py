@@ -95,8 +95,7 @@ class CoachApp:
             )
 
             if min_score < 0.45:
-                self.overlay.explanation_text.insert(
-                    "end",
+                self.overlay.append_warning(
                     "\n\n⚠ Reconnaissance incertaine sur au moins une case, "
                     "vérifie le résultat."
                 )
