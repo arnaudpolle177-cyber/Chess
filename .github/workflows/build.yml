@@ -1,0 +1,74 @@
+name: Build Coach d'échecs (Windows .exe)
+
+# Se déclenche :
+# - automatiquement quand tu pousses un tag de version (ex: v1.0)
+# - à la main depuis l'onglet "Actions" de GitHub (bouton "Run workflow")
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # nécessaire pour publier une Release avec le zip
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installer les dépendances Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Compiler CoachEchecs.exe
+        run: pyinstaller coach.spec
+
+      - name: Télécharger Stockfish (dernière version Windows)
+        shell: bash
+        run: |
+          set -e
+          api_url="https://api.github.com/repos/official-stockfish/Stockfish/releases/latest"
+          asset_url=$(curl -s "$api_url" \
+            | grep "browser_download_url.*windows-x86-64-avx2.zip" \
+            | head -n1 \
+            | cut -d '"' -f4)
+          echo "Téléchargement: $asset_url"
+          curl -L -o stockfish.zip "$asset_url"
+          mkdir stockfish_extracted
+          unzip -q stockfish.zip -d stockfish_extracted
+          # Le zip officiel contient un dossier stockfish/ avec l'exe dedans
+          find stockfish_extracted -iname "stockfish*.exe" -exec cp {} dist/stockfish.exe \;
+
+      - name: Préparer le package final
+        shell: bash
+        run: |
+          set -e
+          mkdir -p package/CoachEchecs
+          cp dist/CoachEchecs.exe package/CoachEchecs/
+          cp dist/stockfish.exe package/CoachEchecs/
+          cp README_UTILISATEUR.md package/CoachEchecs/LISEZ-MOI.md
+          cd package
+          7z a -r CoachEchecs-windows.zip CoachEchecs
+
+      - name: Publier la Release avec le zip
+        uses: softprops/action-gh-release@v2
+        with:
+          files: package/CoachEchecs-windows.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Garder aussi le zip comme artifact (pour les builds manuels sans tag)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoachEchecs-windows
+          path: package/CoachEchecs-windows.zip
