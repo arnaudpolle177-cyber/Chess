@@ -1,12 +1,27 @@
 """
 board_reader.py
 Lit le plateau à l'écran en temps réel et produit un FEN.
+
+Reconnaissance en 2 étapes indépendantes de la couleur de la case
+(voir le commentaire en tête de template_builder.py pour le détail du bug
+que ça corrige) :
+1. FORME : masque binaire de la case comparé aux 6 masques de forme appris
+   (pion/cavalier/fou/tour/dame/roi) -> détermine le TYPE de pièce.
+2. COULEUR : luminosité moyenne des pixels de la pièce comparée aux
+   références blanc/noir apprises -> détermine la COULEUR de la pièce.
 """
 import os
 import cv2
 import numpy as np
 from capture_utils import capture_region, load_board_config
-from template_builder import split_into_squares, load_templates
+from template_builder import (
+    split_into_squares,
+    load_templates,
+    load_color_ref,
+    compute_shape_mask,
+    foreground_brightness,
+    PIECE_LETTERS,
+)
 
 # Si la différence moyenne avec la case vide de référence est en-dessous de
 # ce seuil (0-255), on considère la case vide sans même tenter de matcher
@@ -14,41 +29,42 @@ from template_builder import split_into_squares, load_templates
 EMPTY_DIFF_THRESHOLD = 12
 
 
-def best_match(square_img, templates):
+def match_shape(mask, shape_templates):
     """
-    Compare une case capturée (déjà "nettoyée" de son arrière-plan) à tous
-    les templates de pièces connus, retourne la clé du meilleur match
-    ("piece_r_black", "piece_q_white", etc.) et le score de confiance.
+    Compare un masque de forme capturé aux 6 masques de forme connus.
+    Retourne (lettre du type de pièce, score de confiance 0-1).
     """
-    best_key, best_score = None, -1.0
-    h, w = square_img.shape[:2]
+    best_letter, best_score = None, -1.0
+    h, w = mask.shape[:2]
 
-    for key, tmpl in templates.items():
+    for letter, tmpl in shape_templates.items():
         tmpl_resized = cv2.resize(tmpl, (w, h))
-        result = cv2.matchTemplate(square_img, tmpl_resized, cv2.TM_CCOEFF_NORMED)
-        score = result.max()
+        result = cv2.matchTemplate(mask, tmpl_resized, cv2.TM_CCOEFF_NORMED)
+        score = float(result.max())
         if score > best_score:
             best_score = score
-            best_key = key
+            best_letter = letter
 
-    return best_key, best_score
+    return best_letter, best_score
 
 
-def read_board_to_grid(min_confidence=0.45):
+def classify_color(brightness, color_ref):
+    """Retourne 'white' ou 'black' selon la référence de luminosité la plus proche."""
+    dist_white = abs(brightness - color_ref["white"])
+    dist_black = abs(brightness - color_ref["black"])
+    return "white" if dist_white <= dist_black else "black"
+
+
+def read_board_to_grid():
     """
-    Capture l'écran et retourne une grille 8x8 (liste de listes)
-    avec les pièces reconnues ('.' pour case vide, 'P','n', etc.)
-
-    Retourne (grid, min_score, debug_info) :
-    - min_score   : confiance minimum observée sur l'ensemble du plateau
-    - debug_info  : dict {"image": <capture brute>, "squares": [...]}
-                     utile pour sauvegarder un rapport de diagnostic quand
-                     la position lue est invalide (voir save_debug_capture).
-
-    La reconnaissance des pièces se fait après soustraction de
-    l'arrière-plan (case claire ou sombre) : ainsi, une pièce est reconnue
-    de la même façon quelle que soit la couleur de la case sur laquelle
-    elle se trouve, y compris après plusieurs coups.
+    Capture l'écran et retourne (grid, min_score, debug_info) :
+    - grid       : grille 8x8 avec les pièces reconnues ('.' pour case vide,
+                   'P','n', etc.)
+    - min_score  : confiance minimum observée (score de forme) sur tout le
+                   plateau
+    - debug_info : dict {"image": <capture brute>, "squares": [...]} utile
+                   pour sauvegarder un rapport de diagnostic (voir
+                   save_debug_capture) quand la position lue est invalide
     """
     config = load_board_config()
     if config is None:
@@ -58,17 +74,32 @@ def read_board_to_grid(min_confidence=0.45):
     if not templates:
         raise RuntimeError("Pas de templates. Lance l'apprentissage des pièces d'abord.")
 
+    color_ref = load_color_ref()
+    if color_ref is None:
+        raise RuntimeError(
+            "Référence de couleur manquante. Relance l'apprentissage des pièces "
+            "(les anciens templates ne sont plus compatibles avec cette version)."
+        )
+
     empty_bg = {
         "light": templates.get("empty_light"),
         "dark": templates.get("empty_dark"),
     }
     if empty_bg["light"] is None or empty_bg["dark"] is None:
         raise RuntimeError(
-            "Templates de cases vides manquants. Relance l'apprentissage des pièces "
-            "(les anciens templates ne sont plus compatibles)."
+            "Templates de cases vides manquants. Relance l'apprentissage des pièces."
         )
 
-    piece_templates = {k: v for k, v in templates.items() if k.startswith("piece_")}
+    shape_templates = {
+        letter: templates[f"shape_{letter}"]
+        for letter in PIECE_LETTERS
+        if f"shape_{letter}" in templates
+    }
+    if len(shape_templates) < len(PIECE_LETTERS):
+        raise RuntimeError(
+            "Masques de forme incomplets. Relance l'apprentissage des pièces "
+            "(les anciens templates ne sont plus compatibles avec cette version)."
+        )
 
     img = capture_region(config)
     squares = split_into_squares(img)
@@ -79,10 +110,10 @@ def read_board_to_grid(min_confidence=0.45):
 
     for (row, col), square_img in squares.items():
         color_key = "light" if (row + col) % 2 == 0 else "dark"
+        bg = empty_bg[color_key]
         h, w = square_img.shape[:2]
-        bg_resized = cv2.resize(empty_bg[color_key], (w, h))
-        silhouette = cv2.absdiff(square_img, bg_resized)
-        diff_mean = float(silhouette.mean())
+        bg_resized = cv2.resize(bg, (w, h))
+        diff_mean = float(cv2.absdiff(square_img, bg_resized).mean())
 
         if diff_mean < EMPTY_DIFF_THRESHOLD:
             grid[row][col] = "."
@@ -92,26 +123,25 @@ def read_board_to_grid(min_confidence=0.45):
             })
             continue
 
-        key, score = best_match(silhouette, piece_templates)
-        score = float(score)
-        min_score = min(min_score, score)
+        mask = compute_shape_mask(square_img, bg)
+        letter, shape_score = match_shape(mask, shape_templates)
+        min_score = min(min_score, shape_score)
 
-        if key is None:
-            grid[row][col] = "."
+        brightness = foreground_brightness(square_img, mask)
+        color = classify_color(brightness, color_ref)
+
+        if letter is None:
             fen_char = "."
         else:
-            # key format: "piece_<lettre>_<white|black>"
-            # ex: "piece_r_white" -> tour blanche -> "R"
-            #     "piece_r_black" -> tour noire  -> "r"
-            parts = key.split("_")
-            letter = parts[1]
-            color = parts[2] if len(parts) > 2 else "black"
             fen_char = letter.upper() if color == "white" else letter.lower()
-            grid[row][col] = fen_char
+
+        grid[row][col] = fen_char
 
         debug_squares.append({
             "row": row, "col": col, "result": fen_char,
-            "diff_mean": diff_mean, "matched_key": key, "score": score,
+            "diff_mean": diff_mean,
+            "shape_letter": letter, "shape_score": shape_score,
+            "brightness": brightness, "color_guess": color,
         })
 
     debug_info = {"image": img, "squares": debug_squares}
