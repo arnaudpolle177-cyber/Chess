@@ -37,9 +37,11 @@ class CoachApp:
         self.engine = None
         self.running = True
 
+        board_region = load_board_config()
         self.overlay = CoachOverlay(
             on_refresh_click=self.trigger_refresh,
             on_toggle_side_click=self.toggle_side,
+            board_region=board_region,
         )
         self._refresh_requested = threading.Event()
         self._refresh_requested.set()  # premier refresh immédiat

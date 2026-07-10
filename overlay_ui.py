@@ -7,17 +7,30 @@ Petite fenêtre toujours au premier plan qui affiche :
 """
 
 import tkinter as tk
+import queue
+
+from board_overlay import BoardOverlay
 
 MAX_LINES_DISPLAYED = 3
 
 
 class CoachOverlay:
-    def __init__(self, on_refresh_click=None, on_toggle_side_click=None):
+    def __init__(self, on_refresh_click=None, on_toggle_side_click=None, board_region=None):
         self.root = tk.Tk()
         self.root.title("Coach d'échecs")
         self.root.attributes("-topmost", True)
         self.root.geometry("380x380+40+40")
         self.root.configure(bg="#1e1e2e")
+
+        # Overlay dessiné directement sur le plateau à l'écran (cercles de
+        # couleur sur la pièce à jouer + sa case de destination). Nécessite
+        # que la calibration ait déjà été faite (board_region non None).
+        self.board_overlay = None
+        if board_region:
+            try:
+                self.board_overlay = BoardOverlay(self.root, board_region)
+            except Exception as e:
+                print(f"⚠ Overlay plateau désactivé (calibration manquante ou erreur : {e})")
 
         title = tk.Label(
             self.root, text="♟ Coach d'échecs", fg="white", bg="#1e1e2e",
@@ -77,16 +90,36 @@ class CoachOverlay:
         )
         side_btn.pack(side="left", padx=5)
 
+        # --- File d'attente thread-safe --------------------------------
+        # Le thread d'analyse ne doit JAMAIS appeler Tkinter directement
+        # (ni même root.after() depuis un autre thread : ce n'est pas
+        # garanti thread-safe non plus). Il dépose ici des messages, et
+        # c'est le thread principal (celui du mainloop) qui les applique
+        # en se relançant lui-même toutes les 100ms.
+        self._queue = queue.Queue()
+        self.root.after(100, self._poll_queue)
+
+    def _poll_queue(self):
+        try:
+            while True:
+                func, args = self._queue.get_nowait()
+                func(*args)
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(100, self._poll_queue)
+
     def update_content(self, lines, explanation):
         """
         Thread-safe : peut être appelée depuis le thread d'analyse.
-        Planifie la mise à jour réelle des widgets sur le thread principal Tk.
+        Ne touche à AUCUN widget ici — dépose juste le travail dans la queue,
+        qui sera traité par le thread principal via _poll_queue().
 
         lines : liste de dicts (comme renvoyés par engine_analysis, triés du
         meilleur au moins bon), ex: [{"move_san": "e4", "score": "+0.35",
         "pv_san": ["e4", "e5", "Cf3"]}, ...]
         """
-        self.root.after(0, self._update_content_impl, lines, explanation)
+        self._queue.put((self._update_content_impl, (lines, explanation)))
 
     def _update_content_impl(self, lines, explanation):
         for i, widgets in enumerate(self.line_labels):
@@ -104,16 +137,19 @@ class CoachOverlay:
         self.explanation_text.delete("1.0", tk.END)
         self.explanation_text.insert(tk.END, explanation)
 
+        if self.board_overlay:
+            self.board_overlay.update_moves(lines)
+
     def append_warning(self, message):
         """Thread-safe : ajoute une ligne d'avertissement à la suite de l'explication."""
-        self.root.after(0, self._append_warning_impl, message)
+        self._queue.put((self._append_warning_impl, (message,)))
 
     def _append_warning_impl(self, message):
         self.explanation_text.insert("end", message)
 
     def show_error(self, message):
         """Thread-safe : peut être appelée depuis le thread d'analyse."""
-        self.root.after(0, self._show_error_impl, message)
+        self._queue.put((self._show_error_impl, (message,)))
 
     def _show_error_impl(self, message):
         for widgets in self.line_labels:
@@ -122,6 +158,9 @@ class CoachOverlay:
             widgets["pv"].config(text="—")
         self.explanation_text.delete("1.0", tk.END)
         self.explanation_text.insert(tk.END, f"⚠ {message}")
+
+        if self.board_overlay:
+            self.board_overlay.clear()
 
     def run(self):
         self.root.mainloop()
