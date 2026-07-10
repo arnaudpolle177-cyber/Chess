@@ -54,8 +54,13 @@ def read_board_to_grid(min_confidence=0.45):
         if key is None or key.startswith("empty"):
             grid[row][col] = "."
         else:
-            # key format: "piece_X"
-            grid[row][col] = key.split("_")[1]
+            # key format: "piece_<lettre>_<white|black>"
+            # ex: "piece_r_white" -> tour blanche -> "R"
+            #     "piece_r_black" -> tour noire  -> "r"
+            parts = key.split("_")
+            letter = parts[1]
+            color = parts[2] if len(parts) > 2 else "black"
+            grid[row][col] = letter.upper() if color == "white" else letter.lower()
 
     return grid, min_score
 

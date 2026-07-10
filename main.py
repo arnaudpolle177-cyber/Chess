@@ -74,7 +74,7 @@ class CoachApp:
                 )
                 return
 
-            result = self.engine.analyze_fen(fen)
+            result = self.engine.analyze_fen(fen, multipv=3)
             if result.get("game_over"):
                 self.overlay.show_error(f"Partie terminée : {result['result']}")
                 return
@@ -90,9 +90,7 @@ class CoachApp:
                 explanation = explain_move_local(board, move_obj, best["pv_san"])
 
             self.overlay.update_content(
-                move_san=best["move_san"],
-                score_str=best["score"],
-                pv_san=best["pv_san"],
+                lines=result["lines"],
                 explanation=explanation,
             )
 

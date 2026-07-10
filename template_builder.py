@@ -72,7 +72,14 @@ def build_templates_from_starting_position():
                 empty_dark_saved = True
         else:
             if piece not in saved:
-                cv2.imwrite(os.path.join(TEMPLATES_DIR, f"piece_{piece}.png"), square_img)
+                # IMPORTANT : on ajoute "_white"/"_black" dans le nom de fichier.
+                # Sans ça, "piece_r.png" (tour noire) et "piece_R.png" (tour
+                # blanche) sont considérés comme LE MÊME FICHIER sur Windows
+                # (NTFS n'est pas sensible à la casse), et l'un écrase l'autre :
+                # on perdait alors la moitié des templates de pièces.
+                color = "white" if piece.isupper() else "black"
+                fname = f"piece_{piece.lower()}_{color}.png"
+                cv2.imwrite(os.path.join(TEMPLATES_DIR, fname), square_img)
                 saved.add(piece)
 
     missing = set("rnbqkpRNBQKP") - saved
