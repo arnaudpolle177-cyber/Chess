@@ -93,6 +93,7 @@ def read_board_to_grid(min_confidence=0.45):
             continue
 
         key, score = best_match(silhouette, piece_templates)
+        score = float(score)
         min_score = min(min_score, score)
 
         if key is None:
@@ -141,7 +142,7 @@ def save_debug_capture(debug_info, fen_attempted, reason=""):
             "reason": reason,
             "fen_attempted": fen_attempted,
             "squares": debug_info["squares"],
-        }, f, indent=2, ensure_ascii=False)
+        }, f, indent=2, ensure_ascii=False, default=str)
 
     return debug_dir
 
