@@ -65,11 +65,52 @@ def split_into_squares(board_img):
     return squares
 
 
+# Une pièce réelle couvre typiquement entre ~8% et ~80% de la surface de
+# sa case (selon le style graphique). En dehors de cette plage : soit du
+# bruit épars, soit une teinte uniforme (surlignage du dernier coup,
+# highlight de sélection, etc.) -> on considère alors la case comme vide.
+MIN_PIECE_BLOB_RATIO = 0.08
+MAX_PIECE_BLOB_RATIO = 0.80
+
+
+def keep_largest_component(mask):
+    """
+    Ne garde que le plus gros "blob" connecté du masque, et calcule sa
+    proportion de la surface totale. Une vraie pièce forme un blob compact
+    assez centré (typiquement 15-70% de la case). Un surlignage de case
+    (teinte uniforme appliquée par certains sites sur la case de départ/
+    arrivée du dernier coup) colore au contraire TOUTE la case de façon
+    homogène -> soit un blob qui couvre presque 100% de la case, soit du
+    bruit épars sans blob cohérent. Dans les deux cas, ce n'est pas une
+    pièce, et on veut pouvoir le détecter pour l'ignorer.
+    """
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if num_labels <= 1:
+        return mask, 0.0  # aucun pixel de premier plan du tout
+
+    areas = stats[1:, cv2.CC_STAT_AREA]  # on saute le label 0 (fond)
+    largest_label = 1 + int(np.argmax(areas))
+    largest_area = int(areas.max())
+
+    clean = np.zeros_like(mask)
+    clean[labels == largest_label] = 255
+
+    ratio = largest_area / mask.size
+    return clean, ratio
+
+
 def compute_shape_mask(square_img, bg_img):
     """
     Calcule un masque binaire (0/255, un seul canal) de la silhouette de
     la pièce présente sur square_img, indépendant de la couleur de la case
     (bg_img = référence de la case vide, même couleur claire/sombre).
+
+    Retourne (mask, blob_ratio, looks_like_piece) :
+    - mask              : masque du plus gros blob connecté
+    - blob_ratio        : proportion de la case couverte par ce blob (0-1)
+    - looks_like_piece  : False si le blob ne ressemble pas à une vraie
+                           pièce (trop petit = bruit, trop grand = teinte
+                           uniforme genre surlignage du dernier coup)
     """
     h, w = square_img.shape[:2]
     bg_resized = cv2.resize(bg_img, (w, h))
@@ -80,7 +121,10 @@ def compute_shape_mask(square_img, bg_img):
     # Nettoie les petits résidus de bruit isolés
     kernel = np.ones((2, 2), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    return mask
+
+    mask, blob_ratio = keep_largest_component(mask)
+    looks_like_piece = MIN_PIECE_BLOB_RATIO <= blob_ratio <= MAX_PIECE_BLOB_RATIO
+    return mask, blob_ratio, looks_like_piece
 
 
 def foreground_brightness(square_img, mask):
@@ -136,7 +180,7 @@ def build_templates_from_starting_position():
             continue
 
         color_key = "light" if (row + col) % 2 == 0 else "dark"
-        mask = compute_shape_mask(square_img, empty_bg[color_key])
+        mask, blob_ratio, _ = compute_shape_mask(square_img, empty_bg[color_key])
         letter = piece.lower()
 
         if shape_masks[letter] is None:

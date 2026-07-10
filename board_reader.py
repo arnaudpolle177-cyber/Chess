@@ -21,6 +21,8 @@ from template_builder import (
     compute_shape_mask,
     foreground_brightness,
     PIECE_LETTERS,
+    MIN_PIECE_BLOB_RATIO,
+    MAX_PIECE_BLOB_RATIO,
 )
 
 # Si la différence moyenne avec la case vide de référence est en-dessous de
@@ -123,7 +125,21 @@ def read_board_to_grid():
             })
             continue
 
-        mask = compute_shape_mask(square_img, bg)
+        mask, blob_ratio, looks_like_piece = compute_shape_mask(square_img, bg)
+
+        if not looks_like_piece:
+            # Le pixel diffère bien du fond (diff_mean au-dessus du seuil),
+            # mais la forme ne ressemble pas à une pièce : soit du bruit
+            # épars, soit une teinte uniforme (surlignage du dernier coup,
+            # sélection de case, etc.) -> on traite la case comme vide
+            # plutôt que de deviner une pièce au hasard.
+            grid[row][col] = "."
+            debug_squares.append({
+                "row": row, "col": col, "result": "empty (rejeté: pas une forme de pièce)",
+                "diff_mean": diff_mean, "blob_ratio": blob_ratio,
+            })
+            continue
+
         letter, shape_score = match_shape(mask, shape_templates)
         min_score = min(min_score, shape_score)
 
@@ -139,7 +155,7 @@ def read_board_to_grid():
 
         debug_squares.append({
             "row": row, "col": col, "result": fen_char,
-            "diff_mean": diff_mean,
+            "diff_mean": diff_mean, "blob_ratio": blob_ratio,
             "shape_letter": letter, "shape_score": shape_score,
             "brightness": brightness, "color_guess": color,
         })
