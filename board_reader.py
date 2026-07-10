@@ -2,6 +2,7 @@
 board_reader.py
 Lit le plateau à l'écran en temps réel et produit un FEN.
 """
+import os
 import cv2
 import numpy as np
 from capture_utils import capture_region, load_board_config
