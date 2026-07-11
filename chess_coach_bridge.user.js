@@ -47,8 +47,28 @@
   const ARROW_COLORS = ["#a6e3a1", "#89dceb", "#cba6f7"]; // 1er, 2e, 3e coup (mêmes couleurs que la fenêtre coach)
   const PIECE_LETTERS = { pawn: "p", knight: "n", bishop: "b", rook: "r", queen: "q", king: "k" };
 
-  let lastSentFen = null;
+  // Passe à true si tu as besoin de déboguer la lecture du plateau : affiche
+  // le détail (FEN, orientation, nb de pièces) à CHAQUE poll. En usage
+  // normal, laisse à false -- sinon ça spam la console en continu.
+  const DEBUG = false;
+
+  // Nombre de lectures IDENTIQUES consécutives requises avant d'envoyer une
+  // position au serveur. Pendant l'animation d'un coup (drag, glissement),
+  // la lecture du DOM peut être momentanément instable (une pièce apparaît
+  // sur la mauvaise case pendant quelques ms) -- ça génère un FEN parasite
+  // différent, qui déclenche un envoi au serveur pour rien, et donc un
+  // effacement + redessin des flèches -> c'est CA le flicker. En exigeant
+  // 2 lectures stables d'affilée, on filtre ces faux positifs.
+  const STABLE_READS_REQUIRED = 2;
+
+  let lastSentBoardPart = null;
   let localTurnToggle = "w"; // repli si getSideToMove() ne peut rien déterminer (voir plus bas)
+  let lastStableGrid = null; // dernière position confirmée (grille 8x8), pour déduire qui vient de jouer
+
+  let pendingBoardPart = null;
+  let pendingStableCount = 0;
+
+  let lastDrawnMovesKey = null; // pour éviter de redessiner les flèches si le résultat n'a pas changé
 
   // ---------------------------------------------------------------------
   // 1. Lecture du plateau (DOM chessground -> grille 8x8 -> FEN)
@@ -126,29 +146,59 @@
   }
 
   // -----------------------------------------------------------------
-  // Trait (qui doit jouer). C'EST LE SEUL POINT SPÉCIFIQUE À TON SITE.
+  // Trait (qui doit jouer).
   //
-  // Par défaut, ce script alterne "w"/"b" localement à chaque coup DÉTECTÉ
-  // (ça marche bien tant que le MutationObserver capte bien chaque coup,
-  // le sien ET celui de l'adversaire, une seule fois chacun).
-  //
-  // Si ton site sait déjà qui doit jouer (variable JS, objet chess.js,
+  // Priorité 1 : si ton site expose l'info (variable JS, objet chess.js,
   // etc.), remplace le contenu de cette fonction par ex. :
   //     return window.monJeu.turn();      // si tu utilises chess.js
   //     return maPartie.sideToMove;       // si tu as ta propre variable
+  //
+  // Priorité 2 (par défaut) : déduction automatique en comparant la
+  // position stable précédente à la nouvelle -- la case qui a PERDU sa
+  // pièce indique la couleur qui vient de jouer, donc c'est maintenant à
+  // l'autre couleur de jouer. Contrairement à un simple compteur qui
+  // alterne "w"/"b" à l'aveugle (et qui ne se resynchronise jamais s'il se
+  // décale ne serait-ce qu'une fois), cette méthode se corrige toute seule
+  // dès le premier vrai coup observé, quel que soit l'état de départ.
   // -----------------------------------------------------------------
-  function getSideToMove() {
+  function inferMoverColor(oldGrid, newGrid) {
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 8; c++) {
+        const oldPiece = oldGrid[r][c];
+        if (oldPiece !== "." && oldPiece !== newGrid[r][c]) {
+          // Cette case avait une pièce avant, et n'a plus la même
+          // maintenant (déplacée ou capturée depuis ici) -> sa couleur est
+          // celle du camp qui vient de jouer.
+          return oldPiece === oldPiece.toUpperCase() ? "white" : "black";
+        }
+      }
+    }
+    return null; // aucune case n'a "perdu" de pièce -> déduction impossible
+  }
+
+  function getSideToMove(newGrid) {
     if (window.chessCoachGetTurn) {
       try {
         return window.chessCoachGetTurn();
       } catch (e) {
-        console.warn("chessCoachGetTurn() a levé une erreur, repli sur le mode local :", e);
+        console.warn("chessCoachGetTurn() a levé une erreur, repli sur la déduction automatique :", e);
       }
     }
+    if (lastStableGrid) {
+      const moverColor = inferMoverColor(lastStableGrid, newGrid);
+      if (moverColor) {
+        localTurnToggle = moverColor === "white" ? "b" : "w";
+        return localTurnToggle;
+      }
+    }
+    // Repli : toute première position jamais lue (pas de comparaison
+    // possible), ou déduction non concluante (très rare).
     return localTurnToggle;
   }
 
-  function buildFen() {
+  let consecutiveSuspiciousReads = 0;
+
+  function readBoardState() {
     const els = getBoardElements();
     if (!els) {
       console.warn("Coach d'échecs : éléments cg-wrap/cg-container/cg-board introuvables sur cette page.");
@@ -157,22 +207,43 @@
     const { grid, isWhiteOrientation, squareSize, size } = readGrid(els);
     const piecesFound = grid.flat().filter((c) => c !== ".").length;
     const boardPart = gridToFenBoardPart(grid);
-    const turn = getSideToMove();
-    const fen = `${boardPart} ${turn} KQkq - 0 1`;
 
-    console.log(
-      `Coach d'échecs [debug] : ${piecesFound} pièce(s) détectée(s), ` +
-      `orientation=${isWhiteOrientation ? "blanc" : "noir"}, ` +
-      `taille plateau=${size}px, taille case=${squareSize}px\nFEN : ${fen}`
-    );
-    if (piecesFound < 4) {
-      console.warn(
-        "Coach d'échecs : très peu de pièces détectées, la lecture du plateau semble incorrecte. " +
-        "Regarde la grille ci-dessous pour comprendre le problème :", grid
+    if (DEBUG) {
+      console.log(
+        `Coach d'échecs [debug] : ${piecesFound} pièce(s) détectée(s), ` +
+        `orientation=${isWhiteOrientation ? "blanc" : "noir"}, ` +
+        `taille plateau=${size}px, taille case=${squareSize}px\nplateau : ${boardPart}`
       );
     }
 
-    return fen;
+    // Un signal beaucoup plus fiable qu'un simple "peu de pièces" (qui est
+    // NORMAL en fin de partie, ex: Roi+Dame vs Roi) : une position valide a
+    // toujours exactement 1 roi blanc et 1 roi noir. S'il en manque un ou
+    // qu'il y en a 2, la lecture est certainement fausse.
+    const flat = grid.flat();
+    const whiteKings = flat.filter((c) => c === "K").length;
+    const blackKings = flat.filter((c) => c === "k").length;
+    const suspicious = whiteKings !== 1 || blackKings !== 1;
+
+    if (suspicious) {
+      consecutiveSuspiciousReads++;
+    } else {
+      consecutiveSuspiciousReads = 0;
+    }
+
+    // On n'alerte que si le problème persiste sur plusieurs polls d'affilée
+    // (~2s) : une lecture louche isolée est presque toujours un DOM en
+    // cours de redessin (le site retire/rajoute les pièces entre 2 coups),
+    // qui se corrige tout seul au poll suivant -- pas la peine d'alerter.
+    if (consecutiveSuspiciousReads === 3) {
+      console.warn(
+        `Coach d'échecs : lecture du plateau suspecte depuis plusieurs secondes ` +
+        `(rois détectés : blanc=${whiteKings}, noir=${blackKings}, ${piecesFound} pièce(s) au total). ` +
+        "Vérifie que le site n'a pas changé de structure DOM. Grille actuelle :", grid
+      );
+    }
+
+    return { grid, boardPart, whiteKings, blackKings };
   }
 
   // ---------------------------------------------------------------------
@@ -280,6 +351,7 @@
   }
 
   function clearArrows() {
+    lastDrawnMovesKey = null;
     const svg = document.getElementById("chess-coach-arrows");
     if (svg) {
       svg.querySelectorAll("line, circle.cc-label-bg, text.cc-label").forEach((n) => n.remove());
@@ -287,11 +359,15 @@
   }
 
   function drawArrows(lines) {
+    const movesKey = JSON.stringify((lines || []).map((l) => l.move_uci));
+    if (movesKey === lastDrawnMovesKey) return; // deja affiche, rien a refaire
+
     const els = getBoardElements();
     if (!els) return;
     const { isWhiteOrientation, squareSize } = readGrid(els);
     const svg = getOrCreateSvgLayer(els);
     clearArrows();
+    lastDrawnMovesKey = movesKey;
 
     lines.forEach((entry, i) => {
       const uci = entry.move_uci;
@@ -330,11 +406,45 @@
 
   function onBoardChanged() {
     if (countPieces() === 0) return; // état transitoire probable, on retente au prochain tick
-    const fen = buildFen();
-    if (!fen || fen === lastSentFen) return;
-    lastSentFen = fen;
-    localTurnToggle = localTurnToggle === "w" ? "b" : "w"; // pour le prochain coup, si pas de hook custom
-    sendFenToCoach(fen);
+    const state = readBoardState();
+    if (!state) return;
+    const { grid, boardPart, whiteKings, blackKings } = state;
+
+    // IMPORTANT : on stabilise/compare uniquement la position des PIÈCES,
+    // jamais le trait ("w"/"b"). Comparer le FEN complet (trait inclus)
+    // provoquait une boucle infinie : le trait s'inversait à chaque envoi
+    // confirmé, ce qui rendait la lecture suivante "différente" même sans
+    // aucun coup réel joué, donc renvoyait encore, inversait encore, etc.
+    // -> les flèches passaient sans arrêt du camp blanc au camp noir.
+
+    // Filtre les lectures instables (ex: pendant l'animation d'un coup) :
+    // on n'agit que si on lit exactement la même position de pièces 2 fois
+    // de suite.
+    if (boardPart !== pendingBoardPart) {
+      pendingBoardPart = boardPart;
+      pendingStableCount = 1;
+      return;
+    }
+    pendingStableCount++;
+    if (pendingStableCount < STABLE_READS_REQUIRED) return;
+
+    if (boardPart === lastSentBoardPart) return; // le plateau n'a pas vraiment changé, rien à refaire
+
+    // Garde-fou : même stable, une position sans exactement 1 roi de chaque
+    // couleur est forcément une mauvaise lecture -> pas la peine d'embêter
+    // le serveur avec, on retentera au prochain poll.
+    if (whiteKings !== 1 || blackKings !== 1) return;
+
+    // Le plateau a VRAIMENT changé (position de pièces différente et
+    // stable) -> c'est le seul moment où on détermine/met à jour le trait,
+    // par déduction (quelle case a perdu sa pièce) plutôt qu'en alternant
+    // à l'aveugle -- voir le commentaire au-dessus de getSideToMove().
+    const turn = getSideToMove(grid);
+    const finalFen = `${boardPart} ${turn} KQkq - 0 1`;
+
+    lastStableGrid = grid;
+    lastSentBoardPart = boardPart;
+    sendFenToCoach(finalFen);
   }
 
   function countPieces() {
