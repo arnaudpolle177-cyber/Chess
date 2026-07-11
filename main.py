@@ -163,6 +163,55 @@ class CoachApp:
         self.running = False
 
 
+class BrowserBridgeApp:
+    """
+    Mode 'navigateur' : le plateau est lu directement dans le DOM de ta
+    page (via chess_coach_bridge.js), donc plus de capture d'écran ni de
+    reconnaissance d'image. Ce mode se contente de démarrer le serveur
+    local que le JS contacte, et affiche le texte/l'explication dans la
+    même fenêtre Tkinter que le mode classique (les flèches, elles,
+    s'affichent directement sur ta page web, pas ici).
+    """
+
+    def __init__(self, stockfish_path, explain_mode, port):
+        self.overlay = CoachOverlay(
+            on_refresh_click=lambda: None,  # rien à rafraîchir manuellement : c'est le JS qui pousse les mises à jour
+            on_toggle_side_click=lambda: None,
+            board_region=None,  # pas d'overlay bureau : les flèches sont dessinées dans la page
+        )
+        self.server = None
+        self.state = None
+        self.stockfish_path = stockfish_path
+        self.explain_mode = explain_mode
+        self.port = port
+
+    def run(self):
+        from web_bridge import start_bridge_server
+        self.server, self.state = start_bridge_server(
+            self.stockfish_path,
+            explain_mode=self.explain_mode,
+            on_update=self._on_update,
+            port=self.port,
+        )
+        self.overlay.explanation_text.insert(
+            "1.0",
+            f"En attente de ton site...\n\n"
+            f"Vérifie que chess_coach_bridge.js est bien chargé sur ta page "
+            f"de jeu (port {self.port})."
+        )
+        try:
+            self.overlay.run()
+        finally:
+            if self.state:
+                self.state.close()
+
+    def _on_update(self, lines, explanation):
+        if lines is None:
+            self.overlay.show_error(explanation)
+        else:
+            self.overlay.update_content(lines=lines, explanation=explanation)
+
+
 def resolve_stockfish_path(cli_path):
     if cli_path:
         return cli_path
@@ -192,9 +241,10 @@ def interactive_menu():
         templates_ok = bool(load_templates())
         print(f"  1. Calibrer l'échiquier          {'✅ déjà fait' if config_ok else '(à faire)'}")
         print(f"  2. Apprendre les pièces          {'✅ déjà fait' if templates_ok else '(à faire)'}")
-        print("  3. Lancer le coach")
-        print("  4. Quitter")
-        choice = input("\nTon choix (1-4) : ").strip()
+        print("  3. Lancer le coach (capture d'écran)")
+        print("  4. Lancer le coach (mode navigateur — recommandé, sans capture d'écran)")
+        print("  5. Quitter")
+        choice = input("\nTon choix (1-5) : ").strip()
 
         if choice == "1":
             try:
@@ -235,11 +285,25 @@ def interactive_menu():
                 print(f"⚠ Erreur pendant le lancement du coach : {e}")
 
         elif choice == "4":
+            sf_input = input(
+                "Chemin vers stockfish.exe (laisse vide pour utiliser "
+                "STOCKFISH_PATH ou le PATH système) : "
+            ).strip()
+            stockfish_path = resolve_stockfish_path(sf_input or None)
+            print("Démarrage du mode navigateur...")
+            print("N'oublie pas d'ajouter chess_coach_bridge.js sur ta page de jeu si ce n'est pas déjà fait.")
+            try:
+                app = BrowserBridgeApp(stockfish_path, explain_mode="local", port=8765)
+                app.run()
+            except Exception as e:
+                print(f"⚠ Erreur pendant le lancement du mode navigateur : {e}")
+
+        elif choice == "5":
             print("À bientôt !")
             break
 
         else:
-            print("Choix invalide, entre un chiffre entre 1 et 4.")
+            print("Choix invalide, entre un chiffre entre 1 et 5.")
 
 
 def main():
@@ -249,7 +313,17 @@ def main():
     parser.add_argument("--stockfish", default=None, help="Chemin vers l'exécutable Stockfish")
     parser.add_argument("--interval", type=float, default=3.0, help="Secondes entre 2 analyses auto")
     parser.add_argument("--explain-mode", choices=["local", "api"], default="local")
+    parser.add_argument("--web-bridge", action="store_true",
+                         help="Mode navigateur : lit le plateau via chess_coach_bridge.js au lieu de la capture d'écran")
+    parser.add_argument("--bridge-port", type=int, default=8765)
     args = parser.parse_args()
+
+    if args.web_bridge:
+        stockfish_path = resolve_stockfish_path(args.stockfish)
+        app = BrowserBridgeApp(stockfish_path, args.explain_mode, args.bridge_port)
+        app.run()
+        return
+
 
     # Aucun argument passé (typiquement : double-clic sur le .exe) -> menu interactif.
     if len(sys.argv) == 1:
