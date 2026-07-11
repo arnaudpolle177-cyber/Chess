@@ -60,16 +60,19 @@ import chess
 from capture_utils import run_calibration, load_board_config
 from template_builder import build_templates_from_starting_position, load_templates
 from board_reader import read_board_with_retries, save_debug_capture
-from engine_analysis import ChessCoachEngine
+from engine_analysis import ChessCoachEngine, DEFAULT_DEPTH
 from explain import explain_move_local, explain_move_via_api
 from overlay_ui import CoachOverlay
 
 
 class CoachApp:
-    def __init__(self, stockfish_path, interval, explain_mode):
+    def __init__(self, stockfish_path, interval, explain_mode, depth=None, threads=None, hash_mb=256):
         self.stockfish_path = stockfish_path
         self.interval = interval
         self.explain_mode = explain_mode
+        self.depth = depth if depth is not None else DEFAULT_DEPTH
+        self.threads = threads
+        self.hash_mb = hash_mb
         self.active_color = "w"  # camp pour lequel on demande le meilleur coup
         self.engine = None
         self.running = True
@@ -91,7 +94,7 @@ class CoachApp:
         self._refresh_requested.set()
 
     def analysis_loop(self):
-        self.engine = ChessCoachEngine(self.stockfish_path)
+        self.engine = ChessCoachEngine(self.stockfish_path, threads=self.threads, hash_mb=self.hash_mb)
         try:
             while self.running:
                 triggered = self._refresh_requested.wait(timeout=self.interval)
@@ -121,7 +124,7 @@ class CoachApp:
                 )
                 return
 
-            result = self.engine.analyze_fen(fen, multipv=3)
+            result = self.engine.analyze_fen(fen, depth=self.depth, multipv=3)
             if result.get("game_over"):
                 self.overlay.show_error(f"Partie terminée : {result['result']}")
                 return
@@ -173,7 +176,7 @@ class BrowserBridgeApp:
     s'affichent directement sur ta page web, pas ici).
     """
 
-    def __init__(self, stockfish_path, explain_mode, port):
+    def __init__(self, stockfish_path, explain_mode, port, threads=None, hash_mb=256, depth=None):
         self.overlay = CoachOverlay(
             on_refresh_click=lambda: None,  # rien à rafraîchir manuellement : c'est le JS qui pousse les mises à jour
             on_toggle_side_click=lambda: None,
@@ -184,6 +187,9 @@ class BrowserBridgeApp:
         self.stockfish_path = stockfish_path
         self.explain_mode = explain_mode
         self.port = port
+        self.threads = threads
+        self.hash_mb = hash_mb
+        self.depth = depth
 
     def run(self):
         from web_bridge import start_bridge_server
@@ -192,6 +198,9 @@ class BrowserBridgeApp:
             explain_mode=self.explain_mode,
             on_update=self._on_update,
             port=self.port,
+            threads=self.threads,
+            hash_mb=self.hash_mb,
+            depth=self.depth,
         )
         self.overlay.explanation_text.insert(
             "1.0",
@@ -279,7 +288,10 @@ def interactive_menu():
             stockfish_path = resolve_stockfish_path(sf_input or None)
             print("Lancement du coach... (ferme la fenêtre 'coach' pour revenir ici)")
             try:
-                app = CoachApp(stockfish_path, interval=3.0, explain_mode="local")
+                app = CoachApp(
+                    stockfish_path, interval=3.0, explain_mode="local",
+                    depth=DEFAULT_DEPTH, threads=None, hash_mb=256,
+                )
                 app.run()
             except Exception as e:
                 print(f"⚠ Erreur pendant le lancement du coach : {e}")
@@ -293,7 +305,10 @@ def interactive_menu():
             print("Démarrage du mode navigateur...")
             print("N'oublie pas d'ajouter chess_coach_bridge.js sur ta page de jeu si ce n'est pas déjà fait.")
             try:
-                app = BrowserBridgeApp(stockfish_path, explain_mode="local", port=8765)
+                app = BrowserBridgeApp(
+                    stockfish_path, explain_mode="local", port=8765,
+                    threads=None, hash_mb=256, depth=DEFAULT_DEPTH,
+                )
                 app.run()
             except Exception as e:
                 print(f"⚠ Erreur pendant le lancement du mode navigateur : {e}")
@@ -316,11 +331,22 @@ def main():
     parser.add_argument("--web-bridge", action="store_true",
                          help="Mode navigateur : lit le plateau via chess_coach_bridge.js au lieu de la capture d'écran")
     parser.add_argument("--bridge-port", type=int, default=8765)
+    parser.add_argument("--depth", type=int, default=None,
+                         help="Profondeur de recherche Stockfish (défaut: 20). Plus haut = plus fort mais plus lent.")
+    parser.add_argument("--threads", type=int, default=None,
+                         help="Threads donnés à Stockfish (défaut: nb coeurs CPU - 1)")
+    parser.add_argument("--hash", type=int, default=256, dest="hash_mb",
+                         help="Mémoire (Mo) pour la table de transposition Stockfish (défaut: 256)")
     args = parser.parse_args()
+
+    depth = args.depth if args.depth is not None else DEFAULT_DEPTH
 
     if args.web_bridge:
         stockfish_path = resolve_stockfish_path(args.stockfish)
-        app = BrowserBridgeApp(stockfish_path, args.explain_mode, args.bridge_port)
+        app = BrowserBridgeApp(
+            stockfish_path, args.explain_mode, args.bridge_port,
+            threads=args.threads, hash_mb=args.hash_mb, depth=depth,
+        )
         app.run()
         return
 
@@ -355,7 +381,10 @@ def main():
         return
 
     stockfish_path = resolve_stockfish_path(args.stockfish)
-    app = CoachApp(stockfish_path, args.interval, args.explain_mode)
+    app = CoachApp(
+        stockfish_path, args.interval, args.explain_mode,
+        depth=depth, threads=args.threads, hash_mb=args.hash_mb,
+    )
     app.run()
 
 

@@ -2,15 +2,33 @@
 engine_analysis.py
 Interroge Stockfish pour obtenir le meilleur coup et l'évaluation.
 """
+import os
 import chess
 import chess.engine
 
-DEFAULT_DEPTH = 16
+# Profondeur par défaut. Stockfish moderne (NNUE) atteint facilement
+# 20-25+ en 1-2 secondes dès qu'il a plusieurs threads + un peu de mémoire
+# (voir configure() ci-dessous) -- une profondeur plus haute = coups
+# tactiques complexes mieux vus, donc force réelle plus proche du plein
+# potentiel de Stockfish (largement au-dessus de 3000 Elo).
+DEFAULT_DEPTH = 20
 
 
 class ChessCoachEngine:
-    def __init__(self, stockfish_path):
+    def __init__(self, stockfish_path, threads=None, hash_mb=256):
         self.engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
+
+        # Sans ça, Stockfish tourne sur 1 seul thread et une table de
+        # transposition minuscule par défaut -> beaucoup plus lent pour
+        # atteindre une bonne profondeur, donc plus faible "en pratique"
+        # dans le temps qu'on lui laisse entre 2 analyses.
+        if threads is None:
+            cpu_count = os.cpu_count() or 4
+            threads = max(1, cpu_count - 1)  # laisse un coeur libre pour le reste du programme
+        try:
+            self.engine.configure({"Threads": threads, "Hash": hash_mb})
+        except chess.engine.EngineError as e:
+            print(f"⚠ Impossible de configurer Threads/Hash sur ce Stockfish : {e}")
 
     def analyze_fen(self, fen, depth=DEFAULT_DEPTH, multipv=1):
         """

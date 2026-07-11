@@ -23,6 +23,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import chess
+import chess.engine
 
 from engine_analysis import ChessCoachEngine
 from explain import explain_move_local, explain_move_via_api
@@ -33,12 +34,47 @@ DEFAULT_PORT = 8765
 class BridgeState:
     """État partagé entre le serveur HTTP et le reste du programme."""
 
-    def __init__(self, stockfish_path, explain_mode="local", on_update=None):
-        self.engine = ChessCoachEngine(stockfish_path)
+    def __init__(self, stockfish_path, explain_mode="local", on_update=None,
+                 threads=None, hash_mb=256, depth=None):
+        self.stockfish_path = stockfish_path
+        self.threads = threads
+        self.hash_mb = hash_mb
+        self.depth = depth
+        self.engine = ChessCoachEngine(stockfish_path, threads=threads, hash_mb=hash_mb)
         self.explain_mode = explain_mode
         self.on_update = on_update  # callback(lines, explanation) -> ex: overlay.update_content
         self.lock = threading.Lock()
         self.last_fen = None
+
+    def _restart_engine(self):
+        """
+        Redémarre Stockfish après un crash (processus tué, plantage interne,
+        etc.). Sans ça, une seule mort du moteur rendait TOUT le pont
+        inutilisable jusqu'au redémarrage complet du programme.
+        """
+        print("⚠ Le moteur Stockfish semble avoir crashé, redémarrage...")
+        try:
+            self.engine.close()
+        except Exception:
+            pass  # déjà mort, pas grave
+        self.engine = ChessCoachEngine(
+            self.stockfish_path, threads=self.threads, hash_mb=self.hash_mb
+        )
+        print("✅ Stockfish redémarré.")
+
+    def _analyze_with_auto_restart(self, fen):
+        kwargs = {"multipv": 3}
+        if self.depth is not None:
+            kwargs["depth"] = self.depth
+        try:
+            return self.engine.analyze_fen(fen, **kwargs)
+        except chess.engine.EngineError:
+            # Le moteur est mort (EngineTerminatedError et apparentés) -> on
+            # le relance et on retente UNE fois. Si ça replante, on laisse
+            # l'exception remonter : ça évite une boucle infinie si Stockfish
+            # est carrément introuvable/cassé.
+            self._restart_engine()
+            return self.engine.analyze_fen(fen, **kwargs)
 
     def handle_fen(self, fen):
         with self.lock:
@@ -48,7 +84,10 @@ class BridgeState:
                 return {"error": f"FEN invalide reçu du navigateur : {e}"}
 
             self.last_fen = fen
-            result = self.engine.analyze_fen(fen, multipv=3)
+            try:
+                result = self._analyze_with_auto_restart(fen)
+            except Exception as e:
+                return {"error": f"Moteur Stockfish indisponible : {e}"}
 
             if result.get("game_over"):
                 payload = {"game_over": True, "result": result["result"]}
@@ -132,13 +171,17 @@ def _make_handler(state: BridgeState):
     return Handler
 
 
-def start_bridge_server(stockfish_path, explain_mode="local", on_update=None, port=DEFAULT_PORT):
+def start_bridge_server(stockfish_path, explain_mode="local", on_update=None, port=DEFAULT_PORT,
+                         threads=None, hash_mb=256, depth=None):
     """
     Démarre le serveur en tâche de fond (thread daemon) et retourne
     (server, state). Appelle state.close() pour bien fermer Stockfish
     à la fin.
     """
-    state = BridgeState(stockfish_path, explain_mode=explain_mode, on_update=on_update)
+    state = BridgeState(
+        stockfish_path, explain_mode=explain_mode, on_update=on_update,
+        threads=threads, hash_mb=hash_mb, depth=depth,
+    )
     handler_cls = _make_handler(state)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
