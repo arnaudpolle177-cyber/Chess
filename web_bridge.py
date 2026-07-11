@@ -87,6 +87,12 @@ def _make_handler(state: BridgeState):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            # Requis par les navigateurs récents (Chrome/Edge) pour autoriser
+            # une page web "publique" à contacter une adresse locale
+            # (127.0.0.1) : sans ce header, la requête est bloquée en
+            # silence par le navigateur, même si le serveur répond bien à
+            # curl/Postman (règle de sécurité "Private Network Access").
+            self.send_header("Access-Control-Allow-Private-Network", "true")
 
         def do_OPTIONS(self):
             self.send_response(204)
