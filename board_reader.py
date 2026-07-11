@@ -11,7 +11,9 @@ que ça corrige) :
    références blanc/noir apprises -> détermine la COULEUR de la pièce.
 """
 import os
+import time
 import cv2
+import chess
 import numpy as np
 from capture_utils import capture_region, load_board_config
 from template_builder import (
@@ -50,10 +52,22 @@ def match_shape(mask, shape_templates):
     return best_letter, best_score
 
 
-def classify_color(brightness, color_ref):
-    """Retourne 'white' ou 'black' selon la référence de luminosité la plus proche."""
-    dist_white = abs(brightness - color_ref["white"])
-    dist_black = abs(brightness - color_ref["black"])
+def classify_color(letter, brightness, color_ref):
+    """
+    Retourne 'white' ou 'black' selon la référence de luminosité la plus
+    proche. Utilise en priorité la référence spécifique à ce TYPE de pièce
+    (plus précise : certains types de pièces ont un rendu graphique un peu
+    différent des autres dans certains sets), et retombe sur la référence
+    globale (moyenne toutes pièces confondues) si absente ou si l'ancien
+    format de color_ref est chargé (rétro-compatibilité).
+    """
+    by_piece = color_ref.get("by_piece", {})
+    ref = by_piece.get(letter)
+    if ref is None or "white" not in ref or "black" not in ref:
+        ref = color_ref  # repli sur les moyennes globales
+
+    dist_white = abs(brightness - ref["white"])
+    dist_black = abs(brightness - ref["black"])
     return "white" if dist_white <= dist_black else "black"
 
 
@@ -144,7 +158,7 @@ def read_board_to_grid():
         min_score = min(min_score, shape_score)
 
         brightness = foreground_brightness(square_img, mask)
-        color = classify_color(brightness, color_ref)
+        color = classify_color(letter, brightness, color_ref)
 
         if letter is None:
             fen_char = "."
@@ -162,6 +176,58 @@ def read_board_to_grid():
 
     debug_info = {"image": img, "squares": debug_squares}
     return grid, min_score, debug_info
+
+
+def read_board_with_retries(active_color="w", max_attempts=3, delay_seconds=0.35):
+    """
+    Capture et lit le plateau, en RÉESSAYANT automatiquement (jusqu'à
+    max_attempts fois, avec une petite pause entre les tentatives) tant que
+    la position obtenue n'est pas valide aux échecs.
+
+    Pourquoi : une capture peut tomber pile pendant l'animation de
+    glissement d'une pièce, ou juste après un clic (surlignage temporaire),
+    produisant une lecture incohérente sur UNE frame. Retenter quelques
+    centaines de ms plus tard résout la plupart de ces cas transitoires
+    sans aucune intervention de l'utilisateur.
+
+    Retourne un dict :
+    {
+        "grid": ..., "min_score": ..., "debug_info": ...,
+        "fen": ..., "board": chess.Board ou None, "valid": bool,
+        "attempts": nombre de tentatives effectuées,
+    }
+    Si toutes les tentatives échouent, retourne quand même le résultat de
+    la DERNIÈRE tentative (valid=False) pour permettre un diagnostic utile
+    (debug_info correspond à cette dernière tentative).
+    """
+    last_result = None
+
+    for attempt in range(1, max_attempts + 1):
+        grid, min_score, debug_info = read_board_to_grid()
+        fen = grid_to_fen(grid, active_color=active_color)
+
+        try:
+            board = chess.Board(fen)
+            valid = board.is_valid()
+        except ValueError:
+            # FEN structurellement invalide (ex: plus de 8 colonnes sur une
+            # rangée) -> ne devrait pas arriver vu comment grid_to_fen est
+            # construit, mais on se protège quand même.
+            board = None
+            valid = False
+
+        last_result = {
+            "grid": grid, "min_score": min_score, "debug_info": debug_info,
+            "fen": fen, "board": board, "valid": valid, "attempts": attempt,
+        }
+
+        if valid:
+            return last_result
+
+        if attempt < max_attempts:
+            time.sleep(delay_seconds)
+
+    return last_result
 
 
 def save_debug_capture(debug_info, fen_attempted, reason=""):
@@ -193,12 +259,46 @@ def save_debug_capture(debug_info, fen_attempted, reason=""):
     return debug_dir
 
 
-def grid_to_fen(grid, active_color="w", castling="KQkq", en_passant="-",
+def compute_castling_rights(grid):
+    """
+    Déduit les droits de roque encore ENVISAGEABLES à partir de la position
+    actuelle : le roi et la tour concernés doivent être sur leurs cases de
+    départ. C'est une approximation (on ne peut pas savoir depuis une
+    simple image si le roi est déjà revenu sur sa case de départ après
+    l'avoir quittée), mais elle règle un bug bien plus grave : l'ancienne
+    version indiquait TOUJOURS "KQkq" (tous les roques disponibles), ce qui
+    rendait la position INVALIDE aux yeux de python-chess dès que le roi ou
+    une tour avait bougé -> "position illisible" en boucle même quand la
+    reconnaissance visuelle était parfaite.
+    grid[0] = rang 8 (haut), grid[7] = rang 1 (bas).
+    """
+    rights = ""
+    if grid[7][4] == "K":
+        if grid[7][7] == "R":
+            rights += "K"
+        if grid[7][0] == "R":
+            rights += "Q"
+    if grid[0][4] == "k":
+        if grid[0][7] == "r":
+            rights += "k"
+        if grid[0][0] == "r":
+            rights += "q"
+    return rights if rights else "-"
+
+
+def grid_to_fen(grid, active_color="w", castling=None, en_passant="-",
                  halfmove="0", fullmove="1"):
     """
     Convertit une grille 8x8 en chaîne FEN.
     grid[0] = rang 8 (haut), grid[7] = rang 1 (bas), comme aux échecs affichés normalement.
+
+    castling=None (par défaut) -> déduit automatiquement des positions du
+    roi et des tours (voir compute_castling_rights). Passe une valeur
+    explicite pour forcer un droit de roque précis si besoin.
     """
+    if castling is None:
+        castling = compute_castling_rights(grid)
+
     fen_rows = []
     for row in grid:
         fen_row = ""

@@ -28,6 +28,7 @@ de case :
 """
 import json
 import os
+import time
 import cv2
 import numpy as np
 from capture_utils import capture_region, load_board_config
@@ -65,11 +66,13 @@ def split_into_squares(board_img):
     return squares
 
 
-# Une pièce réelle couvre typiquement entre ~8% et ~80% de la surface de
-# sa case (selon le style graphique). En dehors de cette plage : soit du
-# bruit épars, soit une teinte uniforme (surlignage du dernier coup,
-# highlight de sélection, etc.) -> on considère alors la case comme vide.
-MIN_PIECE_BLOB_RATIO = 0.08
+# Une pièce réelle couvre typiquement entre ~3% et ~80% de la surface de
+# sa case (les petites pièces comme le pion ou certains rendus du roi
+# peuvent descendre assez bas). En dehors de cette plage : soit du bruit
+# épars (quelques pixels isolés), soit une teinte uniforme (surlignage du
+# dernier coup, highlight de sélection, etc.) -> on considère alors la
+# case comme vide.
+MIN_PIECE_BLOB_RATIO = 0.03
 MAX_PIECE_BLOB_RATIO = 0.80
 
 
@@ -128,21 +131,46 @@ def compute_shape_mask(square_img, bg_img):
 
 
 def foreground_brightness(square_img, mask):
-    """Luminosité moyenne des pixels de la pièce elle-même (pas de la case)."""
+    """
+    Luminosité moyenne des pixels du COEUR de la pièce (pas de la case,
+    et pas non plus des pixels de contour). On érode le masque avant
+    l'échantillonnage pour exclure les pixels de bordure où l'anti-
+    aliasing mélange la couleur de la pièce avec celle du fond -> ces
+    pixels flous tirent la luminosité vers une valeur intermédiaire et
+    brouillent la distinction blanc/noir (une pièce blanche pouvait
+    ressortir avec une luminosité aussi basse que ~70 à cause d'eux,
+    la faisant classer à tort comme pièce noire).
+    """
     gray = cv2.cvtColor(square_img, cv2.COLOR_BGR2GRAY)
-    fg_pixels = gray[mask == 255]
+
+    kernel = np.ones((3, 3), np.uint8)
+    core_mask = cv2.erode(mask, kernel, iterations=1)
+    # Si l'érosion a tout effacé (pièce trop fine/petite), retombe sur le
+    # masque complet plutôt que de n'avoir aucun pixel à mesurer.
+    if not np.any(core_mask == 255):
+        core_mask = mask
+
+    fg_pixels = gray[core_mask == 255]
     if fg_pixels.size == 0:
         return float(gray.mean())
     return float(fg_pixels.mean())
 
 
-def build_templates_from_starting_position():
+def build_templates_from_starting_position(num_samples=3, delay_seconds=0.4):
     """
     Capture le plateau (qui doit être affiché en position de départ) et
     sauvegarde :
     - un masque de forme par type de pièce (shape_p.png ... shape_k.png)
-    - deux références de couleur (blanc/noir) dans color_ref.json
+    - des références de couleur (blanc/noir) dans color_ref.json, à la
+      fois globales et détaillées par type de pièce
     - les 2 références de case vide (empty_light.png / empty_dark.png)
+
+    num_samples > 1 : capture PLUSIEURS fois la position de départ (avec
+    une petite pause entre chaque) et fusionne les résultats. Ça lisse le
+    bruit d'une capture unique (compression, léger scintillement de rendu,
+    animation résiduelle) et donne des templates plus fiables dès le
+    départ, plutôt que de dépendre d'un seul instantané qui pourrait être
+    légèrement imparfait.
     """
     config = load_board_config()
     if config is None:
@@ -150,10 +178,10 @@ def build_templates_from_starting_position():
 
     os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
+    # --- Cases vides (claire + sombre), sur le tout premier échantillon ---
     img = capture_region(config)
     squares = split_into_squares(img)
 
-    # --- Passage 1 : cases vides (claire + sombre) ---
     empty_bg = {}
     for (row, col), square_img in squares.items():
         if STARTING_POSITION[row][col] != ".":
@@ -169,37 +197,47 @@ def build_templates_from_starting_position():
             "Vérifie la calibration."
         )
 
-    # --- Passage 2 : masques de forme (fusionnés sur toutes les occurrences) ---
+    # --- Masques de forme + luminosités, fusionnés sur tous les échantillons ---
     shape_masks = {letter: None for letter in PIECE_LETTERS}
     brightness_white, brightness_black = [], []
+    brightness_by_piece = {letter: {"white": [], "black": []} for letter in PIECE_LETTERS}
     seen_letters = set()
 
-    for (row, col), square_img in squares.items():
-        piece = STARTING_POSITION[row][col]
-        if piece == ".":
-            continue
+    for sample_idx in range(num_samples):
+        sample_img = img if sample_idx == 0 else capture_region(config)
+        sample_squares = split_into_squares(sample_img)
 
-        color_key = "light" if (row + col) % 2 == 0 else "dark"
-        mask, blob_ratio, _ = compute_shape_mask(square_img, empty_bg[color_key])
-        letter = piece.lower()
+        for (row, col), square_img in sample_squares.items():
+            piece = STARTING_POSITION[row][col]
+            if piece == ".":
+                continue
 
-        if shape_masks[letter] is None:
-            shape_masks[letter] = mask
-        else:
-            # Fusionne avec l'occurrence précédente (ex: 2e tour, sur
-            # l'autre couleur de case) -> masque plus robuste, moins
-            # sensible aux artefacts de bord d'une seule capture.
-            prev = shape_masks[letter]
-            prev_resized = cv2.resize(prev, (mask.shape[1], mask.shape[0]))
-            shape_masks[letter] = cv2.bitwise_or(prev_resized, mask)
+            color_key = "light" if (row + col) % 2 == 0 else "dark"
+            mask, blob_ratio, _ = compute_shape_mask(square_img, empty_bg[color_key])
+            letter = piece.lower()
 
-        brightness = foreground_brightness(square_img, mask)
-        if piece.isupper():
-            brightness_white.append(brightness)
-        else:
-            brightness_black.append(brightness)
+            if shape_masks[letter] is None:
+                shape_masks[letter] = mask
+            else:
+                # Fusionne avec toutes les occurrences précédentes (couleur
+                # de case différente ET/OU échantillon différent) -> masque
+                # plus robuste, moins sensible aux artefacts d'une capture.
+                prev = shape_masks[letter]
+                prev_resized = cv2.resize(prev, (mask.shape[1], mask.shape[0]))
+                shape_masks[letter] = cv2.bitwise_or(prev_resized, mask)
 
-        seen_letters.add(letter)
+            brightness = foreground_brightness(square_img, mask)
+            color_key_piece = "white" if piece.isupper() else "black"
+            brightness_by_piece[letter][color_key_piece].append(brightness)
+            if piece.isupper():
+                brightness_white.append(brightness)
+            else:
+                brightness_black.append(brightness)
+
+            seen_letters.add(letter)
+
+        if sample_idx < num_samples - 1:
+            time.sleep(delay_seconds)
 
     missing = set(PIECE_LETTERS) - seen_letters
     if missing:
@@ -214,9 +252,23 @@ def build_templates_from_starting_position():
         cv2.imwrite(path, mask)
         saved_paths.append(path)
 
+    by_piece_ref = {}
+    for letter, values in brightness_by_piece.items():
+        if values["white"] and values["black"]:
+            by_piece_ref[letter] = {
+                "white": sum(values["white"]) / len(values["white"]),
+                "black": sum(values["black"]) / len(values["black"]),
+            }
+        # Le roi et la dame n'ont qu'une seule couleur possible chacun côté
+        # départ (impossible d'avoir 2 dames blanches en position de
+        # départ) -> pas de référence par-pièce fiable pour eux, ils
+        # utiliseront le repli sur la référence globale (classify_color
+        # gère ça automatiquement).
+
     color_ref = {
         "white": sum(brightness_white) / len(brightness_white),
         "black": sum(brightness_black) / len(brightness_black),
+        "by_piece": by_piece_ref,
     }
     with open(COLOR_REF_PATH, "w") as f:
         json.dump(color_ref, f)

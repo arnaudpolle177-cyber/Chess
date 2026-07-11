@@ -22,7 +22,7 @@ import chess
 
 from capture_utils import run_calibration, load_board_config
 from template_builder import build_templates_from_starting_position, load_templates
-from board_reader import read_board_to_grid, grid_to_fen, save_debug_capture
+from board_reader import read_board_with_retries, save_debug_capture
 from engine_analysis import ChessCoachEngine
 from explain import explain_move_local, explain_move_via_api
 from overlay_ui import CoachOverlay
@@ -65,17 +65,21 @@ class CoachApp:
 
     def _run_one_analysis(self):
         try:
-            grid, min_score, debug_info = read_board_to_grid()
-            fen = grid_to_fen(grid, active_color=self.active_color)
-            board = chess.Board(fen)
+            result = read_board_with_retries(active_color=self.active_color, max_attempts=3)
+            grid = result["grid"]
+            min_score = result["min_score"]
+            debug_info = result["debug_info"]
+            fen = result["fen"]
+            board = result["board"]
 
-            if not board.is_valid():
+            if not result["valid"]:
                 debug_dir = save_debug_capture(
-                    debug_info, fen, reason="Position invalide"
+                    debug_info, fen,
+                    reason=f"Position invalide (après {result['attempts']} tentatives)"
                 )
                 self.overlay.show_error(
-                    "Position illisible ou invalide (vérifie la calibration / "
-                    "que le plateau est bien visible).\n"
+                    f"Position illisible ou invalide, même après {result['attempts']} "
+                    "tentatives (vérifie la calibration / que le plateau est bien visible).\n"
                     f"Détails sauvegardés dans : {debug_dir}"
                 )
                 return
@@ -225,6 +229,8 @@ def main():
             print("⚠ Aucune calibration trouvée, lance d'abord: python main.py --calibrate")
             return
         print("Assure-toi que le plateau affiche la position de DÉPART, puis appuie sur Entrée.")
+        print("(3 captures successives seront prises avec une petite pause entre chaque, "
+              "pour un apprentissage plus fiable — ne touche pas au plateau entre-temps.)")
         input()
         paths = build_templates_from_starting_position()
         print(f"✅ {len(paths)} templates de pièces sauvegardés.")
