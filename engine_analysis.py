@@ -6,12 +6,18 @@ import os
 import chess
 import chess.engine
 
-# Profondeur par défaut. Stockfish moderne (NNUE) atteint facilement
-# 20-25+ en 1-2 secondes dès qu'il a plusieurs threads + un peu de mémoire
-# (voir configure() ci-dessous) -- une profondeur plus haute = coups
-# tactiques complexes mieux vus, donc force réelle plus proche du plein
-# potentiel de Stockfish (largement au-dessus de 3000 Elo).
+# Profondeur par défaut pour le mode capture d'écran classique (une seule
+# analyse par position, pas de flèches progressives). Stockfish moderne
+# (NNUE) atteint facilement 20-25+ en 1-2 secondes dès qu'il a plusieurs
+# threads + un peu de mémoire (voir configure() ci-dessous).
 DEFAULT_DEPTH = 20
+
+# Paliers de profondeur par défaut pour le mode "3 flèches progressives"
+# (vert/bleu/rouge), utilisé en mode navigateur (web_bridge.py). Un seul
+# passage Stockfish (approfondissement itératif natif) suffit à produire
+# les trois -- pas besoin de relancer l'analyse 3 fois, ce qui serait 3x
+# plus lent pour rien.
+PROGRESSIVE_DEPTHS = (10, 15, 20)
 
 
 class ChessCoachEngine:
@@ -29,6 +35,61 @@ class ChessCoachEngine:
             self.engine.configure({"Threads": threads, "Hash": hash_mb})
         except chess.engine.EngineError as e:
             print(f"⚠ Impossible de configurer Threads/Hash sur ce Stockfish : {e}")
+
+    def analyze_fen_progressive(self, fen, depths=PROGRESSIVE_DEPTHS):
+        """
+        Générateur : analyse la position en UN SEUL passage Stockfish
+        (approfondissement itératif natif -- Stockfish calcule déjà depth 1,
+        2, 3... jusqu'à la profondeur max en interne), et yield un résultat
+        dès que chaque palier demandé (ex: 10, 15, 20) est atteint.
+
+        Chaque élément produit : {"depth", "move_uci", "move_san", "score",
+        "pv_san"}. Si la partie est déjà terminée, yield un seul
+        {"game_over": True, "result": ...} et s'arrête.
+        """
+        board = chess.Board(fen)
+        if board.is_game_over():
+            yield {"game_over": True, "result": board.result()}
+            return
+
+        targets = sorted(set(depths))
+        max_depth = targets[-1]
+        next_idx = 0
+
+        # engine.analysis() (et non analyse()) : mode streaming, donne accès
+        # à l'info UCI à CHAQUE profondeur traversée pendant la recherche,
+        # sans jamais relancer le calcul depuis zéro.
+        with self.engine.analysis(board, chess.engine.Limit(depth=max_depth)) as analysis:
+            for info in analysis:
+                depth = info.get("depth")
+                pv = info.get("pv")
+                if depth is None or not pv:
+                    continue
+                # Une même profondeur peut être re-signalée (mise à jour de
+                # la meilleure ligne) -- on ne yield qu'au moment où on
+                # dépasse (ou atteint) le prochain palier demandé.
+                while next_idx < len(targets) and depth >= targets[next_idx]:
+                    yield self._format_progressive_entry(board, info, targets[next_idx])
+                    next_idx += 1
+                if next_idx >= len(targets):
+                    break  # les 3 paliers sont produits, pas la peine de continuer la recherche
+
+    def _format_progressive_entry(self, board, info, depth_label):
+        pv = info["pv"]
+        score_str = self._format_score(info["score"], board.turn)
+        pv_san = []
+        tmp_board = board.copy()
+        for mv in pv[:6]:
+            pv_san.append(tmp_board.san(mv))
+            tmp_board.push(mv)
+        return {
+            "game_over": False,
+            "depth": depth_label,
+            "move_uci": pv[0].uci(),
+            "move_san": board.san(pv[0]),
+            "score": score_str,
+            "pv_san": pv_san,
+        }
 
     def analyze_fen(self, fen, depth=DEFAULT_DEPTH, multipv=1):
         """

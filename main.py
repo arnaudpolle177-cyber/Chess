@@ -178,8 +178,8 @@ class BrowserBridgeApp:
 
     def __init__(self, stockfish_path, explain_mode, port, threads=None, hash_mb=256, depth=None):
         self.overlay = CoachOverlay(
-            on_refresh_click=lambda: None,  # rien à rafraîchir manuellement : c'est le JS qui pousse les mises à jour
-            on_toggle_side_click=lambda: None,
+            on_refresh_click=self.trigger_refresh,
+            on_toggle_side_click=self.toggle_side,
             board_region=None,  # pas d'overlay bureau : les flèches sont dessinées dans la page
         )
         self.server = None
@@ -190,6 +190,26 @@ class BrowserBridgeApp:
         self.threads = threads
         self.hash_mb = hash_mb
         self.depth = depth
+
+    def trigger_refresh(self):
+        if self.state:
+            self.state.refresh_last()
+
+    def toggle_side(self):
+        if not self.state:
+            return
+        new_side = "b" if self.state.my_side == "w" else "w"
+        self.state.set_my_side(new_side)
+        camp = "Blancs" if new_side == "w" else "Noirs"
+        self.overlay.explanation_text.delete("1.0", "end")
+        self.overlay.explanation_text.insert("1.0", f"Camp actif : {camp}. En attente du prochain coup...")
+        # Ré-évalue la dernière position connue avec le nouveau camp actif
+        # (filtre normal) : affiche les flèches si c'est effectivement au
+        # tour de ce camp, sinon le message "au tour de l'adversaire" --
+        # plutôt que d'attendre le prochain coup joué.
+        if self.state.last_fen is not None:
+            for _ in self.state.handle_fen_stream(self.state.last_fen):
+                pass
 
     def run(self):
         from web_bridge import start_bridge_server
@@ -206,7 +226,9 @@ class BrowserBridgeApp:
             "1.0",
             f"En attente de ton site...\n\n"
             f"Vérifie que chess_coach_bridge.js est bien chargé sur ta page "
-            f"de jeu (port {self.port})."
+            f"de jeu (port {self.port}).\n\n"
+            f"Camp actif : Blancs. Utilise \u2194 Changer de camp si tu joues "
+            f"les Noirs."
         )
         try:
             self.overlay.run()

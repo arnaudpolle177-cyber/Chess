@@ -1,8 +1,8 @@
 """
 web_bridge.py
 Pont HTTP local entre ton site web (qui lit le plateau directement dans le
-DOM en JavaScript, voir chess_coach_bridge.js) et le moteur Stockfish côté
-Python.
+DOM en JavaScript, voir chess_coach_bridge.user.js) et le moteur Stockfish
+côté Python.
 
 Remplace complètement la capture d'écran + reconnaissance d'image : le
 navigateur connaît déjà la position exacte (c'est lui qui l'affiche), donc
@@ -11,12 +11,16 @@ il n'y a plus aucune erreur de reconnaissance possible.
 Fonctionnement :
 - Le JS de ta page fait un POST http://127.0.0.1:8765/fen avec {"fen": "..."}
   à chaque coup joué (le sien ou celui de l'adversaire).
-- Ce serveur interroge Stockfish (multipv=3) et répond en JSON avec les 3
-  meilleurs coups + une explication en langage clair pour le meilleur.
-- Le JS utilise cette réponse pour dessiner des flèches directement sur
-  l'échiquier de la page.
-- En parallèle, si demandé, le résultat est aussi transmis à la petite
-  fenêtre Tkinter existante (texte + explication), pour avoir les deux.
+- Ce serveur interroge Stockfish en streaming (un seul passage
+  d'approfondissement itératif) et répond en NDJSON (une ligne JSON par
+  palier de profondeur atteint : 10, puis 15, puis 20 par défaut), au fil de
+  l'eau plutôt que d'attendre la fin complète de l'analyse.
+- Le JS utilise chaque ligne pour dessiner/mettre à jour la flèche
+  correspondante (vert = depth 10, bleu = depth 15, rouge = depth 20).
+- Si ce n'est pas le tour du camp choisi ("Changer de camp" dans la fenêtre
+  Python), on ne calcule/n'affiche rien pour l'adversaire.
+- En parallèle, le dernier résultat (profondeur max atteinte) est aussi
+  transmis à la petite fenêtre Tkinter existante (texte + explication).
 """
 import json
 import threading
@@ -25,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import chess
 import chess.engine
 
-from engine_analysis import ChessCoachEngine
+from engine_analysis import ChessCoachEngine, PROGRESSIVE_DEPTHS
 from explain import explain_move_local, explain_move_via_api
 
 DEFAULT_PORT = 8765
@@ -39,12 +43,25 @@ class BridgeState:
         self.stockfish_path = stockfish_path
         self.threads = threads
         self.hash_mb = hash_mb
-        self.depth = depth
+        # Si --depth est passé explicitement en CLI, on retombe sur un seul
+        # palier (comportement classique, 1 seule flèche). Sinon, mode
+        # progressif par défaut (10/15/20).
+        self.depths = (depth,) if depth is not None else PROGRESSIVE_DEPTHS
         self.engine = ChessCoachEngine(stockfish_path, threads=threads, hash_mb=hash_mb)
         self.explain_mode = explain_mode
         self.on_update = on_update  # callback(lines, explanation) -> ex: overlay.update_content
         self.lock = threading.Lock()
         self.last_fen = None
+        # Camp pour lequel on veut des conseils ("w" ou "b"). Quand ce n'est
+        # pas le tour de ce camp, on ignore l'analyse (pas la peine de
+        # montrer les meilleurs coups pour l'adversaire, ni de solliciter
+        # Stockfish pour rien).
+        self.my_side = "w"
+
+    def set_my_side(self, side):
+        """side: 'w' ou 'b'."""
+        with self.lock:
+            self.my_side = side
 
     def _restart_engine(self):
         """
@@ -62,54 +79,93 @@ class BridgeState:
         )
         print("✅ Stockfish redémarré.")
 
-    def _analyze_with_auto_restart(self, fen):
-        kwargs = {"multipv": 3}
-        if self.depth is not None:
-            kwargs["depth"] = self.depth
+    def _progressive_with_auto_restart(self, fen):
+        """
+        Générateur : comme analyze_fen_progressive, mais relance Stockfish
+        UNE fois et reprend l'analyse depuis le début si le moteur meurt en
+        cours de route (EngineError). Si ça replante une 2e fois, laisse
+        l'exception remonter (pas de boucle infinie si Stockfish est
+        introuvable/cassé).
+        """
         try:
-            return self.engine.analyze_fen(fen, **kwargs)
+            yield from self.engine.analyze_fen_progressive(fen, depths=self.depths)
         except chess.engine.EngineError:
-            # Le moteur est mort (EngineTerminatedError et apparentés) -> on
-            # le relance et on retente UNE fois. Si ça replante, on laisse
-            # l'exception remonter : ça évite une boucle infinie si Stockfish
-            # est carrément introuvable/cassé.
             self._restart_engine()
-            return self.engine.analyze_fen(fen, **kwargs)
+            yield from self.engine.analyze_fen_progressive(fen, depths=self.depths)
 
-    def handle_fen(self, fen):
+    def handle_fen_stream(self, fen):
+        """
+        Générateur consommé par le serveur HTTP pour écrire la réponse au
+        fil de l'eau (NDJSON, une ligne JSON par item produit) :
+        - soit un seul message {"error": ...}
+        - soit un seul message {"game_over": True, "result": ...}
+        - soit un seul message {"skip": True} (pas le tour du camp choisi)
+        - soit une série de messages {"depth": 10/15/20, "move_uci": ...,
+          "move_san": ..., "score": ..., "pv_san": [...]}
+        """
         with self.lock:
             try:
                 board = chess.Board(fen)
             except ValueError as e:
-                return {"error": f"FEN invalide reçu du navigateur : {e}"}
+                yield {"error": f"FEN invalide reçu du navigateur : {e}"}
+                return
 
             self.last_fen = fen
-            try:
-                result = self._analyze_with_auto_restart(fen)
-            except Exception as e:
-                return {"error": f"Moteur Stockfish indisponible : {e}"}
 
-            if result.get("game_over"):
-                payload = {"game_over": True, "result": result["result"]}
+            side_to_move = "w" if board.turn else "b"
+            if side_to_move != self.my_side:
+                # Pas mon tour : on ne calcule/n'affiche rien pour le camp
+                # adverse. last_fen reste stocké pour le bouton "Rafraîchir".
                 if self.on_update:
-                    self.on_update(None, f"Partie terminée : {result['result']}")
-                return payload
+                    camp = "Blancs" if self.my_side == "w" else "Noirs"
+                    self.on_update(None, f"Au tour de l'adversaire (tu joues les {camp}).")
+                yield {"skip": True}
+                return
 
-            lines = result["lines"]
-            best = lines[0]
+            if board.is_game_over():
+                if self.on_update:
+                    self.on_update(None, f"Partie terminée : {board.result()}")
+                yield {"game_over": True, "result": board.result()}
+                return
 
-            if self.explain_mode == "api":
-                explanation = explain_move_via_api(
-                    fen, best["move_san"], best["pv_san"], best["score"]
-                )
-            else:
-                move_obj = chess.Move.from_uci(best["move_uci"])
-                explanation = explain_move_local(board, move_obj, best["pv_san"])
+            try:
+                deepest_seen = None
+                for entry in self._progressive_with_auto_restart(fen):
+                    deepest_seen = entry
+                    yield entry
+            except Exception as e:
+                yield {"error": f"Moteur Stockfish indisponible : {e}"}
+                return
 
+            # Une fois le palier le plus profond atteint, on calcule
+            # l'explication en langage clair et on met à jour la fenêtre
+            # Tkinter (une seule fois, pas à chaque palier -- inutile de
+            # regénérer l'explication 3 fois pour la même position).
+            if deepest_seen is not None:
+                move_obj = chess.Move.from_uci(deepest_seen["move_uci"])
+                if self.explain_mode == "api":
+                    explanation = explain_move_via_api(
+                        fen, deepest_seen["move_san"], deepest_seen["pv_san"], deepest_seen["score"]
+                    )
+                else:
+                    explanation = explain_move_local(board, move_obj, deepest_seen["pv_san"])
+
+                if self.on_update:
+                    self.on_update([deepest_seen], explanation)
+
+    def refresh_last(self):
+        """
+        Relance l'analyse sur la dernière position reçue (utilisé par le
+        bouton "Rafraîchir"). Ne renvoie rien au navigateur (c'est un
+        rafraîchissement de la fenêtre Tkinter uniquement) : on consomme le
+        générateur nous-mêmes pour que on_update soit appelé.
+        """
+        if self.last_fen is None:
             if self.on_update:
-                self.on_update(lines, explanation)
-
-            return {"game_over": False, "lines": lines, "explanation": explanation}
+                self.on_update(None, "Aucune position reçue pour l'instant depuis ton site.")
+            return
+        for _ in self.handle_fen_stream(self.last_fen):
+            pass
 
     def close(self):
         try:
@@ -151,19 +207,51 @@ def _make_handler(state: BridgeState):
                 data = json.loads(body)
                 fen = data["fen"]
             except Exception:
-                self.send_response(400)
-                self._cors_headers()
-                self.end_headers()
-                self.wfile.write(b'{"error": "JSON invalide, champ \\"fen\\" attendu"}')
+                self._send_single(400, {"error": "JSON invalide, champ \"fen\" attendu"})
                 return
 
-            result = state.handle_fen(fen)
+            self._stream(state.handle_fen_stream(fen))
 
-            self.send_response(200)
-            self._cors_headers()
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(result).encode("utf-8"))
+        def _send_single(self, status, payload):
+            """Réponse classique en un seul bloc (utilisée pour les erreurs de requête)."""
+            try:
+                self.send_response(status)
+                self._cors_headers()
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode("utf-8"))
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass
+
+        def _stream(self, generator):
+            """
+            Écrit chaque item du générateur comme une ligne JSON (NDJSON),
+            au fil de l'eau. Pas de Content-Length (on ne connaît pas la
+            taille finale à l'avance) : on ferme la connexion à la fin pour
+            signaler la fin des données au navigateur.
+            """
+            try:
+                self.send_response(200)
+                self._cors_headers()
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.close_connection = True
+                self.end_headers()
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                generator.close()
+                return
+
+            for payload in generator:
+                try:
+                    self.wfile.write((json.dumps(payload) + "\n").encode("utf-8"))
+                    self.wfile.flush()
+                except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                    # Le navigateur a fermé la connexion en cours de route
+                    # (ex: nouveau coup joué avant la fin de l'analyse, ou
+                    # timeout côté client) -> on arrête le générateur, ce qui
+                    # interrompt Stockfish en cours plutôt que de continuer à
+                    # calculer pour rien.
+                    generator.close()
+                    return
 
         def log_message(self, format, *args):
             pass  # silence les logs HTTP dans la console
@@ -187,6 +275,5 @@ def start_bridge_server(stockfish_path, explain_mode="local", on_update=None, po
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     print(f"🌉 Pont navigateur démarré : http://127.0.0.1:{port}/fen")
-    print("   Colle chess_coach_bridge.js dans ta page (ou via une extension "
-          "type Tampermonkey) pour connecter ton site.")
+    print("   Colle chess_coach_bridge.user.js dans Tampermonkey pour connecter ton site.")
     return server, state
