@@ -18,6 +18,43 @@ import sys
 import threading
 import time
 
+
+def _make_process_dpi_aware():
+    """
+    CORRECTIF IMPORTANT : sous Windows, si l'affichage utilise une mise à
+    l'échelle (125%, 150%... très courant sur les laptops), Tkinter et mss
+    ne comptent pas les pixels de la même façon par défaut. Résultat : le
+    rectangle dessiné pendant la calibration (via Tkinter) ne correspond
+    plus exactement à la zone réellement capturée ensuite (via mss), avec
+    un décalage qui s'accumule en s'éloignant du point d'ancrage -> le haut
+    du plateau peut sembler à peu près bon tandis que le bas capture autre
+    chose (fond de page, autre élément de l'interface).
+
+    En rendant le PROCESSUS "DPI-aware" avant de créer la moindre fenêtre,
+    Windows arrête de mentir à Tkinter sur la taille de l'écran, et les
+    deux outils (Tkinter et mss) travaillent enfin dans le même référentiel
+    de pixels physiques. Doit être appelé tout en haut du programme, avant
+    tout import/usage de tkinter.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        # PROCESS_PER_MONITOR_DPI_AWARE (2) : le plus précis, gère aussi le
+        # cas de plusieurs écrans avec des échelles différentes.
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            # Repli pour les versions de Windows plus anciennes
+            # (Windows 7/8 sans shcore.dll).
+            import ctypes
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass  # tant pis, on continue sans (mieux qu'un crash)
+
+
+_make_process_dpi_aware()
+
 import chess
 
 from capture_utils import run_calibration, load_board_config
