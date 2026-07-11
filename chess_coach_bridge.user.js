@@ -6,6 +6,7 @@
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
 // @connect      127.0.0.1
+// @connect      localhost
 // @run-at       document-idle
 // ==/UserScript==
 /*
@@ -149,13 +150,29 @@
 
   function buildFen() {
     const els = getBoardElements();
-    if (!els) return null;
-    const { grid } = readGrid(els);
+    if (!els) {
+      console.warn("Coach d'échecs : éléments cg-wrap/cg-container/cg-board introuvables sur cette page.");
+      return null;
+    }
+    const { grid, isWhiteOrientation, squareSize, size } = readGrid(els);
+    const piecesFound = grid.flat().filter((c) => c !== ".").length;
     const boardPart = gridToFenBoardPart(grid);
     const turn = getSideToMove();
-    // Roques/en-passant non trackés ici -> valeurs par défaut (léger impact
-    // sur l'analyse dans de rares situations de fin de partie/roque).
-    return `${boardPart} ${turn} KQkq - 0 1`;
+    const fen = `${boardPart} ${turn} KQkq - 0 1`;
+
+    console.log(
+      `Coach d'échecs [debug] : ${piecesFound} pièce(s) détectée(s), ` +
+      `orientation=${isWhiteOrientation ? "blanc" : "noir"}, ` +
+      `taille plateau=${size}px, taille case=${squareSize}px\nFEN : ${fen}`
+    );
+    if (piecesFound < 4) {
+      console.warn(
+        "Coach d'échecs : très peu de pièces détectées, la lecture du plateau semble incorrecte. " +
+        "Regarde la grille ci-dessous pour comprendre le problème :", grid
+      );
+    }
+
+    return fen;
   }
 
   // ---------------------------------------------------------------------
@@ -312,11 +329,18 @@
   // ---------------------------------------------------------------------
 
   function onBoardChanged() {
+    if (countPieces() === 0) return; // état transitoire probable, on retente au prochain tick
     const fen = buildFen();
     if (!fen || fen === lastSentFen) return;
     lastSentFen = fen;
     localTurnToggle = localTurnToggle === "w" ? "b" : "w"; // pour le prochain coup, si pas de hook custom
     sendFenToCoach(fen);
+  }
+
+  function countPieces() {
+    const els = getBoardElements();
+    if (!els) return 0;
+    return els.board.querySelectorAll("piece").length;
   }
 
   function startWatching() {
@@ -326,14 +350,13 @@
       setTimeout(startWatching, 500);
       return;
     }
-    const observer = new MutationObserver(() => {
-      clearTimeout(startWatching._debounce);
-      startWatching._debounce = setTimeout(onBoardChanged, 150);
-    });
-    observer.observe(els.board, { attributes: true, subtree: true, attributeFilter: ["style"] });
-
     console.log("♟ Coach d'échecs connecté : lecture directe du plateau (aucune capture d'écran).");
-    onBoardChanged(); // première analyse immédiate au chargement
+    // Vérification périodique plutôt qu'un MutationObserver : plus simple
+    // et insensible aux cas où le site remplace/redessine entièrement le
+    // plateau entre deux coups (ce qui pouvait faire rater une mise à jour
+    // avec l'ancienne approche basée sur les mutations DOM).
+    setInterval(onBoardChanged, 700);
+    onBoardChanged(); // première tentative immédiate
   }
 
   startWatching();
