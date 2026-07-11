@@ -33,7 +33,6 @@ class ChessCoachEngine:
         lines = []
         for entry in info:
             pv = entry.get("pv", [])
-            score = entry["score"].white() if board.turn == chess.WHITE else entry["score"].black()
             score_str = self._format_score(entry["score"], board.turn)
 
             pv_san = []

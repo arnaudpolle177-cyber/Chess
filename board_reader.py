@@ -14,7 +14,6 @@ import os
 import time
 import cv2
 import chess
-import numpy as np
 from capture_utils import capture_region, load_board_config
 from template_builder import (
     split_into_squares,
@@ -23,8 +22,6 @@ from template_builder import (
     compute_shape_mask,
     foreground_brightness,
     PIECE_LETTERS,
-    MIN_PIECE_BLOB_RATIO,
-    MAX_PIECE_BLOB_RATIO,
 )
 
 # Si la différence moyenne avec la case vide de référence est en-dessous de
@@ -238,7 +235,6 @@ def save_debug_capture(debug_info, fen_attempted, reason=""):
     été mal reconnu, au lieu de deviner à l'aveugle.
     """
     import json
-    import time
     from app_paths import get_base_dir
 
     debug_dir = os.path.join(get_base_dir(), "debug_captures")
