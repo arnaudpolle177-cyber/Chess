@@ -148,11 +148,31 @@ class ChessCoachEngine:
         beaucoup plus sûr que de basculer LimitStrength ON/OFF à chaque
         appel sur le moteur PRINCIPAL (voir suggest_move ci-dessous et le
         commentaire dans web_bridge.py, _init_elo_advisor).
+
+        IMPORTANT : UCI_LimitStrength / UCI_Elo sont des extensions
+        PROPRES À STOCKFISH, pas des options UCI standard -- la plupart des
+        autres moteurs (Berserk, Ethereal, etc.) ne les ont pas du tout. Si
+        ce moteur ne les supporte pas, on le détecte ICI, une seule fois,
+        et on désactive proprement le conseiller Elo pour le reste de la
+        session (self.elo_advisor_supported = False) -- sans ça,
+        suggest_move() aurait échoué à CHAQUE position, provoquant un
+        redémarrage du processus moteur en boucle continue pendant toute
+        la partie (observé en pratique : ça semble aussi avoir déstabilisé
+        le moteur principal, probablement par épuisement de ressources).
         """
+        self.elo_advisor_supported = "UCI_LimitStrength" in self.engine.options
+        if not self.elo_advisor_supported:
+            print(
+                "ℹ Ce moteur ne supporte pas UCI_LimitStrength/UCI_Elo (spécifique à Stockfish) -- "
+                "le conseiller Elo est désactivé pour cette session. Les profils \"populaire\"/"
+                "\"classique\" fonctionnent quand même, juste sans ce signal en plus."
+            )
+            return
         try:
             self.engine.configure({"Threads": 1, "Hash": 16, "UCI_LimitStrength": True})
         except chess.engine.EngineError as e:
             print(f"⚠ Impossible de configurer le moteur 'conseiller Elo' : {e}")
+            self.elo_advisor_supported = False
 
     def suggest_move(self, fen, elo, movetime_ms=150):
         """
@@ -164,7 +184,12 @@ class ChessCoachEngine:
         PRINCIPAL, potentiellement pendant qu'une autre recherche vient
         juste de se terminer dessus, pouvait corrompre son état interne et
         provoquer un vrai crash natif de Stockfish).
+
+        Retourne None immédiatement (sans rien tenter) si ce moteur ne
+        supporte pas UCI_Elo -- voir configure_as_elo_advisor().
         """
+        if not getattr(self, "elo_advisor_supported", True):
+            return None
         self.engine.configure({"UCI_Elo": max(1320, min(3190, elo))})
         info = self.engine.analyse(chess.Board(fen), chess.engine.Limit(time=movetime_ms / 1000))
         pv = info.get("pv")
