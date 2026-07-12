@@ -12,9 +12,11 @@ que ça corrige) :
 """
 import os
 import time
+import json
 import cv2
 import chess
 from capture_utils import capture_region, load_board_config
+from app_paths import get_base_dir
 from template_builder import (
     split_into_squares,
     load_templates,
@@ -234,9 +236,6 @@ def save_debug_capture(debug_info, fen_attempted, reason=""):
     position lue est invalide, pour pouvoir comprendre après coup ce qui a
     été mal reconnu, au lieu de deviner à l'aveugle.
     """
-    import json
-    from app_paths import get_base_dir
-
     debug_dir = os.path.join(get_base_dir(), "debug_captures")
     os.makedirs(debug_dir, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")

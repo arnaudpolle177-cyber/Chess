@@ -106,18 +106,35 @@ class BridgeState:
             except Exception:
                 pass  # déjà arrêtée / moteur mort -> pas grave
 
-    def _restart_engine(self):
+    def _restart_engine(self, reason=""):
         """
         Redémarre Stockfish après un crash (processus tué, plantage interne,
         etc.). Sans ça, une seule mort du moteur rendait TOUT le pont
         inutilisable jusqu'au redémarrage complet du programme.
+
+        IMPORTANT (perf) : cette méthode est appelée DEPUIS L'INTÉRIEUR de
+        engine_lock (voir _progressive_with_auto_restart). Fermer proprement
+        l'ancien moteur (self.engine.close()) peut bloquer une dizaine de
+        secondes si le processus est déjà mort mais que la librairie attend
+        quand même une réponse UCI avant d'abandonner -- pendant tout ce
+        temps, engine_lock resterait tenu et TOUT le pont semblerait figé
+        (c'était la cause du freeze de ~15s après un crash). On fait donc
+        cette fermeture dans un thread séparé, SANS l'attendre : peu importe
+        qu'elle prenne du temps, ça ne bloque plus rien d'autre.
         """
-        print("⚠ Le moteur Stockfish semble avoir crashé, redémarrage...")
+        print(f"⚠ Le moteur Stockfish semble avoir crashé, redémarrage... ({reason})")
         self._clear_active_analysis()
-        try:
-            self.engine.close()
-        except Exception:
-            pass  # déjà mort, pas grave
+
+        old_engine = self.engine
+
+        def _cleanup_old_engine():
+            try:
+                old_engine.close()
+            except Exception:
+                pass  # déjà mort, pas grave -- on essaie juste par propreté
+
+        threading.Thread(target=_cleanup_old_engine, daemon=True).start()
+
         self.engine = ChessCoachEngine(
             self.stockfish_path, threads=self.threads, hash_mb=self.hash_mb
         )
@@ -136,8 +153,11 @@ class BridgeState:
             yield from self.engine.analyze_fen_progressive(
                 fen, depths=self.depths, on_analysis_started=self._register_active_analysis
             )
-        except chess.engine.EngineError:
-            self._restart_engine()
+        except chess.engine.EngineError as e:
+            # On garde la VRAIE raison (type + message de l'exception) dans
+            # les logs -- avant, le message était toujours générique et ne
+            # permettait pas de savoir POURQUOI Stockfish était mort.
+            self._restart_engine(reason=f"{type(e).__name__}: {e}")
             yield from self.engine.analyze_fen_progressive(
                 fen, depths=self.depths, on_analysis_started=self._register_active_analysis
             )
@@ -195,9 +215,23 @@ class BridgeState:
             with self.lock:
                 if my_gen != self.generation:
                     return
+
+            # IMPORTANT : générateur géré explicitement (pas juste "for entry
+            # in self._progressive_with_auto_restart(fen)") pour pouvoir
+            # appeler .close() nous-mêmes de façon garantie sur CHAQUE
+            # chemin de sortie (via le "finally" plus bas), y compris un
+            # `return` anticipé pour position obsolète. Sans ça, un `return`
+            # en plein milieu de la boucle laisse la fermeture au ramasse-
+            # miettes -- généralement rapide sur CPython, mais pas garanti,
+            # et surtout pas synchrone avec la libération d'engine_lock :
+            # Stockfish pouvait recevoir un nouveau "go" pour la position
+            # suivante avant que le "stop" de l'ancienne recherche soit
+            # vraiment traité, ce qui est une violation du protocole UCI et
+            # une cause plausible des plantages observés.
+            gen = self._progressive_with_auto_restart(fen)
             try:
                 deepest_seen = None
-                for entry in self._progressive_with_auto_restart(fen):
+                for entry in gen:
                     # Vérifié À CHAQUE palier, pas juste au début : une
                     # analyse déjà "annulée" (analysis.stop() appelé) peut
                     # continuer à produire 1-2 résultats de transition avant
@@ -215,6 +249,8 @@ class BridgeState:
             except Exception as e:
                 yield {"error": f"Moteur Stockfish indisponible : {e}"}
                 return
+            finally:
+                gen.close()
 
             # Une fois le palier le plus profond atteint, on calcule
             # l'explication en langage clair une seule fois (pas à chaque

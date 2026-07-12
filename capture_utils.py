@@ -4,6 +4,7 @@ Capture d'écran et calibration de la zone de l'échiquier.
 """
 import json
 import os
+import threading
 import numpy as np
 import mss
 import tkinter as tk
@@ -12,16 +13,26 @@ from app_paths import get_base_dir
 
 CONFIG_PATH = os.path.join(get_base_dir(), "board_config.json")
 
+# mss.mss() initialise des ressources d'affichage (coûteux) et n'est PAS
+# thread-safe si partagée entre threads -> on garde une instance mise en
+# cache PAR THREAD (thread-local), réutilisée d'un appel à l'autre au lieu
+# d'en recréer une neuve à chaque capture. Notable en mode bureau, où
+# capture_region() est appelée à répétition sur le même thread d'analyse.
+_thread_local = threading.local()
+
 
 def capture_region(region):
     """
     region: dict avec left, top, width, height
     Retourne une image numpy (BGR) de la zone capturée.
     """
-    with mss.mss() as sct:
-        shot = sct.grab(region)
-        img = np.array(shot)  # BGRA
-        return img[:, :, :3]  # on drop le canal alpha -> BGR
+    sct = getattr(_thread_local, "sct", None)
+    if sct is None:
+        sct = mss.mss()
+        _thread_local.sct = sct
+    shot = sct.grab(region)
+    img = np.array(shot)  # BGRA
+    return img[:, :, :3]  # on drop le canal alpha -> BGR
 
 
 def save_board_config(left, top, width, height):

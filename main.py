@@ -56,6 +56,7 @@ def _make_process_dpi_aware():
 _make_process_dpi_aware()
 
 import chess
+import chess.engine
 
 from capture_utils import run_calibration, load_board_config
 from template_builder import build_templates_from_starting_position, load_templates
@@ -103,6 +104,29 @@ class CoachApp:
         finally:
             self.engine.close()
 
+    def _restart_engine(self, reason=""):
+        """
+        Redémarre Stockfish après un crash (même logique que web_bridge.py,
+        voir les commentaires là-bas pour le détail). Le mode bureau n'avait
+        jusqu'ici AUCUN redémarrage automatique : un crash rendait le coach
+        inutilisable en boucle jusqu'à fermeture manuelle du programme.
+        """
+        print(f"⚠ Le moteur Stockfish semble avoir crashé, redémarrage... ({reason})")
+        old_engine = self.engine
+
+        def _cleanup_old_engine():
+            try:
+                old_engine.close()
+            except Exception:
+                pass
+
+        threading.Thread(target=_cleanup_old_engine, daemon=True).start()
+
+        self.engine = ChessCoachEngine(
+            self.stockfish_path, threads=self.threads, hash_mb=self.hash_mb
+        )
+        print("✅ Stockfish redémarré.")
+
     def _run_one_analysis(self):
         try:
             result = read_board_with_retries(active_color=self.active_color, max_attempts=3)
@@ -124,7 +148,15 @@ class CoachApp:
                 )
                 return
 
-            result = self.engine.analyze_fen(fen, depth=self.depth, multipv=3)
+            try:
+                result = self.engine.analyze_fen(fen, depth=self.depth, multipv=3)
+            except chess.engine.EngineError as e:
+                # Redémarre et retente UNE fois avant d'abandonner (même
+                # politique que le mode navigateur) plutôt que de laisser le
+                # moteur mort définitivement.
+                self._restart_engine(reason=f"{type(e).__name__}: {e}")
+                result = self.engine.analyze_fen(fen, depth=self.depth, multipv=3)
+
             if result.get("game_over"):
                 self.overlay.show_error(f"Partie terminée : {result['result']}")
                 return
@@ -340,7 +372,7 @@ def interactive_menu():
             try:
                 app = BrowserBridgeApp(
                     stockfish_path, explain_mode="local", port=8765,
-                    threads=None, hash_mb=256, depth=DEFAULT_DEPTH,
+                    threads=None, hash_mb=256, depth=None,  # None = mode progressif 10/15/20
                 )
                 app.run()
             except Exception as e:
@@ -372,13 +404,21 @@ def main():
                          help="Mémoire (Mo) pour la table de transposition Stockfish (défaut: 256)")
     args = parser.parse_args()
 
+    # Résolution pour le mode bureau (CoachApp, capture d'écran) : ce mode
+    # fait une seule analyse par position, donc a besoin d'une profondeur
+    # concrète -- jamais None.
     depth = args.depth if args.depth is not None else DEFAULT_DEPTH
 
     if args.web_bridge:
         stockfish_path = resolve_stockfish_path(args.stockfish)
         app = BrowserBridgeApp(
             stockfish_path, args.explain_mode, args.bridge_port,
-            threads=args.threads, hash_mb=args.hash_mb, depth=depth,
+            # IMPORTANT : on passe args.depth BRUT ici, pas la variable
+            # `depth` résolue ci-dessus. En mode navigateur, None déclenche
+            # le mode progressif 10/15/20 (voir BridgeState) ; le remplacer
+            # par DEFAULT_DEPTH ici désactivait ce mode en permanence, même
+            # sans jamais préciser --depth sur la ligne de commande.
+            threads=args.threads, hash_mb=args.hash_mb, depth=args.depth,
         )
         app.run()
         return
