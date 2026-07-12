@@ -40,20 +40,40 @@ jobs:
           # Berserk plutôt que Stockfish : téléchargé automatiquement à
           # chaque build (comme on le faisait avant pour Stockfish), pour
           # éviter d'avoir à committer un gros .exe dans le dépôt (GitHub
-          # bloque l'upload web au-delà de 25 Mo). avx2 : bon compromis
-          # vitesse/compatibilité pour un CPU 2013+ (Haswell/Zen ou plus
-          # récent) -- voir le README si ta machine est plus ancienne.
+          # bloque l'upload web au-delà de 25 Mo).
           api_url="https://api.github.com/repos/jhonnold/berserk/releases/latest"
-          asset_url=$(curl -s "$api_url" \
-            | grep "browser_download_url.*avx2.*\.exe" \
-            | grep -v "pext" \
-            | head -n1 \
-            | cut -d '"' -f4)
+          api_response=$(curl -s "$api_url")
+
+          echo "--- Fichiers .exe trouvés dans la dernière release Berserk ---"
+          echo "$api_response" | grep -o '"browser_download_url": *"[^"]*\.exe"' || echo "(aucun trouvé -- voir la réponse brute ci-dessous)"
+          echo "----------------------------------------------------------"
+
+          # Paliers de repli, du plus rapide (avx2, CPU 2013+) au plus
+          # compatible (baseline, tout CPU 64-bit) -- au cas où le nom
+          # exact des fichiers change d'une release à l'autre. S'arrête au
+          # premier qui matche.
+          asset_url=""
+          for pattern in "avx2.*\.exe" "ssse3.*\.exe" "x86-64.*\.exe" "\.exe\"$"; do
+            asset_url=$(echo "$api_response" \
+              | grep "browser_download_url.*${pattern}" \
+              | grep -v "pext" \
+              | head -n1 \
+              | grep -o 'https://[^"]*\.exe')
+            if [ -n "$asset_url" ]; then
+              echo "Variante retenue (motif '$pattern') : $asset_url"
+              break
+            fi
+          done
+
           if [ -z "$asset_url" ]; then
-            echo "❌ Impossible de trouver un binaire Berserk avx2 dans la dernière release."
+            echo "❌ Impossible de trouver un binaire .exe dans la dernière release Berserk."
+            echo "   Réponse brute de l'API (pour diagnostiquer) :"
+            echo "$api_response" | head -c 2000
+            echo ""
             echo "   Vérifie manuellement : https://github.com/jhonnold/berserk/releases"
             exit 1
           fi
+
           echo "Téléchargement: $asset_url"
           curl -L -o dist/stockfish.exe "$asset_url"
           echo "✅ Berserk téléchargé ($(du -h dist/stockfish.exe | cut -f1))"
