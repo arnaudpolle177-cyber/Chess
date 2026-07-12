@@ -68,6 +68,16 @@ class BridgeState:
         # chess.engine.AnalysisResult), pour pouvoir l'interrompre depuis un
         # autre thread si une position plus récente arrive.
         self.active_analysis = None
+        # Incrémenté à chaque nouvelle position prise en charge. Permet à un
+        # générateur "en retard" (dont l'analyse a été annulée mais qui n'a
+        # pas encore eu l'occasion de s'arrêter -- ex: en train d'écrire un
+        # dernier résultat au moment de l'annulation) de se rendre compte
+        # qu'il est obsolète et de s'arrêter immédiatement, SANS appeler
+        # on_depth_update ni continuer à écrire sur la connexion HTTP. Sans
+        # ça, des résultats d'une position déjà dépassée pouvaient encore
+        # arriver et écraser/mélanger l'affichage avec la position actuelle
+        # (c'était la cause du bug "seule la ligne depth 20 s'affiche").
+        self.generation = 0
 
     def set_my_side(self, side):
         """side: 'w' ou 'b'."""
@@ -153,6 +163,8 @@ class BridgeState:
         with self.lock:
             self.last_fen = fen
             my_side = self.my_side
+            self.generation += 1
+            my_gen = self.generation
 
         side_to_move = "w" if board.turn else "b"
         if side_to_move != my_side:
@@ -176,9 +188,26 @@ class BridgeState:
         self._cancel_current_analysis_if_any()
 
         with self.engine_lock:
+            # Une position ENCORE plus récente est peut-être arrivée pendant
+            # qu'on attendait le verrou moteur (plusieurs coups très rapides)
+            # -> on abandonne avant même de commencer, inutile de calculer
+            # pour une position déjà dépassée.
+            with self.lock:
+                if my_gen != self.generation:
+                    return
             try:
                 deepest_seen = None
                 for entry in self._progressive_with_auto_restart(fen):
+                    # Vérifié À CHAQUE palier, pas juste au début : une
+                    # analyse déjà "annulée" (analysis.stop() appelé) peut
+                    # continuer à produire 1-2 résultats de transition avant
+                    # de s'arrêter vraiment. Sans ce contrôle, ces résultats
+                    # obsolètes pouvaient s'afficher/se mélanger avec ceux de
+                    # la position actuelle -> c'était la cause du bug où
+                    # certaines lignes de profondeur ne s'affichaient jamais.
+                    with self.lock:
+                        if my_gen != self.generation:
+                            return
                     deepest_seen = entry
                     if self.on_depth_update:
                         self.on_depth_update(entry["depth"], dict(entry))
@@ -190,7 +219,9 @@ class BridgeState:
             # Une fois le palier le plus profond atteint, on calcule
             # l'explication en langage clair une seule fois (pas à chaque
             # palier) et on la transmet accolée à l'entrée la plus profonde.
-            if deepest_seen is not None:
+            with self.lock:
+                stale = my_gen != self.generation
+            if deepest_seen is not None and not stale:
                 move_obj = chess.Move.from_uci(deepest_seen["move_uci"])
                 if self.explain_mode == "api":
                     explanation = explain_move_via_api(
