@@ -99,6 +99,35 @@ DEFAULT_ELO_TIER = 2
 # coup, tout en restant dans la fenêtre Elo (jamais un blunder).
 DEFAULT_HUMANITY = 0.35
 
+# Probabilité (par coup, par profil) qu'une "petite inexactitude" se
+# déclenche -- pousse la cible de perte typique près du PLAFOND du niveau
+# (jamais au-delà) pour CE coup précis, plutôt que la cible habituelle plus
+# proche de l'optimal. Contrairement au mélange continu de humanity ci-
+# dessus (qui donne un style globalement "un peu imprécis" tout le temps),
+# ceci crée des MOMENTS DISTINCTS de moindre précision -- comme un vrai
+# joueur qui a des passages à vide, pas une dilution constante. Plus élevé
+# aux niveaux faibles (les joueurs moins forts ont plus souvent des
+# inexactitudes), plus rare au niveau 3. Chaque profil tire indépendamment
+# -- rien n'empêche qu'un seul des 4 arrive à ce moment-là.
+INACCURACY_CHANCE = {1: 0.30, 2: 0.20, 3: 0.10}
+
+
+def _apply_inaccuracy_roll(tier, elo_tier_id, rng):
+    """
+    Tire au sort si CE coup est une "petite inexactitude" (voir
+    INACCURACY_CHANCE). Si oui, retourne une version du niveau dont la
+    cible de perte typique est poussée près de max_eval_loss_cp -- jamais
+    au-delà, donc jamais un vrai blunder, juste un coup nettement moins
+    précis que la normale pour ce niveau.
+    """
+    chance = INACCURACY_CHANCE.get(elo_tier_id, 0.2)
+    if rng.random() >= chance:
+        return tier, False
+    boosted_typical = round(tier.max_eval_loss_cp * 0.85)
+    if boosted_typical <= tier.typical_eval_loss_cp:
+        return tier, False  # déjà proche du plafond à ce niveau (ex: niveau 3), rien à pousser de plus
+    return replace(tier, typical_eval_loss_cp=boosted_typical), True
+
 
 def compute_tightening_factor(board):
     """
@@ -297,8 +326,14 @@ def select_move(candidates, elo_tier_id, profile_id,
         return None
     tier = ELO_TIERS.get(elo_tier_id, ELO_TIERS[DEFAULT_ELO_TIER])
     tier = _tiered_for_position(tier, board)
-    eligible = _eligible_candidates(candidates, tier)
     rng = rng or random
+    # Tiré APRÈS le resserrement en position forcée : dans une position où
+    # il n'y a de toute façon presque pas de choix, il n'y a pas de vraie
+    # marge pour une "inexactitude" non plus (déjà cohérent avec
+    # compute_tightening_factor -- boosted_typical ne peut jamais dépasser
+    # le plafond, lui-même déjà resserré dans ces positions).
+    tier, is_inaccuracy = _apply_inaccuracy_roll(tier, elo_tier_id, rng)
+    eligible = _eligible_candidates(candidates, tier)
 
     if profile_id == "solid":
         scored = [(c, _score_solid(c, tier)) for c in eligible]
@@ -311,4 +346,8 @@ def select_move(candidates, elo_tier_id, profile_id,
     else:
         raise ValueError(f"Profil de jeu inconnu : {profile_id!r}")
 
-    return _softmax_pick(scored, humanity, rng)
+    chosen = _softmax_pick(scored, humanity, rng)
+    if chosen is not None:
+        chosen = dict(chosen)
+        chosen["is_inaccuracy"] = is_inaccuracy
+    return chosen
