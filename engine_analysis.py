@@ -3,6 +3,7 @@ engine_analysis.py
 Interroge Stockfish pour obtenir le meilleur coup et l'évaluation.
 """
 import os
+import time
 import chess
 import chess.engine
 
@@ -63,6 +64,7 @@ class ChessCoachEngine:
         targets = sorted(set(depths))
         max_depth = targets[-1]
         next_idx = 0
+        start_time = time.monotonic()  # [debug perf] pour mesurer le temps réel jusqu'à chaque palier
 
         # engine.analysis() (et non analyse()) : mode streaming, donne accès
         # à l'info UCI à CHAQUE profondeur traversée pendant la recherche,
@@ -79,6 +81,8 @@ class ChessCoachEngine:
                 # la meilleure ligne) -- on ne yield qu'au moment où on
                 # dépasse (ou atteint) le prochain palier demandé.
                 while next_idx < len(targets) and depth >= targets[next_idx]:
+                    elapsed = time.monotonic() - start_time  # [debug perf]
+                    print(f"[stockfish] palier {targets[next_idx]} atteint en {elapsed:.2f}s (depth réel Stockfish : {depth})")
                     yield self._format_progressive_entry(board, info, targets[next_idx])
                     next_idx += 1
                 if next_idx >= len(targets):
