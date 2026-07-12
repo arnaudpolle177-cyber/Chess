@@ -71,28 +71,21 @@ class EloTier:
 
 ELO_TIERS = {
     1: EloTier(id=1, label="1800-2200", elo_min=1800, elo_max=2200, elo_reference=2000,
-               # multipv=4 : niveau le plus rapide (depth 11-13), les 4
-               # recherches successives (voir engine_analysis.py,
-               # analyze_candidates) restent raisonnables ici.
-               multipv=4, depth_min=11, depth_max=13,
+               multipv=4, depth_min=12, depth_max=14,
                max_eval_loss_cp=90, typical_eval_loss_cp=35),
     2: EloTier(id=2, label="2300-2700", elo_min=2300, elo_max=2700, elo_reference=2500,
-               # multipv=3 (pas 4) : depth 15-17 x 4 recherches successives
-               # devenait trop lent en pratique (les recherches successives
-               # ne partagent pas leur travail, contrairement à l'ancienne
-               # recherche multi-lignes native -- voir le commentaire dans
-               # analyze_candidates). 3 reste un bon compromis vitesse/
-               # diversité à ce niveau.
-               multipv=3, depth_min=15, depth_max=17,
+               multipv=5, depth_min=16, depth_max=19,
                max_eval_loss_cp=50, typical_eval_loss_cp=18),
     3: EloTier(id=3, label="2800-3200", elo_min=2800, elo_max=3200, elo_reference=3000,
-               # multipv=2 (pas 4) : depth 18-19 est déjà le palier le plus
-               # lent par recherche individuelle -- 4 recherches
-               # successives à cette profondeur serait beaucoup trop long.
-               # 2 candidats restent suffisants pour distinguer les 4
-               # profils à ce niveau (précision déjà quasi-parfaite, la
-               # marge de tolérance Elo est de toute façon très étroite).
-               multipv=2, depth_min=18, depth_max=19,
+               # multipv=3, depth 20-22 : le mode natif (Berserk) s'est
+               # avéré rapide en pratique même à ce niveau -- les anciennes
+               # valeurs plus prudentes dataient de l'époque des recherches
+               # successives forcées (beaucoup plus lentes, abandonnées
+               # comme mode par défaut depuis). Le mode sûr (recherches
+               # successives) reste disponible en repli automatique pour
+               # les rares positions à problème -- voir web_bridge.py,
+               # _main_engine_degraded.
+               multipv=3, depth_min=20, depth_max=22,
                max_eval_loss_cp=20, typical_eval_loss_cp=6),
 }
 DEFAULT_ELO_TIER = 2
