@@ -63,17 +63,20 @@
  */
 (function () {
   const COACH_ENDPOINT = "http://127.0.0.1:8765/fen";
-  // Vert = 1er palier (rapide, moins profond), Bleu = palier intermédiaire,
-  // Rouge = palier le plus profond (le plus fiable). Doit rester cohérent
-  // avec PROGRESSIVE_DEPTHS dans engine_analysis.py (10, 15, 20 par défaut).
-  const DEPTH_STYLE = {
-    // width décroissant + opacity croissant avec la profondeur : quand les
-    // 3 profondeurs tombent d'accord sur le même coup, les 3 flèches se
-    // superposent en formant une "cible" (halo vert large et pâle, anneau
-    // bleu, cœur rose vif) au lieu que la plus large masque les autres.
-    10: { color: "#a6e3a1", width: 10, opacity: 0.35 }, // vert, halo extérieur
-    15: { color: "#89dceb", width: 6, opacity: 0.6 },   // bleu, anneau intermédiaire
-    20: { color: "#f38ba8", width: 3, opacity: 0.95 },  // rose, cœur (le plus fiable)
+  // 4 profils de jeu "humains" (voir human_profile.py côté serveur) --
+  // l'ordre ici doit rester cohérent avec human_profile.PROFILE_IDS.
+  // Le niveau Elo (slider dans la fenêtre Python) ne change PAS ces
+  // couleurs/profils : il change la fenêtre de tolérance utilisée par le
+  // serveur pour choisir CHAQUE coup, en amont de ce script.
+  const PROFILE_IDS = ["solid", "popular", "creative", "classical"];
+  const PROFILE_STYLE = {
+    // width décroissant + opacity croissant : quand plusieurs profils
+    // tombent d'accord sur le même coup, les flèches se superposent en
+    // formant une "cible" au lieu que l'une masque les autres.
+    solid:     { color: "#a6e3a1", width: 10, opacity: 0.35 }, // vert : coup solide/simple
+    popular:   { color: "#89dceb", width: 7,  opacity: 0.55 }, // bleu : coup fréquent à ce niveau
+    creative:  { color: "#f38ba8", width: 4,  opacity: 0.8 },  // rose : coup plus créatif/intuitif
+    classical: { color: "#f5f5f5", width: 2,  opacity: 1.0 },  // blanc : coup classique/naturel
   };
   const PIECE_LETTERS = { pawn: "p", knight: "n", bishop: "b", rook: "r", queen: "q", king: "k" };
 
@@ -115,7 +118,7 @@
   // POSITION EN COURS (remis à zéro à chaque nouvel envoi). Permet
   // d'afficher/mettre à jour une flèche dès qu'un palier arrive, sans
   // attendre les autres.
-  let currentDepthEntries = {};
+  let currentProfileEntries = {};
 
   // ---------------------------------------------------------------------
   // 1. Lecture du plateau (DOM chessground -> grille 8x8 -> FEN)
@@ -311,80 +314,71 @@
   // ---------------------------------------------------------------------
 
   async function sendFenToCoach(fen, boardPart) {
+    // Nouvelle position -> on repart d'un état de flèches vierge, elles
+    // seront redessinées une par une au fil des profils reçus.
+    currentProfileEntries = {};
+
+    // Une requête HTTP INDÉPENDANTE par profil (au lieu d'un seul flux
+    // streamé) : plus robuste, chaque profil arrive et s'affiche dès qu'IL
+    // est prêt, sans dépendre du support d'onprogress() du navigateur/
+    // gestionnaire d'extensions (voir le commentaire dans web_bridge.py,
+    // handle_single_profile).
+    const results = await Promise.all(
+      PROFILE_IDS.map((profileId) => sendOneProfile(fen, boardPart, profileId))
+    );
+
+    // Le succès est confirmé si AU MOINS un profil a répondu correctement
+    // -- si un seul échoue (timeout ponctuel), on ne bloque pas les autres,
+    // mais on ne verrouille la position que si on a eu au moins une réponse
+    // exploitable (voir sendOneProfile, qui pose lastSentBoardPart
+    // lui-même par profil).
+    if (results.every((ok) => !ok)) {
+      console.warn("Coach d'échecs : aucun des 4 profils n'a répondu pour cette position.");
+    }
+    inFlightBoardPart = null;
+  }
+
+  function sendOneProfile(fen, boardPart, profileId) {
     return new Promise((resolve) => {
-      // Nouvelle position -> on repart d'un état de flèches vierge, elles
-      // seront redessinées une par une au fil des paliers reçus.
-      currentDepthEntries = {};
-
-      const requestStartedAt = performance.now(); // [debug perf]
-      let processedLen = 0; // longueur de responseText déjà traitée (lignes NDJSON complètes uniquement)
-      let gotAnyEntry = false;
-
-      const processNewText = (fullText) => {
-        const newText = fullText.slice(processedLen);
-        const lastNewline = newText.lastIndexOf("\n");
-        if (lastNewline === -1) return; // pas encore de ligne complète depuis la dernière fois
-        const completeChunk = newText.slice(0, lastNewline);
-        processedLen += lastNewline + 1;
-        completeChunk.split("\n").forEach((line) => {
-          if (!line.trim()) return;
-          let payload;
-          try {
-            payload = JSON.parse(line);
-          } catch (e) {
-            console.warn("Coach d'échecs : ligne NDJSON invalide, ignorée.", e, line);
-            return;
-          }
-          gotAnyEntry = true;
-          handleCoachPayload(payload, boardPart, requestStartedAt);
-        });
-      };
-
       GM_xmlhttpRequest({
         method: "POST",
         url: COACH_ENDPOINT,
         headers: { "Content-Type": "application/json" },
-        data: JSON.stringify({ fen }),
-        // Un peu plus que le temps qu'une analyse profondeur 20 devrait
-        // raisonnablement prendre : au-delà, mieux vaut abandonner et
-        // retenter au prochain poll plutôt que de bloquer indéfiniment.
-        timeout: 25000,
-        onprogress: (response) => {
-          processNewText(response.responseText || "");
-        },
+        data: JSON.stringify({ fen, profile: profileId }),
+        // Un profil = 1 analyse MultiPV (+ un avis Elo-bridé rapide) sur
+        // une position déjà chargée : quelques secondes grand maximum.
+        timeout: 15000,
         onload: (response) => {
-          processNewText(response.responseText || ""); // traite le reliquat final
-          if (!gotAnyEntry) {
-            console.warn("Coach d'échecs : réponse vide ou invalide du serveur local.");
+          let payload;
+          try {
+            payload = JSON.parse(response.responseText || "{}");
+          } catch (e) {
+            console.warn(`Coach d'échecs : réponse invalide du serveur local pour le profil ${profileId}.`, e);
+            resolve(false);
+            return;
           }
-          inFlightBoardPart = null;
-          resolve();
+          handleCoachPayload(payload, boardPart);
+          resolve(true);
         },
         onerror: () => {
-          // Le serveur Python n'est probablement pas lancé -> pas grave, on
-          // réessaiera au prochain coup détecté. On NE verrouille PAS
-          // lastSentBoardPart : cette position n'a jamais été traitée avec
-          // succès, elle doit rester éligible à un nouvel essai.
           console.warn(
-            "Coach d'échecs : impossible de contacter le serveur local (port 8765). " +
+            `Coach d'échecs : impossible de contacter le serveur local (port 8765) pour le profil ${profileId}. ` +
             "Vérifie que le programme Python tourne bien (option 'Mode navigateur')."
           );
-          inFlightBoardPart = null;
-          resolve();
+          resolve(false);
         },
         ontimeout: () => {
-          // Timeout global : on ne verrouille pas si aucun palier n'est
-          // jamais arrivé (retenté depuis zéro au prochain poll). Si des
-          // paliers sont déjà arrivés entre-temps, ils restent affichés.
-          console.warn("Coach d'échecs : le serveur local met trop de temps à répondre.");
-          inFlightBoardPart = null;
-          resolve();
+          console.warn(`Coach d'échecs : le serveur local met trop de temps à répondre pour le profil ${profileId}.`);
+          resolve(false);
         },
       });
     });
   }
 
-  function handleCoachPayload(data, boardPart, requestStartedAt) {
+  function handleCoachPayload(data, boardPart) {
+    if (data.stale) {
+      return; // position déjà dépassée entre-temps côté serveur, rien à afficher/verrouiller
+    }
     if (data.error) {
       console.warn("Coach d'échecs :", data.error);
       clearArrows();
@@ -397,23 +391,12 @@
       // flèches à afficher pour le coup de l'adversaire.
       clearArrows();
       lastSentBoardPart = boardPart;
-    } else if (data.depth) {
-      // [debug perf] Temps écoulé côté NAVIGATEUR depuis l'envoi de la
-      // requête jusqu'à la réception de ce palier -- à comparer avec les
-      // temps "[stockfish] palier ... atteint en ..." affichés dans le
-      // terminal Python pour la MÊME position. Un gros écart entre les
-      // deux indique un problème de transmission/affichage plutôt que de
-      // calcul Stockfish.
-      const elapsed = ((performance.now() - requestStartedAt) / 1000).toFixed(2);
-      console.log(`Coach d'échecs [debug perf] : palier ${data.depth} reçu côté navigateur après ${elapsed}s`);
-      // Un palier de profondeur vient d'arriver -> on met à jour
+    } else if (data.profile) {
+      // Le résultat d'un profil vient d'arriver -> on met à jour
       // uniquement la flèche correspondante, les autres restent affichées
       // telles quelles en attendant leur propre mise à jour.
-      currentDepthEntries[data.depth] = data;
-      redrawDepthArrows();
-      // Dès le 1er palier reçu, l'envoi est un succès confirmé pour cette
-      // position (pas la peine de la retenter même si un palier plus
-      // profond arrive encore après).
+      currentProfileEntries[data.profile] = data;
+      redrawProfileArrows();
       lastSentBoardPart = boardPart;
     }
   }
@@ -435,9 +418,9 @@
       svg.style.zIndex = "9999";
 
       const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-      Object.entries(DEPTH_STYLE).forEach(([depth, style]) => {
+      Object.entries(PROFILE_STYLE).forEach(([profileId, style]) => {
         const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
-        marker.setAttribute("id", `cc-arrowhead-${depth}`);
+        marker.setAttribute("id", `cc-arrowhead-${profileId}`);
         marker.setAttribute("markerWidth", "6");
         marker.setAttribute("markerHeight", "6");
         marker.setAttribute("refX", "3");
@@ -478,7 +461,7 @@
   }
 
   function clearArrows() {
-    currentDepthEntries = {};
+    currentProfileEntries = {};
     lastDrawnMovesKey = null;
     const svg = document.getElementById("chess-coach-arrows");
     if (svg) {
@@ -486,12 +469,15 @@
     }
   }
 
-  function redrawDepthArrows() {
+  function redrawProfileArrows() {
     // Redessine TOUTES les flèches actuellement connues pour la position en
-    // cours (jusqu'à 3 : vert/bleu/rouge), à partir de currentDepthEntries.
-    // Appelé à chaque nouveau palier reçu -- pas cher (3 lignes max).
-    const depths = Object.keys(currentDepthEntries).map(Number).sort((a, b) => a - b);
-    const movesKey = JSON.stringify(depths.map((d) => `${d}:${currentDepthEntries[d].move_uci}`));
+    // cours (jusqu'à 4 : vert/bleu/rose/blanc), à partir de
+    // currentProfileEntries. Appelé à chaque nouveau profil reçu -- pas
+    // cher (4 lignes max).
+    const profileIds = Object.keys(currentProfileEntries).sort(
+      (a, b) => PROFILE_IDS.indexOf(a) - PROFILE_IDS.indexOf(b)
+    );
+    const movesKey = JSON.stringify(profileIds.map((p) => `${p}:${currentProfileEntries[p].move_uci}`));
     if (movesKey === lastDrawnMovesKey) return; // déjà affiché tel quel, rien à refaire
 
     const els = getBoardElements();
@@ -499,16 +485,16 @@
     const { isWhiteOrientation, squareSize } = readGrid(els);
     const svg = getOrCreateSvgLayer(els);
 
-    // Efface uniquement les lignes existantes (pas currentDepthEntries,
+    // Efface uniquement les lignes existantes (pas currentProfileEntries,
     // qu'on est justement en train d'utiliser pour redessiner).
     svg.querySelectorAll("line").forEach((n) => n.remove());
     lastDrawnMovesKey = movesKey;
 
-    depths.forEach((depth) => {
-      const entry = currentDepthEntries[depth];
+    profileIds.forEach((profileId) => {
+      const entry = currentProfileEntries[profileId];
       const uci = entry.move_uci;
       if (!uci) return;
-      const style = DEPTH_STYLE[depth] || { color: "#cccccc", width: 5, opacity: 0.6 };
+      const style = PROFILE_STYLE[profileId] || { color: "#cccccc", width: 5, opacity: 0.6 };
       const fromSq = uci.slice(0, 2);
       const toSq = uci.slice(2, 4);
       const from = squareToXY(fromSq, squareSize, isWhiteOrientation);
@@ -531,10 +517,11 @@
       line.setAttribute("stroke-width", style.width);
       line.setAttribute("stroke-linecap", "round");
       line.setAttribute("opacity", style.opacity);
-      line.setAttribute("marker-end", `url(#cc-arrowhead-${depth})`);
+      line.setAttribute("marker-end", `url(#cc-arrowhead-${profileId})`);
       svg.appendChild(line);
     });
   }
+
 
   // ---------------------------------------------------------------------
   // 4. Surveillance du plateau (détecte chaque coup joué)
