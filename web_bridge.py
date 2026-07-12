@@ -164,6 +164,104 @@ class BridgeState:
         finally:
             self._clear_active_analysis()
 
+    def handle_single_depth(self, fen, depth):
+        """
+        Analyse la position pour UN SEUL palier de profondeur, et retourne
+        directement un dict (pas un générateur/stream). Le navigateur envoie
+        maintenant une requête HTTP séparée par palier (10, puis 15, puis
+        20) plutôt qu'une seule requête "streamée" : certains navigateurs/
+        gestionnaires d'extensions ne délivrent PAS les données au fil de
+        l'eau (onprogress) malgré un vrai streaming NDJSON côté serveur --
+        ils attendent la fin complète de la connexion avant de tout donner
+        d'un coup. En séparant en plusieurs requêtes HTTP indépendantes, on
+        s'appuie sur une garantie beaucoup plus fiable : chaque requête se
+        termine (et déclenche son propre callback JS) dès qu'ELLE est prête,
+        indépendamment des autres -- ce n'est plus qu'un détail d'implé-
+        mentation fragile d'un navigateur particulier.
+        """
+        try:
+            board = chess.Board(fen)
+        except ValueError as e:
+            return {"error": f"FEN invalide reçu du navigateur : {e}", "depth": depth}
+
+        with self.lock:
+            is_new_position = fen != self.last_fen
+            self.last_fen = fen
+            my_side = self.my_side
+
+        if is_new_position:
+            # Une position DIFFÉRENTE de la précédente vient d'arriver :
+            # toute recherche encore active pour l'ancienne position est
+            # désormais inutile, on lui demande de s'arrêter. On ne fait PAS
+            # ça pour les requêtes soeurs (10/15/20) d'une même position,
+            # qui doivent au contraire se succéder tranquillement derrière
+            # engine_lock.
+            self._cancel_current_analysis_if_any()
+
+        side_to_move = "w" if board.turn else "b"
+        if side_to_move != my_side:
+            if is_new_position and self.on_update:
+                camp = "Blancs" if my_side == "w" else "Noirs"
+                self.on_update(None, f"Au tour de l'adversaire (tu joues les {camp}).")
+            return {"skip": True, "depth": depth}
+
+        if board.is_game_over():
+            if is_new_position and self.on_update:
+                self.on_update(None, f"Partie terminée : {board.result()}")
+            return {"game_over": True, "result": board.result(), "depth": depth}
+
+        def _run_once():
+            gen = self.engine.analyze_fen_progressive(
+                fen, depths=(depth,), on_analysis_started=self._register_active_analysis
+            )
+            try:
+                return next(gen, None)
+            finally:
+                gen.close()
+
+        with self.engine_lock:
+            with self.lock:
+                if fen != self.last_fen:
+                    return {"stale": True, "depth": depth}  # position dépassée entre-temps, pas la peine
+
+            try:
+                entry = _run_once()
+            except chess.engine.EngineError as e:
+                self._restart_engine(reason=f"{type(e).__name__}: {e}")
+                try:
+                    entry = _run_once()
+                except Exception as e2:
+                    return {"error": f"Moteur Stockfish indisponible : {e2}", "depth": depth}
+            except Exception as e:
+                return {"error": f"Moteur Stockfish indisponible : {e}", "depth": depth}
+            finally:
+                self._clear_active_analysis()
+
+        with self.lock:
+            stale = fen != self.last_fen
+        if stale or entry is None:
+            return {"stale": True, "depth": depth}
+        if entry.get("game_over"):
+            return entry
+
+        # Explication en langage clair uniquement pour le palier le plus
+        # profond demandé (pas la peine de la recalculer 3x).
+        if depth == max(self.depths):
+            move_obj = chess.Move.from_uci(entry["move_uci"])
+            if self.explain_mode == "api":
+                explanation = explain_move_via_api(
+                    fen, entry["move_san"], entry["pv_san"], entry["score"]
+                )
+            else:
+                explanation = explain_move_local(board, move_obj, entry["pv_san"])
+            entry = dict(entry)
+            entry["explanation"] = explanation
+
+        if self.on_depth_update:
+            self.on_depth_update(entry["depth"], dict(entry))
+
+        return entry
+
     def handle_fen_stream(self, fen):
         """
         Générateur consommé par le serveur HTTP pour écrire la réponse au
@@ -323,11 +421,21 @@ def _make_handler(state: BridgeState):
             try:
                 data = json.loads(body)
                 fen = data["fen"]
+                depth = data.get("depth")  # optionnel : requête à un seul palier
             except Exception:
                 self._send_single(400, {"error": "JSON invalide, champ \"fen\" attendu"})
                 return
 
-            self._stream(state.handle_fen_stream(fen))
+            if depth is not None:
+                # Nouveau mode : une requête = un seul palier, réponse
+                # classique en un bloc (pas de streaming -> pas de risque de
+                # buffering côté navigateur).
+                result = state.handle_single_depth(fen, int(depth))
+                self._send_single(200, result)
+            else:
+                # Ancien mode streaming, conservé pour compatibilité (ex:
+                # utilisé en interne par le bouton "Rafraîchir").
+                self._stream(state.handle_fen_stream(fen))
 
         def _send_single(self, status, payload):
             """Réponse classique en un seul bloc (utilisée pour les erreurs de requête)."""
