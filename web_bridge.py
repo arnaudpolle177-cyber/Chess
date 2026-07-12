@@ -54,6 +54,18 @@ class BridgeState:
         # progressif par défaut (10/15/20).
         self.depths = (depth,) if depth is not None else PROGRESSIVE_DEPTHS
         self.engine = ChessCoachEngine(stockfish_path, threads=threads, hash_mb=hash_mb)
+        # Second moteur Stockfish, INDÉPENDANT du principal, dédié aux avis
+        # "que jouerait un joueur de cet Elo" (voir human_profile.py,
+        # profils "populaire"/"classique"). Avant, on reconfigurait
+        # UCI_LimitStrength en direct sur le moteur PRINCIPAL entre 2
+        # analyses -- ça pouvait le faire crasher (access violation observé
+        # en pratique) si ce basculement arrivait pendant/juste après une
+        # recherche. Avec un moteur séparé, configuré une seule fois au
+        # démarrage et plus jamais reconfiguré en LimitStrength ensuite,
+        # cette classe de crash disparaît structurellement. Coût : un 2e
+        # processus Stockfish (léger : Threads=1, Hash=16 Mo).
+        self.elo_engine = ChessCoachEngine(stockfish_path, threads=1, hash_mb=16)
+        self.elo_engine.configure_as_elo_advisor()
         self.explain_mode = explain_mode
         self.on_update = on_update            # callback(lines, explanation) -> messages ponctuels (skip/erreur/fin de partie)
         self.on_depth_update = on_depth_update  # callback(depth, entry) -> ancien mode (profondeur brute), conservé pour compatibilité
@@ -163,6 +175,23 @@ class BridgeState:
         )
         print("✅ Stockfish redémarré.")
 
+    def _restart_elo_engine(self, reason=""):
+        """Équivalent de _restart_engine, mais pour le moteur 'conseiller Elo' dédié."""
+        print(f"⚠ Le moteur 'conseiller Elo' semble avoir crashé, redémarrage... ({reason})")
+        old_elo_engine = self.elo_engine
+
+        def _cleanup_old_elo_engine():
+            try:
+                old_elo_engine.close()
+            except Exception:
+                pass
+
+        threading.Thread(target=_cleanup_old_elo_engine, daemon=True).start()
+
+        self.elo_engine = ChessCoachEngine(self.stockfish_path, threads=1, hash_mb=16)
+        self.elo_engine.configure_as_elo_advisor()
+        print("✅ Moteur 'conseiller Elo' redémarré.")
+
     def _progressive_with_auto_restart(self, fen):
         """
         Générateur : comme analyze_fen_progressive, mais relance Stockfish
@@ -228,7 +257,7 @@ class BridgeState:
                 if fen != self.last_fen:
                     return {"stale": True, "profile": profile_id}  # position dépassée entre-temps
 
-            def _run_once():
+            def _run_candidates():
                 cache_key = (fen, elo_tier_id)
                 if self._candidates_cache_key == cache_key:
                     # Déjà calculé pour un autre profil sur cette même
@@ -238,23 +267,33 @@ class BridgeState:
                 self._register_active_analysis(None)  # pas d'objet analysis() streamé ici, rien à annuler en cours de route
                 result, brd = self.engine.analyze_candidates(fen, multipv=tier.multipv, depth=tier.depth)
                 if result.get("game_over"):
-                    value = (result, brd, None)
+                    elo_suggestion = None
                 else:
-                    # Avis Stockfish bridé à cet Elo (signal pour les profils
-                    # "populaire"/"classique") -- rapide (150ms), n'affecte
-                    # pas l'éval des candidats ci-dessus.
-                    elo_suggestion = self.engine.suggest_move_for_elo(fen, tier.elo_reference)
-                    value = (result, brd, elo_suggestion)
+                    # Avis du moteur "conseiller Elo" DÉDIÉ (processus
+                    # séparé, jamais reconfiguré pendant une recherche du
+                    # moteur principal -- voir configure_as_elo_advisor).
+                    # Sa propre gestion d'erreur est isolée : s'il crashe,
+                    # ça ne doit pas faire échouer toute la requête ni
+                    # redémarrer le moteur principal pour rien.
+                    try:
+                        elo_suggestion = self.elo_engine.suggest_move(fen, tier.elo_reference)
+                    except chess.engine.EngineError as e:
+                        self._restart_elo_engine(reason=f"{type(e).__name__}: {e}")
+                        try:
+                            elo_suggestion = self.elo_engine.suggest_move(fen, tier.elo_reference)
+                        except Exception:
+                            elo_suggestion = None  # tant pis, les profils s'en passeront pour ce coup
+                value = (result, brd, elo_suggestion)
                 self._candidates_cache_key = cache_key
                 self._candidates_cache_value = value
                 return value
 
             try:
-                result, brd, elo_suggestion = _run_once()
+                result, brd, elo_suggestion = _run_candidates()
             except chess.engine.EngineError as e:
                 self._restart_engine(reason=f"{type(e).__name__}: {e}")
                 try:
-                    result, brd, elo_suggestion = _run_once()
+                    result, brd, elo_suggestion = _run_candidates()
                 except Exception as e2:
                     return {"error": f"Moteur Stockfish indisponible : {e2}", "profile": profile_id}
             except Exception as e:
@@ -506,9 +545,13 @@ class BridgeState:
 
     def refresh_last(self):
         """
-        Relance l'analyse sur la dernière position reçue (utilisé par le
-        bouton "Rafraîchir"). On consomme le générateur nous-mêmes pour que
-        les callbacks (on_update / on_depth_update) soient appelés.
+        LEGACY (ancien mode profondeur brute). Conservé seulement pour
+        compatibilité --depth CLI. Le bouton "Rafraîchir" de l'UI utilise
+        maintenant refresh_last_profiles() ci-dessous, PAS cette méthode :
+        celle-ci ignore le niveau Elo et retombe toujours sur
+        analyze_fen_progressive (profondeur fixe), ce qui la rend lente et
+        incohérente avec le slider -- c'était justement la cause du bug où
+        "Rafraîchir" semblait ignorer le niveau Elo choisi.
         """
         if self.last_fen is None:
             if self.on_update:
@@ -517,9 +560,30 @@ class BridgeState:
         for _ in self.handle_fen_stream(self.last_fen):
             pass
 
+    def refresh_last_profiles(self):
+        """
+        Relance les 4 profils sur la dernière position reçue, au niveau Elo
+        actuel -- c'est la vraie méthode derrière le bouton "Rafraîchir"
+        dans main.py. Invalide d'abord le cache de candidats pour forcer un
+        vrai recalcul (sinon, si rien n'a changé, on retomberait juste sur
+        le cache existant sans se re-synchroniser après un souci moteur).
+        """
+        if self.last_fen is None:
+            if self.on_update:
+                self.on_update(None, "Aucune position reçue pour l'instant depuis ton site.")
+            return
+        with self.lock:
+            self._candidates_cache_key = None
+        for profile_id in human_profile.PROFILE_IDS:
+            self.handle_single_profile(self.last_fen, profile_id)
+
     def close(self):
         try:
             self.engine.close()
+        except Exception:
+            pass
+        try:
+            self.elo_engine.close()
         except Exception:
             pass
 

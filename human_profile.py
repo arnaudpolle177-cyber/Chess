@@ -53,11 +53,11 @@ class EloTier:
 
 ELO_TIERS = {
     1: EloTier(id=1, label="1800-2200", elo_min=1800, elo_max=2200, elo_reference=2000,
-               multipv=4, depth=14, max_eval_loss_cp=90, typical_eval_loss_cp=35),
+               multipv=4, depth=12, max_eval_loss_cp=90, typical_eval_loss_cp=35),
     2: EloTier(id=2, label="2300-2700", elo_min=2300, elo_max=2700, elo_reference=2500,
-               multipv=4, depth=18, max_eval_loss_cp=50, typical_eval_loss_cp=18),
+               multipv=4, depth=16, max_eval_loss_cp=50, typical_eval_loss_cp=18),
     3: EloTier(id=3, label="2800-3200", elo_min=2800, elo_max=3200, elo_reference=3000,
-               multipv=4, depth=22, max_eval_loss_cp=20, typical_eval_loss_cp=6),
+               multipv=4, depth=20, max_eval_loss_cp=20, typical_eval_loss_cp=6),
 }
 DEFAULT_ELO_TIER = 2
 

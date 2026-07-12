@@ -88,37 +88,36 @@ class ChessCoachEngine:
             })
         return {"game_over": False, "candidates": candidates}, board
 
-    def suggest_move_for_elo(self, fen, elo, movetime_ms=150):
+    def configure_as_elo_advisor(self):
         """
-        Interroge Stockfish en mode UCI_LimitStrength/UCI_Elo (calibré par
-        l'équipe Stockfish sur des données de force réelle, pas une
-        approximation maison) pour savoir quel coup il jouerait "à ce
-        niveau". Sert de signal pour les profils "populaire"/"classique" --
-        PAS pour choisir la force finale du coach (ça, c'est la fenêtre de
-        tolérance d'éval dans human_profile.py qui s'en charge, en filtrant
-        parmi des coups toujours objectivement analysés à pleine force).
-
-        IMPORTANT : reconfigure temporairement l'option UCI_LimitStrength du
-        moteur partagé -- l'appelant DOIT tenir engine_lock pendant cet
-        appel (déjà le cas dans web_bridge.py) pour éviter qu'une autre
-        analyse à pleine force ne s'exécute avec ce réglage bridé par erreur.
+        Bascule ce moteur en 'conseiller Elo' PERMANENT : UCI_LimitStrength
+        reste activé pour toute sa durée de vie, faible Threads/Hash (pas
+        besoin de puissance pour un avis rapide à 150ms). Seul UCI_Elo est
+        modifié entre 2 appels (jamais LimitStrength lui-même) -- c'est
+        beaucoup plus sûr que de basculer LimitStrength ON/OFF à chaque
+        appel sur le moteur PRINCIPAL (voir suggest_move ci-dessous et le
+        commentaire dans web_bridge.py, _init_elo_advisor).
         """
         try:
-            self.engine.configure({
-                "UCI_LimitStrength": True,
-                "UCI_Elo": max(1320, min(3190, elo)),  # bornes supportées par Stockfish
-            })
-            info = self.engine.analyse(chess.Board(fen), chess.engine.Limit(time=movetime_ms / 1000))
-            pv = info.get("pv")
-            return pv[0].uci() if pv else None
+            self.engine.configure({"Threads": 1, "Hash": 16, "UCI_LimitStrength": True})
         except chess.engine.EngineError as e:
-            print(f"⚠ suggest_move_for_elo indisponible ({e}), profils 'populaire'/'classique' sans ce signal pour ce coup.")
-            return None
-        finally:
-            try:
-                self.engine.configure({"UCI_LimitStrength": False})
-            except chess.engine.EngineError:
-                pass
+            print(f"⚠ Impossible de configurer le moteur 'conseiller Elo' : {e}")
+
+    def suggest_move(self, fen, elo, movetime_ms=150):
+        """
+        À utiliser UNIQUEMENT sur un moteur déjà configuré via
+        configure_as_elo_advisor() (LimitStrength déjà actif en permanence).
+        Ne fait que changer UCI_Elo puis lance une analyse courte -- ne
+        touche JAMAIS LimitStrength ici (c'est ce qui rendait l'ancienne
+        version instable : reconfigurer LimitStrength sur le moteur
+        PRINCIPAL, potentiellement pendant qu'une autre recherche vient
+        juste de se terminer dessus, pouvait corrompre son état interne et
+        provoquer un vrai crash natif de Stockfish).
+        """
+        self.engine.configure({"UCI_Elo": max(1320, min(3190, elo))})
+        info = self.engine.analyse(chess.Board(fen), chess.engine.Limit(time=movetime_ms / 1000))
+        pv = info.get("pv")
+        return pv[0].uci() if pv else None
 
     def analyze_fen_progressive(self, fen, depths=PROGRESSIVE_DEPTHS, on_analysis_started=None):
         """

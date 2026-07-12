@@ -226,15 +226,19 @@ class BrowserBridgeApp:
 
     def trigger_refresh(self):
         if self.state:
-            self.state.refresh_last()
+            threading.Thread(target=self.state.refresh_last_profiles, daemon=True).start()
 
     def change_elo_tier(self, tier_id):
         if self.state:
             self.state.set_elo_tier(tier_id)
-            # Le prochain "recalculer" (bouton flottant sur la page, ou
-            # simplement le prochain coup) redemandera les 4 profils avec le
-            # nouveau niveau -- pas besoin de forcer un recalcul immédiat
-            # ici, la position affichée reste valide, seul le NIVEAU change.
+            # Recalcule tout de suite avec le nouveau niveau plutôt que
+            # d'attendre le prochain coup joué -- sans ça, bouger le slider
+            # ne semblait rien faire tant qu'aucun coup n'était joué. DANS
+            # UN THREAD séparé : ce callback est appelé directement par
+            # Tkinter pendant qu'on fait glisser le slider (thread
+            # principal / mainloop) -- lancer l'analyse Stockfish ici
+            # bloquerait/gèlerait toute la fenêtre pendant le calcul.
+            threading.Thread(target=self.state.refresh_last_profiles, daemon=True).start()
 
     def toggle_side(self):
         if not self.state:
@@ -249,8 +253,7 @@ class BrowserBridgeApp:
         # tour de ce camp, sinon le message "au tour de l'adversaire" --
         # plutôt que d'attendre le prochain coup joué.
         if self.state.last_fen is not None:
-            for _ in self.state.handle_fen_stream(self.state.last_fen):
-                pass
+            threading.Thread(target=self.state.refresh_last_profiles, daemon=True).start()
 
     def run(self):
         from web_bridge import start_bridge_server
