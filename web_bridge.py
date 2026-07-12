@@ -92,6 +92,18 @@ class BridgeState:
         # (jamais lu/écrit hors de ce verrou).
         self._candidates_cache_key = None      # (fen, elo_tier_id)
         self._candidates_cache_value = None    # (result_dict, board, elo_suggestion_uci)
+        # Positions pour lesquelles le moteur "conseiller Elo" a déjà
+        # planté 2 fois de suite (échec initial + échec après redémarrage).
+        # Certaines positions (tactiques, souvent avec un sacrifice
+        # disponible) font crasher de façon PARFAITEMENT REPRODUCTIBLE
+        # UCI_LimitStrength sur certains builds de Stockfish -- sans cette
+        # liste, chaque nouvelle tentative (bouton Recalculer, changement
+        # de niveau Elo, etc.) re-déclenchait le MÊME crash en boucle. Une
+        # fois une position dans cette liste, on n'utilise plus JAMAIS
+        # l'avis Elo-bridé pour elle (les profils s'en passent, sans
+        # bloquer le reste du coach). Bornée en taille pour ne pas grossir
+        # indéfiniment sur une très longue session.
+        self._elo_advisor_blacklist = set()
         # Référence vers l'analyse Stockfish actuellement en cours (objet
         # chess.engine.AnalysisResult), pour pouvoir l'interrompre depuis un
         # autre thread si une position plus récente arrive.
@@ -268,6 +280,13 @@ class BridgeState:
                 result, brd = self.engine.analyze_candidates(fen, multipv=tier.multipv, depth=tier.depth)
                 if result.get("game_over"):
                     elo_suggestion = None
+                elif fen in self._elo_advisor_blacklist:
+                    # Cette position a déjà fait planter le conseiller Elo
+                    # précédemment -- pas la peine de retenter, ça
+                    # crasherait pareil. Les profils s'en passent pour ce
+                    # coup (bonus "popular"/pas de pénalité), sans bloquer
+                    # le reste.
+                    elo_suggestion = None
                 else:
                     # Avis du moteur "conseiller Elo" DÉDIÉ (processus
                     # séparé, jamais reconfiguré pendant une recherche du
@@ -281,8 +300,14 @@ class BridgeState:
                         self._restart_elo_engine(reason=f"{type(e).__name__}: {e}")
                         try:
                             elo_suggestion = self.elo_engine.suggest_move(fen, tier.elo_reference)
-                        except Exception:
-                            elo_suggestion = None  # tant pis, les profils s'en passeront pour ce coup
+                        except Exception as e2:
+                            # 2 échecs de suite sur CETTE position précise :
+                            # on la met en liste noire pour ne plus jamais
+                            # la retenter (voir commentaire dans __init__).
+                            print(f"⚠ Position mise en liste noire pour le conseiller Elo (crash répété) : {fen}")
+                            if len(self._elo_advisor_blacklist) < 500:  # borne de sécurité
+                                self._elo_advisor_blacklist.add(fen)
+                            elo_suggestion = None
                 value = (result, brd, elo_suggestion)
                 self._candidates_cache_key = cache_key
                 self._candidates_cache_value = value
@@ -636,9 +661,26 @@ def _make_handler(state: BridgeState):
                 result = state.handle_single_depth(fen, int(depth))
                 self._send_single(200, result)
             else:
-                # Ancien mode streaming, conservé pour compatibilité (ex:
-                # utilisé en interne par le bouton "Rafraîchir").
-                self._stream(state.handle_fen_stream(fen))
+                # Requête "brute" (ni profile, ni depth) : ne devrait plus
+                # jamais arriver avec le .user.js à jour. On NE relance
+                # PLUS silencieusement l'ancien mode streaming ici -- c'est
+                # justement ce chemin (multipv=1, profondeur fixe) qui
+                # provoquait des crashs répétés en tournant EN PARALLÈLE du
+                # nouveau système de profils sur le même moteur partagé
+                # (típicamente : 2 scripts actifs en même temps sur la
+                # page, l'ancien chess_coach_bridge.js ET le nouveau
+                # chess_coach_bridge.user.js). On log un avertissement
+                # explicite pour le repérer facilement plutôt que de
+                # laisser planter le moteur en silence.
+                print(
+                    "⚠ Requête /fen reçue SANS champ 'profile' ni 'depth' -- "
+                    "vérifie qu'un ancien script (chess_coach_bridge.js) n'est "
+                    "pas encore chargé sur la page en plus du .user.js Tampermonkey."
+                )
+                self._send_single(409, {
+                    "error": "Requête sans 'profile' ni 'depth' -- ancien mode désactivé "
+                             "(voir la console Python pour plus de détails)."
+                })
 
         def _send_single(self, status, payload):
             """Réponse classique en un seul bloc (utilisée pour les erreurs de requête)."""

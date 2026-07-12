@@ -56,13 +56,33 @@ class CoachOverlay:
         )
         self.elo_value_label.pack()
 
+        self._elo_debounce_job = None
+
         def _on_scale_change(value):
             tier_id = int(round(float(value)))
             tier = human_profile.ELO_TIERS.get(tier_id)
             if tier:
                 self.elo_value_label.config(text=f"Niveau : {tier.label} Elo")
-            if on_elo_change:
-                on_elo_change(tier_id)
+
+            # Debounce : le Scale Tkinter déclenche ce callback à CHAQUE
+            # valeur traversée pendant qu'on fait glisser le curseur, pas
+            # seulement au relâchement. Sans ça, glisser rapidement de 1 à 3
+            # pouvait lancer 2-3 recalculs complets (4 profils chacun) qui
+            # se chevauchaient -- plusieurs threads martelant le moteur
+            # Stockfish en même temps, terrain propice aux crashs observés
+            # en pratique. On annule tout recalcul déjà programmé et on en
+            # reprogramme un nouveau : seul le DERNIER niveau choisi, une
+            # fois le glissement stabilisé (~400ms sans changement),
+            # déclenche vraiment un recalcul.
+            if self._elo_debounce_job is not None:
+                self.root.after_cancel(self._elo_debounce_job)
+
+            def _fire():
+                self._elo_debounce_job = None
+                if on_elo_change:
+                    on_elo_change(tier_id)
+
+            self._elo_debounce_job = self.root.after(400, _fire)
 
         self.elo_scale = tk.Scale(
             elo_frame, from_=1, to=3, resolution=1, orient="horizontal",

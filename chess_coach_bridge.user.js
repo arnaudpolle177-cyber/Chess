@@ -267,6 +267,24 @@
       console.warn("Coach d'échecs : éléments cg-wrap/cg-container/cg-board introuvables sur cette page.");
       return null;
     }
+
+    // Une pièce est en train d'être glissée (clic gauche maintenu, pas
+    // encore relâchée) : chessground fait suivre sa position au curseur en
+    // pixels bruts, qui ne correspond ni à la case de départ ni à une case
+    // d'arrivée réelle -- juste où se trouve le curseur À CET INSTANT. Si
+    // on lisait le plateau maintenant et que l'utilisateur marque une
+    // pause pendant le glisser (le temps de réfléchir), ça pouvait être
+    // interprété comme un coup joué (2 lectures stables d'affilée) alors
+    // que rien n'a été validé -- c'était la cause du "il pense que j'ai
+    // joué alors que je fais juste glisser la pièce". On ignore
+    // complètement ce poll tant qu'un glissement est en cours ; la lecture
+    // reprend normalement dès que la pièce est lâchée (déposée ou
+    // annulée/revenue à sa case).
+    if (els.board.querySelector("piece.dragging")) {
+      if (DEBUG) console.log("Coach d'échecs [debug] : glissement en cours détecté, lecture ignorée pour ce tick.");
+      return null;
+    }
+
     const { grid, isWhiteOrientation, squareSize, size } = readGrid(els);
     const piecesFound = grid.flat().filter((c) => c !== ".").length;
     const boardPart = gridToFenBoardPart(grid);
