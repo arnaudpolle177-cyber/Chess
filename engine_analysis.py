@@ -22,7 +22,7 @@ PROGRESSIVE_DEPTHS = (10, 15, 20)
 
 
 class ChessCoachEngine:
-    def __init__(self, stockfish_path, threads=None, hash_mb=256):
+    def __init__(self, stockfish_path, threads=None, hash_mb=1024):
         self.engine = chess.engine.SimpleEngine.popen_uci(stockfish_path)
 
         # Sans ça, Stockfish tourne sur 1 seul thread et une table de

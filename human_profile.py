@@ -46,18 +46,37 @@ class EloTier:
     elo_max: int
     elo_reference: int        # valeur envoyée à Stockfish (UCI_Elo) pour les profils "populaire"/"classique"
     multipv: int               # nombre de coups candidats analysés
-    depth: int                  # profondeur d'analyse OBJECTIVE (précision de l'éval, pas la force jouée)
+    depth_min: int              # profondeur d'analyse OBJECTIVE -- bornes d'un tirage aléatoire
+    depth_max: int              # (voir random_depth ci-dessous), jamais une valeur fixe coup après coup
     max_eval_loss_cp: int       # tolérance MAXIMALE (centipawns) vs le meilleur coup -- jamais dépassée
     typical_eval_loss_cp: int   # perte "typique" ciblée à ce niveau, utilisée par certains profils
+
+    def random_depth(self, rng=None):
+        """
+        Tire une profondeur au hasard dans [depth_min, depth_max] à chaque
+        appel. Volontaire : une profondeur légèrement variable d'un coup à
+        l'autre (au lieu d'une valeur fixe) casse la régularité "toujours
+        exactement depth 16" qui, elle aussi, a un petit côté "on sent que
+        c'est un ordinateur". Tiré UNE fois par position (pas par profil) :
+        voir le cache dans web_bridge.py, qui appelle analyze_candidates()
+        une seule fois par (position, tier) et réutilise le résultat pour
+        les 4 profils -- donc les 4 flèches d'un même coup partagent
+        toujours la même profondeur, seul le coup SUIVANT en tire une autre.
+        """
+        rng = rng or random
+        return rng.randint(self.depth_min, self.depth_max)
 
 
 ELO_TIERS = {
     1: EloTier(id=1, label="1800-2200", elo_min=1800, elo_max=2200, elo_reference=2000,
-               multipv=4, depth=12, max_eval_loss_cp=90, typical_eval_loss_cp=35),
+               multipv=4, depth_min=11, depth_max=13, max_eval_loss_cp=90, typical_eval_loss_cp=35),
     2: EloTier(id=2, label="2300-2700", elo_min=2300, elo_max=2700, elo_reference=2500,
-               multipv=4, depth=16, max_eval_loss_cp=50, typical_eval_loss_cp=18),
+               multipv=4, depth_min=15, depth_max=17, max_eval_loss_cp=50, typical_eval_loss_cp=18),
     3: EloTier(id=3, label="2800-3200", elo_min=2800, elo_max=3200, elo_reference=3000,
-               multipv=4, depth=20, max_eval_loss_cp=20, typical_eval_loss_cp=6),
+               # Plafonné à 19 (pas 20) : depth 20 en multipv=4 est nettement
+               # plus lent pour un gain de précision marginal à ce niveau
+               # déjà quasi-parfait -- pas un bon rapport temps/qualité.
+               multipv=4, depth_min=18, depth_max=19, max_eval_loss_cp=20, typical_eval_loss_cp=6),
 }
 DEFAULT_ELO_TIER = 2
 

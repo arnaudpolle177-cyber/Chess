@@ -67,7 +67,7 @@ from overlay_ui import CoachOverlay
 
 
 class CoachApp:
-    def __init__(self, stockfish_path, interval, explain_mode, depth=None, threads=None, hash_mb=256):
+    def __init__(self, stockfish_path, interval, explain_mode, depth=None, threads=None, hash_mb=1024):
         self.stockfish_path = stockfish_path
         self.interval = interval
         self.explain_mode = explain_mode
@@ -208,7 +208,7 @@ class BrowserBridgeApp:
     s'affichent directement sur ta page web, pas ici).
     """
 
-    def __init__(self, stockfish_path, explain_mode, port, threads=None, hash_mb=256, depth=None):
+    def __init__(self, stockfish_path, explain_mode, port, threads=None, hash_mb=1024, depth=None):
         self.overlay = CoachOverlay(
             on_refresh_click=self.trigger_refresh,
             on_toggle_side_click=self.toggle_side,
@@ -372,7 +372,7 @@ def interactive_menu():
             try:
                 app = CoachApp(
                     stockfish_path, interval=3.0, explain_mode="local",
-                    depth=DEFAULT_DEPTH, threads=None, hash_mb=256,
+                    depth=DEFAULT_DEPTH, threads=None, hash_mb=1024,
                 )
                 app.run()
             except Exception as e:
@@ -389,7 +389,7 @@ def interactive_menu():
             try:
                 app = BrowserBridgeApp(
                     stockfish_path, explain_mode="local", port=8765,
-                    threads=None, hash_mb=256, depth=None,  # None = mode progressif 10/15/20
+                    threads=None, hash_mb=1024, depth=None,  # None = mode progressif 10/15/20
                 )
                 app.run()
             except Exception as e:
@@ -417,8 +417,8 @@ def main():
                          help="Profondeur de recherche Stockfish (défaut: 20). Plus haut = plus fort mais plus lent.")
     parser.add_argument("--threads", type=int, default=None,
                          help="Threads donnés à Stockfish (défaut: nb coeurs CPU - 1)")
-    parser.add_argument("--hash", type=int, default=256, dest="hash_mb",
-                         help="Mémoire (Mo) pour la table de transposition Stockfish (défaut: 256)")
+    parser.add_argument("--hash", type=int, default=1024, dest="hash_mb",
+                         help="Mémoire (Mo) pour la table de transposition Stockfish (défaut: 1024)")
     args = parser.parse_args()
 
     # Résolution pour le mode bureau (CoachApp, capture d'écran) : ce mode

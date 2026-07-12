@@ -45,7 +45,7 @@ class BridgeState:
 
     def __init__(self, stockfish_path, explain_mode="local", on_update=None,
                  on_depth_update=None, on_profile_update=None, threads=None,
-                 hash_mb=256, depth=None):
+                 hash_mb=1024, depth=None):
         self.stockfish_path = stockfish_path
         self.threads = threads
         self.hash_mb = hash_mb
@@ -277,7 +277,7 @@ class BridgeState:
                     # Stockfish.
                     return self._candidates_cache_value
                 self._register_active_analysis(None)  # pas d'objet analysis() streamé ici, rien à annuler en cours de route
-                result, brd = self.engine.analyze_candidates(fen, multipv=tier.multipv, depth=tier.depth)
+                result, brd = self.engine.analyze_candidates(fen, multipv=tier.multipv, depth=tier.random_depth())
                 if result.get("game_over"):
                     elo_suggestion = None
                 elif fen in self._elo_advisor_blacklist:
@@ -730,7 +730,7 @@ def _make_handler(state: BridgeState):
 
 
 def start_bridge_server(stockfish_path, explain_mode="local", on_update=None, on_depth_update=None,
-                         on_profile_update=None, port=DEFAULT_PORT, threads=None, hash_mb=256, depth=None):
+                         on_profile_update=None, port=DEFAULT_PORT, threads=None, hash_mb=1024, depth=None):
     """
     Démarre le serveur en tâche de fond (thread daemon) et retourne
     (server, state). Appelle state.close() pour bien fermer Stockfish
