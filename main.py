@@ -212,6 +212,7 @@ class BrowserBridgeApp:
         self.overlay = CoachOverlay(
             on_refresh_click=self.trigger_refresh,
             on_toggle_side_click=self.toggle_side,
+            on_elo_change=self.change_elo_tier,
             board_region=None,  # pas d'overlay bureau : les flèches sont dessinées dans la page
         )
         self.server = None
@@ -226,6 +227,14 @@ class BrowserBridgeApp:
     def trigger_refresh(self):
         if self.state:
             self.state.refresh_last()
+
+    def change_elo_tier(self, tier_id):
+        if self.state:
+            self.state.set_elo_tier(tier_id)
+            # Le prochain "recalculer" (bouton flottant sur la page, ou
+            # simplement le prochain coup) redemandera les 4 profils avec le
+            # nouveau niveau -- pas besoin de forcer un recalcul immédiat
+            # ici, la position affichée reste valide, seul le NIVEAU change.
 
     def toggle_side(self):
         if not self.state:
@@ -250,6 +259,7 @@ class BrowserBridgeApp:
             explain_mode=self.explain_mode,
             on_update=self._on_update,
             on_depth_update=self._on_depth_update,
+            on_profile_update=self._on_profile_update,
             port=self.port,
             threads=self.threads,
             hash_mb=self.hash_mb,
@@ -272,18 +282,22 @@ class BrowserBridgeApp:
     def _on_update(self, lines, explanation):
         # N'arrive plus qu'avec lines=None (messages ponctuels : au tour de
         # l'adversaire, partie terminée, erreur) -- les résultats d'analyse
-        # progressive passent maintenant par _on_depth_update ci-dessous.
+        # progressive passent maintenant par _on_depth_update /
+        # _on_profile_update ci-dessous.
         if lines is None:
             self.overlay.show_error(explanation)
         else:
             self.overlay.update_content(lines=lines, explanation=explanation)
 
     def _on_depth_update(self, depth, entry):
-        # Met à jour uniquement la ligne du palier concerné (les autres
-        # restent affichées telles quelles). L'explication n'est incluse
-        # dans entry que pour le palier le plus profond (voir web_bridge.py)
-        # -- update_depth_line() l'affiche automatiquement si présente.
+        # Ancien mode (profondeur brute), conservé pour compatibilité si
+        # --depth est passé en CLI.
         self.overlay.update_depth_line(depth, entry)
+
+    def _on_profile_update(self, profile_id, entry):
+        # Nouveau mode par défaut : une ligne par profil "humain" (voir
+        # human_profile.py), indépendante des 3 autres.
+        self.overlay.update_profile_line(profile_id, entry)
 
 
 def resolve_stockfish_path(cli_path):

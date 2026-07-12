@@ -11,16 +11,23 @@ import queue
 
 from board_overlay import BoardOverlay
 from engine_analysis import PROGRESSIVE_DEPTHS
+import human_profile
 
-MAX_LINES_DISPLAYED = 3
+MAX_LINES_DISPLAYED = 4
 
 
 class CoachOverlay:
-    def __init__(self, on_refresh_click=None, on_toggle_side_click=None, board_region=None):
+    # Couleurs alignées sur PROFILE_STYLE dans chess_coach_bridge.user.js,
+    # dans l'ORDRE de human_profile.PROFILE_IDS (solid, popular, creative,
+    # classical) -- vert, bleu, rose, blanc.
+    PROFILE_COLORS = ["#a6e3a1", "#89dceb", "#f38ba8", "#f5f5f5"]
+    PROFILE_LABELS = {"solid": "Solide", "popular": "Populaire", "creative": "Créatif", "classical": "Classique"}
+
+    def __init__(self, on_refresh_click=None, on_toggle_side_click=None, on_elo_change=None, board_region=None):
         self.root = tk.Tk()
         self.root.title("Coach d'échecs")
         self.root.attributes("-topmost", True)
-        self.root.geometry("380x380+40+40")
+        self.root.geometry("380x460+40+40")
         self.root.configure(bg="#1e1e2e")
 
         # Overlay dessiné directement sur le plateau à l'écran (cercles de
@@ -37,40 +44,72 @@ class CoachOverlay:
             self.root, text="♟ Coach d'échecs", fg="white", bg="#1e1e2e",
             font=("Arial", 14, "bold")
         )
-        title.pack(pady=(10, 5))
+        title.pack(pady=(10, 2))
 
-        # --- Zone des meilleurs coups (multi-PV) ---
+        # --- Niveau Elo (3 paliers, voir human_profile.ELO_TIERS) ---
+        elo_frame = tk.Frame(self.root, bg="#1e1e2e")
+        elo_frame.pack(pady=(2, 6), padx=8, fill="x")
+
+        self.elo_value_label = tk.Label(
+            elo_frame, text=f"Niveau : {human_profile.ELO_TIERS[human_profile.DEFAULT_ELO_TIER].label} Elo",
+            fg="#f9e2af", bg="#1e1e2e", font=("Arial", 10, "bold")
+        )
+        self.elo_value_label.pack()
+
+        def _on_scale_change(value):
+            tier_id = int(round(float(value)))
+            tier = human_profile.ELO_TIERS.get(tier_id)
+            if tier:
+                self.elo_value_label.config(text=f"Niveau : {tier.label} Elo")
+            if on_elo_change:
+                on_elo_change(tier_id)
+
+        self.elo_scale = tk.Scale(
+            elo_frame, from_=1, to=3, resolution=1, orient="horizontal",
+            showvalue=False, bg="#1e1e2e", fg="white", troughcolor="#313244",
+            highlightthickness=0, command=_on_scale_change,
+        )
+        self.elo_scale.set(human_profile.DEFAULT_ELO_TIER)
+        self.elo_scale.pack(fill="x")
+
+        # --- Zone des meilleurs coups (4 profils) ---
         self.lines_frame = tk.Frame(self.root, bg="#1e1e2e")
         self.lines_frame.pack(pady=(2, 6), padx=8, fill="x")
 
         self.line_labels = []
-        # Couleurs alignées sur DEPTH_STYLE dans chess_coach_bridge.user.js
-        # (vert=depth10, bleu=depth15, rose=depth20) pour reconnaître d'un
-        # coup d'œil quelle ligne correspond à quelle flèche sur l'échiquier.
-        line_colors = ["#a6e3a1", "#89dceb", "#f38ba8"]
+        profile_ids = human_profile.PROFILE_IDS
         for i in range(MAX_LINES_DISPLAYED):
+            color = self.PROFILE_COLORS[i] if i < len(self.PROFILE_COLORS) else "#ffffff"
+            profile_name = self.PROFILE_LABELS.get(profile_ids[i], "") if i < len(profile_ids) else ""
+
             row = tk.Frame(self.lines_frame, bg="#313244")
             row.pack(fill="x", pady=2)
 
-            move_lbl = tk.Label(
-                row, text="—", fg=line_colors[i], bg="#313244",
-                font=("Arial", 12, "bold"), width=10, anchor="w"
+            name_lbl = tk.Label(
+                row, text=profile_name, fg=color, bg="#313244",
+                font=("Arial", 8, "bold"), width=9, anchor="w"
             )
-            move_lbl.pack(side="left", padx=(6, 4), pady=4)
+            name_lbl.pack(side="left", padx=(6, 0), pady=(4, 0), anchor="n")
+
+            move_lbl = tk.Label(
+                row, text="—", fg=color, bg="#313244",
+                font=("Arial", 12, "bold"), width=8, anchor="w"
+            )
+            move_lbl.pack(side="left", padx=(4, 4), pady=4)
 
             score_lbl = tk.Label(
                 row, text="—", fg="#f9e2af", bg="#313244",
-                font=("Arial", 10, "bold"), width=8, anchor="w"
+                font=("Arial", 10, "bold"), width=7, anchor="w"
             )
             score_lbl.pack(side="left", pady=4)
 
             pv_lbl = tk.Label(
                 row, text="—", fg="#cdd6f4", bg="#313244",
-                font=("Arial", 9), anchor="w", justify="left", wraplength=200
+                font=("Arial", 9), anchor="w", justify="left", wraplength=170
             )
             pv_lbl.pack(side="left", padx=(4, 6), pady=4, fill="x", expand=True)
 
-            self.line_labels.append({"move": move_lbl, "score": score_lbl, "pv": pv_lbl})
+            self.line_labels.append({"move": move_lbl, "score": score_lbl, "pv": pv_lbl, "name": name_lbl})
 
         # --- Explication texte (basée sur le meilleur coup) ---
         self.explanation_text = tk.Text(
@@ -167,6 +206,32 @@ class CoachOverlay:
             return
         widgets = self.line_labels[idx]
         widgets["move"].config(text=f"d{depth} {entry['move_san']}")
+        widgets["score"].config(text=entry["score"])
+        widgets["pv"].config(text=" ".join(entry["pv_san"]))
+
+        if "explanation" in entry:
+            self.explanation_text.delete("1.0", tk.END)
+            self.explanation_text.insert(tk.END, entry["explanation"])
+
+    def update_profile_line(self, profile_id, entry):
+        """
+        Thread-safe : met à jour UNIQUEMENT la ligne correspondant à ce
+        profil ("solid"/"popular"/"creative"/"classical"), sans toucher aux
+        3 autres lignes déjà affichées -- même logique que
+        update_depth_line() mais pour le nouveau système de profils
+        "humains" (voir human_profile.py).
+        """
+        self._queue.put((self._update_profile_line_impl, (profile_id, entry)))
+
+    def _update_profile_line_impl(self, profile_id, entry):
+        try:
+            idx = human_profile.PROFILE_IDS.index(profile_id)
+        except ValueError:
+            return
+        if idx >= len(self.line_labels):
+            return
+        widgets = self.line_labels[idx]
+        widgets["move"].config(text=entry["move_san"])
         widgets["score"].config(text=entry["score"])
         widgets["pv"].config(text=" ".join(entry["pv_san"]))
 

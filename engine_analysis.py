@@ -37,6 +37,89 @@ class ChessCoachEngine:
         except chess.engine.EngineError as e:
             print(f"⚠ Impossible de configurer Threads/Hash sur ce Stockfish : {e}")
 
+    def analyze_candidates(self, fen, multipv=4, depth=18):
+        """
+        Retourne jusqu'à `multipv` coups candidats objectivement bons
+        (MultiPV Stockfish), triés du meilleur au moins bon, chacun avec sa
+        perte d'éval ("eval_loss", en centipawns) par rapport au meilleur.
+        Utilisé par human_profile.py pour choisir LEQUEL de ces bons coups
+        correspond à chaque profil/niveau -- contrairement à
+        analyze_fen_progressive(), ceci ne varie jamais la profondeur pour
+        "faire plus faible" : la profondeur ici sert uniquement à avoir une
+        éval fiable de chaque candidat, pas à limiter la force.
+        """
+        board = chess.Board(fen)
+        if board.is_game_over():
+            return {"game_over": True, "result": board.result()}, board
+
+        info_list = self.engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv)
+        if isinstance(info_list, dict):
+            info_list = [info_list]
+
+        candidates = []
+        best_cp = None
+        for info in info_list:
+            pv = info.get("pv")
+            if not pv:
+                continue
+            cp = info["score"].pov(board.turn).score(mate_score=100000)
+            if best_cp is None:
+                best_cp = cp
+            move = pv[0]
+            tmp_board = board.copy()
+            tmp_board.push(move)
+            pv_san = []
+            san_board = board.copy()
+            for mv in pv[:6]:
+                pv_san.append(san_board.san(mv))
+                san_board.push(mv)
+            candidates.append({
+                "move_uci": move.uci(),
+                "move_san": board.san(move),
+                "cp": cp,
+                "eval_loss": max(0, best_cp - cp),
+                "score": self._format_score(info["score"], board.turn),
+                "is_capture": board.is_capture(move),
+                "is_check": tmp_board.is_check(),
+                "is_castle": board.is_castling(move),
+                "to_square_central": chess.square_file(move.to_square) in (3, 4)
+                                      and chess.square_rank(move.to_square) in (3, 4),
+                "pv_san": pv_san,
+            })
+        return {"game_over": False, "candidates": candidates}, board
+
+    def suggest_move_for_elo(self, fen, elo, movetime_ms=150):
+        """
+        Interroge Stockfish en mode UCI_LimitStrength/UCI_Elo (calibré par
+        l'équipe Stockfish sur des données de force réelle, pas une
+        approximation maison) pour savoir quel coup il jouerait "à ce
+        niveau". Sert de signal pour les profils "populaire"/"classique" --
+        PAS pour choisir la force finale du coach (ça, c'est la fenêtre de
+        tolérance d'éval dans human_profile.py qui s'en charge, en filtrant
+        parmi des coups toujours objectivement analysés à pleine force).
+
+        IMPORTANT : reconfigure temporairement l'option UCI_LimitStrength du
+        moteur partagé -- l'appelant DOIT tenir engine_lock pendant cet
+        appel (déjà le cas dans web_bridge.py) pour éviter qu'une autre
+        analyse à pleine force ne s'exécute avec ce réglage bridé par erreur.
+        """
+        try:
+            self.engine.configure({
+                "UCI_LimitStrength": True,
+                "UCI_Elo": max(1320, min(3190, elo)),  # bornes supportées par Stockfish
+            })
+            info = self.engine.analyse(chess.Board(fen), chess.engine.Limit(time=movetime_ms / 1000))
+            pv = info.get("pv")
+            return pv[0].uci() if pv else None
+        except chess.engine.EngineError as e:
+            print(f"⚠ suggest_move_for_elo indisponible ({e}), profils 'populaire'/'classique' sans ce signal pour ce coup.")
+            return None
+        finally:
+            try:
+                self.engine.configure({"UCI_LimitStrength": False})
+            except chess.engine.EngineError:
+                pass
+
     def analyze_fen_progressive(self, fen, depths=PROGRESSIVE_DEPTHS, on_analysis_started=None):
         """
         Générateur : analyse la position en UN SEUL passage Stockfish

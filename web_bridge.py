@@ -35,6 +35,7 @@ import chess.engine
 
 from engine_analysis import ChessCoachEngine, PROGRESSIVE_DEPTHS
 from explain import explain_move_local, explain_move_via_api
+import human_profile
 
 DEFAULT_PORT = 8765
 
@@ -43,7 +44,8 @@ class BridgeState:
     """État partagé entre le serveur HTTP et le reste du programme."""
 
     def __init__(self, stockfish_path, explain_mode="local", on_update=None,
-                 on_depth_update=None, threads=None, hash_mb=256, depth=None):
+                 on_depth_update=None, on_profile_update=None, threads=None,
+                 hash_mb=256, depth=None):
         self.stockfish_path = stockfish_path
         self.threads = threads
         self.hash_mb = hash_mb
@@ -54,7 +56,8 @@ class BridgeState:
         self.engine = ChessCoachEngine(stockfish_path, threads=threads, hash_mb=hash_mb)
         self.explain_mode = explain_mode
         self.on_update = on_update            # callback(lines, explanation) -> messages ponctuels (skip/erreur/fin de partie)
-        self.on_depth_update = on_depth_update  # callback(depth, entry) -> une ligne progressive
+        self.on_depth_update = on_depth_update  # callback(depth, entry) -> ancien mode (profondeur brute), conservé pour compatibilité
+        self.on_profile_update = on_profile_update  # callback(profile_id, entry) -> nouveau mode (coach "humain")
         # self.lock protège UNIQUEMENT les petites variables d'état
         # ci-dessous (jamais tenu pendant le calcul Stockfish ou l'écriture
         # réseau, contrairement à avant).
@@ -64,6 +67,19 @@ class BridgeState:
         self.engine_lock = threading.Lock()
         self.last_fen = None
         self.my_side = "w"
+        # Niveau Elo actif (voir human_profile.ELO_TIERS). Change le style
+        # de jeu proposé par les 4 profils, PAS juste la profondeur -- voir
+        # human_profile.py pour le détail.
+        self.elo_tier_id = human_profile.DEFAULT_ELO_TIER
+        # Cache des coups candidats (MultiPV) + avis Elo-bridé pour la
+        # DERNIÈRE position analysée. Les 4 profils (vert/bleu/rose/N&B)
+        # arrivent en 4 requêtes HTTP séparées pour LA MÊME position -- sans
+        # ce cache, chacune relancerait sa propre analyse MultiPV complète
+        # (4x le travail de Stockfish pour rien, et 4x plus de risque de
+        # backlog si les coups s'enchaînent vite). Protégé par engine_lock
+        # (jamais lu/écrit hors de ce verrou).
+        self._candidates_cache_key = None      # (fen, elo_tier_id)
+        self._candidates_cache_value = None    # (result_dict, board, elo_suggestion_uci)
         # Référence vers l'analyse Stockfish actuellement en cours (objet
         # chess.engine.AnalysisResult), pour pouvoir l'interrompre depuis un
         # autre thread si une position plus récente arrive.
@@ -83,6 +99,13 @@ class BridgeState:
         """side: 'w' ou 'b'."""
         with self.lock:
             self.my_side = side
+
+    def set_elo_tier(self, tier_id):
+        """tier_id : 1, 2 ou 3 (voir human_profile.ELO_TIERS)."""
+        if tier_id not in human_profile.ELO_TIERS:
+            return
+        with self.lock:
+            self.elo_tier_id = tier_id
 
     def _register_active_analysis(self, analysis):
         with self.lock:
@@ -163,6 +186,118 @@ class BridgeState:
             )
         finally:
             self._clear_active_analysis()
+
+    def handle_single_profile(self, fen, profile_id):
+        """
+        Analyse la position pour UN SEUL profil de jeu ("solid", "popular",
+        "creative", "classical" -- voir human_profile.py) au niveau Elo
+        actuellement sélectionné, et retourne directement un dict (même
+        pattern que handle_single_depth : une requête HTTP par flèche, pas
+        de streaming).
+        """
+        try:
+            board = chess.Board(fen)
+        except ValueError as e:
+            return {"error": f"FEN invalide reçu du navigateur : {e}", "profile": profile_id}
+
+        with self.lock:
+            is_new_position = fen != self.last_fen
+            self.last_fen = fen
+            my_side = self.my_side
+            elo_tier_id = self.elo_tier_id
+
+        if is_new_position:
+            self._cancel_current_analysis_if_any()
+
+        side_to_move = "w" if board.turn else "b"
+        if side_to_move != my_side:
+            if is_new_position and self.on_update:
+                camp = "Blancs" if my_side == "w" else "Noirs"
+                self.on_update(None, f"Au tour de l'adversaire (tu joues les {camp}).")
+            return {"skip": True, "profile": profile_id}
+
+        if board.is_game_over():
+            if is_new_position and self.on_update:
+                self.on_update(None, f"Partie terminée : {board.result()}")
+            return {"game_over": True, "result": board.result(), "profile": profile_id}
+
+        tier = human_profile.ELO_TIERS[elo_tier_id]
+
+        with self.engine_lock:
+            with self.lock:
+                if fen != self.last_fen:
+                    return {"stale": True, "profile": profile_id}  # position dépassée entre-temps
+
+            def _run_once():
+                cache_key = (fen, elo_tier_id)
+                if self._candidates_cache_key == cache_key:
+                    # Déjà calculé pour un autre profil sur cette même
+                    # position/niveau -- on réutilise, pas de nouvel appel
+                    # Stockfish.
+                    return self._candidates_cache_value
+                self._register_active_analysis(None)  # pas d'objet analysis() streamé ici, rien à annuler en cours de route
+                result, brd = self.engine.analyze_candidates(fen, multipv=tier.multipv, depth=tier.depth)
+                if result.get("game_over"):
+                    value = (result, brd, None)
+                else:
+                    # Avis Stockfish bridé à cet Elo (signal pour les profils
+                    # "populaire"/"classique") -- rapide (150ms), n'affecte
+                    # pas l'éval des candidats ci-dessus.
+                    elo_suggestion = self.engine.suggest_move_for_elo(fen, tier.elo_reference)
+                    value = (result, brd, elo_suggestion)
+                self._candidates_cache_key = cache_key
+                self._candidates_cache_value = value
+                return value
+
+            try:
+                result, brd, elo_suggestion = _run_once()
+            except chess.engine.EngineError as e:
+                self._restart_engine(reason=f"{type(e).__name__}: {e}")
+                try:
+                    result, brd, elo_suggestion = _run_once()
+                except Exception as e2:
+                    return {"error": f"Moteur Stockfish indisponible : {e2}", "profile": profile_id}
+            except Exception as e:
+                return {"error": f"Moteur Stockfish indisponible : {e}", "profile": profile_id}
+            finally:
+                self._clear_active_analysis()
+
+        with self.lock:
+            stale = fen != self.last_fen
+        if stale:
+            return {"stale": True, "profile": profile_id}
+        if result.get("game_over"):
+            return {"game_over": True, "result": result["result"], "profile": profile_id}
+
+        chosen = human_profile.select_move(
+            result["candidates"], elo_tier_id, profile_id, elo_suggestion_uci=elo_suggestion,
+        )
+        if chosen is None:
+            return {"error": "Aucun coup candidat trouvé pour cette position.", "profile": profile_id}
+
+        entry = {
+            "profile": profile_id,
+            "move_uci": chosen["move_uci"],
+            "move_san": chosen["move_san"],
+            "score": chosen["score"],
+            "pv_san": chosen["pv_san"],
+        }
+
+        # Explication en langage clair uniquement pour le dernier profil de
+        # la boucle (voir chess_coach_bridge.user.js, PROFILE_IDS[-1]) --
+        # pas la peine de la recalculer 4x pour la même position.
+        if profile_id == human_profile.PROFILE_IDS[-1]:
+            move_obj = chess.Move.from_uci(chosen["move_uci"])
+            if self.explain_mode == "api":
+                explanation = explain_move_via_api(fen, chosen["move_san"], chosen["pv_san"], chosen["score"])
+            else:
+                explanation = explain_move_local(board, move_obj, chosen["pv_san"])
+            entry["explanation"] = explanation
+
+        if self.on_profile_update:
+            self.on_profile_update(profile_id, dict(entry))
+
+        return entry
 
     def handle_single_depth(self, fen, depth):
         """
@@ -421,15 +556,19 @@ def _make_handler(state: BridgeState):
             try:
                 data = json.loads(body)
                 fen = data["fen"]
-                depth = data.get("depth")  # optionnel : requête à un seul palier
+                depth = data.get("depth")      # ancien mode : un seul palier de profondeur
+                profile = data.get("profile")  # nouveau mode : un seul profil "humain"
             except Exception:
                 self._send_single(400, {"error": "JSON invalide, champ \"fen\" attendu"})
                 return
 
-            if depth is not None:
-                # Nouveau mode : une requête = un seul palier, réponse
-                # classique en un bloc (pas de streaming -> pas de risque de
-                # buffering côté navigateur).
+            if profile is not None:
+                result = state.handle_single_profile(fen, profile)
+                self._send_single(200, result)
+            elif depth is not None:
+                # Mode "un seul palier de profondeur", conservé pour
+                # compatibilité (plus utilisé par défaut par le .user.js,
+                # mais toujours fonctionnel si besoin).
                 result = state.handle_single_depth(fen, int(depth))
                 self._send_single(200, result)
             else:
@@ -485,7 +624,7 @@ def _make_handler(state: BridgeState):
 
 
 def start_bridge_server(stockfish_path, explain_mode="local", on_update=None, on_depth_update=None,
-                         port=DEFAULT_PORT, threads=None, hash_mb=256, depth=None):
+                         on_profile_update=None, port=DEFAULT_PORT, threads=None, hash_mb=256, depth=None):
     """
     Démarre le serveur en tâche de fond (thread daemon) et retourne
     (server, state). Appelle state.close() pour bien fermer Stockfish
@@ -493,7 +632,8 @@ def start_bridge_server(stockfish_path, explain_mode="local", on_update=None, on
     """
     state = BridgeState(
         stockfish_path, explain_mode=explain_mode, on_update=on_update,
-        on_depth_update=on_depth_update, threads=threads, hash_mb=hash_mb, depth=depth,
+        on_depth_update=on_depth_update, on_profile_update=on_profile_update,
+        threads=threads, hash_mb=hash_mb, depth=depth,
     )
     handler_cls = _make_handler(state)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
