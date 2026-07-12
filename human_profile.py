@@ -46,7 +46,7 @@ class EloTier:
     label: str
     elo_min: int
     elo_max: int
-    elo_reference: int        # valeur envoyée à Stockfish (UCI_Elo) pour les profils "populaire"/"classique"
+    elo_reference: int         # valeur "typique" du niveau -- non utilisée par le moteur (voir historique), gardée pour référence/affichage futur
     multipv: int               # nombre de coups candidats analysés
     depth_min: int              # profondeur d'analyse OBJECTIVE -- bornes d'un tirage aléatoire
     depth_max: int              # (voir random_depth ci-dessous), jamais une valeur fixe coup après coup
@@ -196,23 +196,37 @@ def _score_solid(c, tier):
     return penalty
 
 
-def _score_popular(c, tier, elo_suggestion_uci):
+def _score_popular(c, tier):
     """
-    Bleu : CE QUE JOUERAIT UN MOTEUR BRIDÉ À CET ELO -- signal réaliste de
-    fréquence de jeu à ce niveau. Signal PRINCIPAL propre à ce profil (les
-    autres profils ne l'utilisent plus, pour éviter qu'ils convergent tous
-    sur le même coup).
+    Bleu : maximise les CHANCES DE GAIN PRATIQUES (WDL -- Win/Draw/Loss),
+    pas juste l'éval brute en centipawns. Signal PRINCIPAL propre à ce
+    profil : un coup qui garde une position plus "convertible" en pratique
+    (moins de risque de nulle, chances de gain solides) plutôt que le coup
+    mathématiquement optimal mais délicat à jouer -- une différence
+    reconnaissable de "comment les joueurs choisissent en pratique".
+
+    (Avant, ce profil s'ancrait sur l'avis d'un Stockfish bridé en Elo
+    -- UCI_LimitStrength/UCI_Elo, des extensions propres à Stockfish,
+    absentes de la plupart des autres moteurs. Remplacé par un signal WDL,
+    une option UCI standard supportée par la majorité des moteurs modernes,
+    y compris Berserk.)
     """
     target = tier.typical_eval_loss_cp * 0.8
-    bonus = 22 if elo_suggestion_uci and c["move_uci"] == elo_suggestion_uci else 0
-    return bonus + _band_penalty(c["eval_loss"], target, 0.7)
+    win_bonus = 0
+    if c.get("win_prob") is not None:
+        # Échelle empirique : +30 points pour un coup à 100% de chances de
+        # gain plutôt que 0% -- suffisant pour départager des coups très
+        # proches en éval sans jamais l'emporter sur le plafond Elo (déjà
+        # filtré en amont).
+        win_bonus = c["win_prob"] * 30
+    return win_bonus + _band_penalty(c["eval_loss"], target, 0.7)
 
 
-def _score_creative(c, tier, elo_suggestion_uci):
+def _score_creative(c, tier):
     """
-    Rose : s'écarte du choix "évident" (le meilleur ET celui du moteur
-    bridé) -- capture, poussée centrale, coup moins attendu -- tout en
-    restant dans la tolérance. Vise délibérément une perte un peu plus
+    Rose : s'écarte du choix "évident" (le meilleur ET le plus "convertible"
+    en pratique) -- capture, poussée centrale, coup moins attendu -- tout
+    en restant dans la tolérance. Vise délibérément une perte un peu plus
     élevée que "popular"/"classical" (plus de personnalité, jamais au-delà
     du plafond du niveau).
 
@@ -228,8 +242,8 @@ def _score_creative(c, tier, elo_suggestion_uci):
         novelty += 8
     if c["is_capture"]:
         novelty += 6
-    if elo_suggestion_uci and c["move_uci"] == elo_suggestion_uci:
-        novelty -= 10  # justement PAS le choix "populaire" -- sinon ça reconverge avec ce profil
+    if c.get("win_prob") is not None:
+        novelty -= c["win_prob"] * 10  # justement PAS le choix le plus "sûr en pratique" -- sinon ça reconverge avec "populaire"
     return novelty + _band_penalty(c["eval_loss"], target, 0.5)
 
 
@@ -237,10 +251,9 @@ def _score_classical(c, tier):
     """
     Blanc : coup NATUREL/développement/textbook -- basé sur des traits
     INTRINSÈQUES au coup (développement de pièce mineure, poussée centrale,
-    roque, absence de complication tactique), PAS sur l'avis Elo-bridé
-    (contrairement à avant, où ce profil utilisait EXACTEMENT le même
-    signal que "populaire" et convergeait presque toujours sur le même
-    coup). C'est ce qui rend ce profil vraiment différent de "populaire".
+    roque, absence de complication tactique). Signal totalement indépendant
+    des autres profils -- c'est ce qui le rend vraiment différent de
+    "populaire" (WDL) et "solide" (perte d'éval minimale).
     """
     target = tier.typical_eval_loss_cp * 0.6
     naturalness = 0
@@ -277,7 +290,7 @@ def _softmax_pick(scored, humanity, rng):
     return scored[-1][0]
 
 
-def select_move(candidates, elo_tier_id, profile_id, elo_suggestion_uci=None,
+def select_move(candidates, elo_tier_id, profile_id,
                  humanity=DEFAULT_HUMANITY, rng=None, board=None):
     """
     candidates : liste de dicts (voir ChessCoachEngine.analyze_candidates),
@@ -297,9 +310,9 @@ def select_move(candidates, elo_tier_id, profile_id, elo_suggestion_uci=None,
     if profile_id == "solid":
         scored = [(c, _score_solid(c, tier)) for c in eligible]
     elif profile_id == "popular":
-        scored = [(c, _score_popular(c, tier, elo_suggestion_uci)) for c in eligible]
+        scored = [(c, _score_popular(c, tier)) for c in eligible]
     elif profile_id == "creative":
-        scored = [(c, _score_creative(c, tier, elo_suggestion_uci)) for c in eligible]
+        scored = [(c, _score_creative(c, tier)) for c in eligible]
     elif profile_id == "classical":
         scored = [(c, _score_classical(c, tier)) for c in eligible]
     else:

@@ -37,6 +37,23 @@ class ChessCoachEngine:
         except chess.engine.EngineError as e:
             print(f"⚠ Impossible de configurer Threads/Hash sur ce Stockfish : {e}")
 
+        # UCI_ShowWDL (Win/Draw/Loss en pour-mille) : option UCI standard
+        # (pas propre à un moteur en particulier, contrairement à
+        # UCI_LimitStrength/UCI_Elo) -- supportée par Stockfish, Berserk,
+        # Lc0, et beaucoup d'autres. Utilisée par human_profile.py pour le
+        # profil "populaire" : maximiser les chances de gain PRATIQUES
+        # plutôt que suivre un avis Elo-bridé (qui n'existe plus, voir
+        # l'historique -- UCI_Elo est propre à Stockfish).
+        self.wdl_supported = "UCI_ShowWDL" in self.engine.options
+        if self.wdl_supported:
+            try:
+                self.engine.configure({"UCI_ShowWDL": True})
+            except chess.engine.EngineError as e:
+                print(f"⚠ Impossible d'activer UCI_ShowWDL : {e}")
+                self.wdl_supported = False
+        else:
+            print("ℹ Ce moteur ne fournit pas de statistiques Win/Draw/Loss -- le profil \"populaire\" s'appuiera uniquement sur la perte d'éval.")
+
     def analyze_candidates(self, fen, multipv=4, depth=18, safe_mode=False):
         """
         Retourne jusqu'à `multipv` coups candidats objectivement bons,
@@ -101,6 +118,18 @@ class ChessCoachEngine:
             is_developing_minor = piece_type in (chess.KNIGHT, chess.BISHOP) and from_rank == back_rank
             is_pawn_center_push = piece_type == chess.PAWN and chess.square_file(move.to_square) in (3, 4)
 
+            # WDL (Win/Draw/Loss) du point de vue du camp qui joue ce coup,
+            # si le moteur le fournit (voir __init__, UCI_ShowWDL) -- sert
+            # de signal "chances de gain pratiques", distinct de l'éval
+            # brute en centipawns. None si le moteur ne le fournit pas.
+            win_prob = None
+            wdl = info.get("wdl")
+            if wdl is not None:
+                pov_wdl = wdl.pov(board.turn)
+                total = pov_wdl.wins + pov_wdl.draws + pov_wdl.losses
+                if total > 0:
+                    win_prob = pov_wdl.wins / total
+
             candidates.append({
                 "move_uci": move.uci(),
                 "move_san": board.san(move),
@@ -114,6 +143,7 @@ class ChessCoachEngine:
                 "is_pawn_center_push": is_pawn_center_push,
                 "to_square_central": chess.square_file(move.to_square) in (3, 4)
                                       and chess.square_rank(move.to_square) in (3, 4),
+                "win_prob": win_prob,
                 "pv_san": pv_san,
             })
 
@@ -138,62 +168,6 @@ class ChessCoachEngine:
             results.append(info)
             remaining_moves = [m for m in remaining_moves if m != pv[0]]
         return results
-
-    def configure_as_elo_advisor(self):
-        """
-        Bascule ce moteur en 'conseiller Elo' PERMANENT : UCI_LimitStrength
-        reste activé pour toute sa durée de vie, faible Threads/Hash (pas
-        besoin de puissance pour un avis rapide à 150ms). Seul UCI_Elo est
-        modifié entre 2 appels (jamais LimitStrength lui-même) -- c'est
-        beaucoup plus sûr que de basculer LimitStrength ON/OFF à chaque
-        appel sur le moteur PRINCIPAL (voir suggest_move ci-dessous et le
-        commentaire dans web_bridge.py, _init_elo_advisor).
-
-        IMPORTANT : UCI_LimitStrength / UCI_Elo sont des extensions
-        PROPRES À STOCKFISH, pas des options UCI standard -- la plupart des
-        autres moteurs (Berserk, Ethereal, etc.) ne les ont pas du tout. Si
-        ce moteur ne les supporte pas, on le détecte ICI, une seule fois,
-        et on désactive proprement le conseiller Elo pour le reste de la
-        session (self.elo_advisor_supported = False) -- sans ça,
-        suggest_move() aurait échoué à CHAQUE position, provoquant un
-        redémarrage du processus moteur en boucle continue pendant toute
-        la partie (observé en pratique : ça semble aussi avoir déstabilisé
-        le moteur principal, probablement par épuisement de ressources).
-        """
-        self.elo_advisor_supported = "UCI_LimitStrength" in self.engine.options
-        if not self.elo_advisor_supported:
-            print(
-                "ℹ Ce moteur ne supporte pas UCI_LimitStrength/UCI_Elo (spécifique à Stockfish) -- "
-                "le conseiller Elo est désactivé pour cette session. Les profils \"populaire\"/"
-                "\"classique\" fonctionnent quand même, juste sans ce signal en plus."
-            )
-            return
-        try:
-            self.engine.configure({"Threads": 1, "Hash": 16, "UCI_LimitStrength": True})
-        except chess.engine.EngineError as e:
-            print(f"⚠ Impossible de configurer le moteur 'conseiller Elo' : {e}")
-            self.elo_advisor_supported = False
-
-    def suggest_move(self, fen, elo, movetime_ms=150):
-        """
-        À utiliser UNIQUEMENT sur un moteur déjà configuré via
-        configure_as_elo_advisor() (LimitStrength déjà actif en permanence).
-        Ne fait que changer UCI_Elo puis lance une analyse courte -- ne
-        touche JAMAIS LimitStrength ici (c'est ce qui rendait l'ancienne
-        version instable : reconfigurer LimitStrength sur le moteur
-        PRINCIPAL, potentiellement pendant qu'une autre recherche vient
-        juste de se terminer dessus, pouvait corrompre son état interne et
-        provoquer un vrai crash natif de Stockfish).
-
-        Retourne None immédiatement (sans rien tenter) si ce moteur ne
-        supporte pas UCI_Elo -- voir configure_as_elo_advisor().
-        """
-        if not getattr(self, "elo_advisor_supported", True):
-            return None
-        self.engine.configure({"UCI_Elo": max(1320, min(3190, elo))})
-        info = self.engine.analyse(chess.Board(fen), chess.engine.Limit(time=movetime_ms / 1000))
-        pv = info.get("pv")
-        return pv[0].uci() if pv else None
 
     def analyze_fen_progressive(self, fen, depths=PROGRESSIVE_DEPTHS, on_analysis_started=None):
         """
@@ -240,7 +214,7 @@ class ChessCoachEngine:
                 # dépasse (ou atteint) le prochain palier demandé.
                 while next_idx < len(targets) and depth >= targets[next_idx]:
                     elapsed = time.monotonic() - start_time  # [debug perf]
-                    print(f"[stockfish] palier {targets[next_idx]} atteint en {elapsed:.2f}s (depth réel Stockfish : {depth})")
+                    print(f"[moteur] palier {targets[next_idx]} atteint en {elapsed:.2f}s (depth réel : {depth})")
                     yield self._format_progressive_entry(board, info, targets[next_idx])
                     next_idx += 1
                 if next_idx >= len(targets):

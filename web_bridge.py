@@ -69,18 +69,6 @@ class BridgeState:
         # ne casse si le fichier est absent -- voir opening_book.py.
         book_path = os.path.join(app_paths.get_base_dir(), "opening_book.bin")
         self.opening_book = opening_book.OpeningBook(book_path)
-        # Second moteur Stockfish, INDÉPENDANT du principal, dédié aux avis
-        # "que jouerait un joueur de cet Elo" (voir human_profile.py,
-        # profils "populaire"/"classique"). Avant, on reconfigurait
-        # UCI_LimitStrength en direct sur le moteur PRINCIPAL entre 2
-        # analyses -- ça pouvait le faire crasher (access violation observé
-        # en pratique) si ce basculement arrivait pendant/juste après une
-        # recherche. Avec un moteur séparé, configuré une seule fois au
-        # démarrage et plus jamais reconfiguré en LimitStrength ensuite,
-        # cette classe de crash disparaît structurellement. Coût : un 2e
-        # processus Stockfish (léger : Threads=1, Hash=16 Mo).
-        self.elo_engine = ChessCoachEngine(stockfish_path, threads=1, hash_mb=16)
-        self.elo_engine.configure_as_elo_advisor()
         self.explain_mode = explain_mode
         self.on_update = on_update            # callback(lines, explanation) -> messages ponctuels (skip/erreur/fin de partie)
         self.on_depth_update = on_depth_update  # callback(depth, entry) -> ancien mode (profondeur brute), conservé pour compatibilité
@@ -98,33 +86,21 @@ class BridgeState:
         # de jeu proposé par les 4 profils, PAS juste la profondeur -- voir
         # human_profile.py pour le détail.
         self.elo_tier_id = human_profile.DEFAULT_ELO_TIER
-        # Cache des coups candidats (MultiPV) + avis Elo-bridé pour la
-        # DERNIÈRE position analysée. Les 4 profils (vert/bleu/rose/N&B)
-        # arrivent en 4 requêtes HTTP séparées pour LA MÊME position -- sans
-        # ce cache, chacune relancerait sa propre analyse MultiPV complète
-        # (4x le travail de Stockfish pour rien, et 4x plus de risque de
-        # backlog si les coups s'enchaînent vite). Protégé par engine_lock
-        # (jamais lu/écrit hors de ce verrou).
+        # Cache des coups candidats (MultiPV) pour la DERNIÈRE position
+        # analysée. Les 4 profils (vert/bleu/rose/N&B) arrivent en 4
+        # requêtes HTTP séparées pour LA MÊME position -- sans ce cache,
+        # chacune relancerait sa propre analyse MultiPV complète (4x le
+        # travail du moteur pour rien, et 4x plus de risque de backlog si
+        # les coups s'enchaînent vite). Protégé par engine_lock (jamais lu/
+        # écrit hors de ce verrou).
         self._candidates_cache_key = None      # (fen, elo_tier_id)
-        self._candidates_cache_value = None    # (result_dict, board, elo_suggestion_uci)
+        self._candidates_cache_value = None    # (result_dict, board)
         # Cache SÉPARÉ pour l'aperçu rapide (depth 12) -- ne doit surtout
         # pas se mélanger avec le cache principal ci-dessus (qui est à la
         # profondeur du niveau Elo choisi) : sinon la "vraie" requête
         # pourrait par erreur réutiliser le résultat rapide et peu profond.
         self._quick_cache_key = None           # fen
         self._quick_cache_value = None         # liste de candidats (depth 12)
-        # Positions pour lesquelles le moteur "conseiller Elo" a déjà
-        # planté 2 fois de suite (échec initial + échec après redémarrage).
-        # Certaines positions (tactiques, souvent avec un sacrifice
-        # disponible) font crasher de façon PARFAITEMENT REPRODUCTIBLE
-        # UCI_LimitStrength sur certains builds de Stockfish -- sans cette
-        # liste, chaque nouvelle tentative (bouton Recalculer, changement
-        # de niveau Elo, etc.) re-déclenchait le MÊME crash en boucle. Une
-        # fois une position dans cette liste, on n'utilise plus JAMAIS
-        # l'avis Elo-bridé pour elle (les profils s'en passent, sans
-        # bloquer le reste du coach). Bornée en taille pour ne pas grossir
-        # indéfiniment sur une très longue session.
-        self._elo_advisor_blacklist = set()
         # Même principe pour le moteur PRINCIPAL (analyse multi-candidats) :
         # certaines positions très tactiques/déséquilibrées font planter la
         # recherche multi-lignes de Stockfish de façon reproductible (crash
@@ -200,7 +176,7 @@ class BridgeState:
         cette fermeture dans un thread séparé, SANS l'attendre : peu importe
         qu'elle prenne du temps, ça ne bloque plus rien d'autre.
         """
-        print(f"⚠ Le moteur Stockfish semble avoir crashé, redémarrage... ({reason})")
+        print(f"⚠ Le moteur semble avoir crashé, redémarrage... ({reason})")
         self._clear_active_analysis()
 
         old_engine = self.engine
@@ -216,24 +192,7 @@ class BridgeState:
         self.engine = ChessCoachEngine(
             self.stockfish_path, threads=self.threads, hash_mb=self.hash_mb
         )
-        print("✅ Stockfish redémarré.")
-
-    def _restart_elo_engine(self, reason=""):
-        """Équivalent de _restart_engine, mais pour le moteur 'conseiller Elo' dédié."""
-        print(f"⚠ Le moteur 'conseiller Elo' semble avoir crashé, redémarrage... ({reason})")
-        old_elo_engine = self.elo_engine
-
-        def _cleanup_old_elo_engine():
-            try:
-                old_elo_engine.close()
-            except Exception:
-                pass
-
-        threading.Thread(target=_cleanup_old_elo_engine, daemon=True).start()
-
-        self.elo_engine = ChessCoachEngine(self.stockfish_path, threads=1, hash_mb=16)
-        self.elo_engine.configure_as_elo_advisor()
-        print("✅ Moteur 'conseiller Elo' redémarré.")
+        print("✅ Moteur redémarré.")
 
     def _progressive_with_auto_restart(self, fen):
         """
@@ -322,7 +281,7 @@ class BridgeState:
         profiles_out = {}
         for profile_id in human_profile.PROFILE_IDS:
             chosen = human_profile.select_move(
-                candidates, elo_tier_id, profile_id, elo_suggestion_uci=None, board=board,
+                candidates, elo_tier_id, profile_id, board=board,
             )
             if chosen is not None:
                 profiles_out[profile_id] = {
@@ -396,10 +355,9 @@ class BridgeState:
                     )
                     if book_candidates:
                         result = {"game_over": False, "candidates": book_candidates}
-                        value = (result, board, None)  # pas d'avis Elo-bridé nécessaire en mode livre
                         self._candidates_cache_key = cache_key
-                        self._candidates_cache_value = value
-                        return value
+                        self._candidates_cache_value = result
+                        return result
 
                 # 2. Hors théorie (ou pas de livre) -> Stockfish comme avant.
                 self._register_active_analysis(None)  # pas d'objet analysis() streamé ici, rien à annuler en cours de route
@@ -425,47 +383,16 @@ class BridgeState:
                     result, brd = self.engine.analyze_candidates(
                         fen, multipv=tier.multipv, depth=min(tier.random_depth(), 14), safe_mode=True,
                     )
-                if result.get("game_over"):
-                    elo_suggestion = None
-                elif fen in self._elo_advisor_blacklist:
-                    # Cette position a déjà fait planter le conseiller Elo
-                    # précédemment -- pas la peine de retenter, ça
-                    # crasherait pareil. Les profils s'en passent pour ce
-                    # coup (bonus "popular"/pas de pénalité), sans bloquer
-                    # le reste.
-                    elo_suggestion = None
-                else:
-                    # Avis du moteur "conseiller Elo" DÉDIÉ (processus
-                    # séparé, jamais reconfiguré pendant une recherche du
-                    # moteur principal -- voir configure_as_elo_advisor).
-                    # Sa propre gestion d'erreur est isolée : s'il crashe,
-                    # ça ne doit pas faire échouer toute la requête ni
-                    # redémarrer le moteur principal pour rien.
-                    try:
-                        elo_suggestion = self.elo_engine.suggest_move(fen, tier.elo_reference)
-                    except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
-                        self._restart_elo_engine(reason=f"{type(e).__name__}: {e}")
-                        try:
-                            elo_suggestion = self.elo_engine.suggest_move(fen, tier.elo_reference)
-                        except Exception as e2:
-                            # 2 échecs de suite sur CETTE position précise :
-                            # on la met en liste noire pour ne plus jamais
-                            # la retenter (voir commentaire dans __init__).
-                            print(f"⚠ Position mise en liste noire pour le conseiller Elo (crash répété) : {fen}")
-                            if len(self._elo_advisor_blacklist) < 500:  # borne de sécurité
-                                self._elo_advisor_blacklist.add(fen)
-                            elo_suggestion = None
-                value = (result, brd, elo_suggestion)
                 self._candidates_cache_key = cache_key
-                self._candidates_cache_value = value
-                return value
+                self._candidates_cache_value = result
+                return result
 
             try:
-                result, brd, elo_suggestion = _run_candidates()
+                result = _run_candidates()
             except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
                 self._restart_engine(reason=f"{type(e).__name__}: {e}")
                 try:
-                    result, brd, elo_suggestion = _run_candidates()
+                    result = _run_candidates()
                 except Exception as e2:
                     return {"error": f"Moteur Stockfish indisponible : {e2}", "profile": profile_id}
             finally:
@@ -479,8 +406,7 @@ class BridgeState:
             return {"game_over": True, "result": result["result"], "profile": profile_id}
 
         chosen = human_profile.select_move(
-            result["candidates"], elo_tier_id, profile_id, elo_suggestion_uci=elo_suggestion,
-            board=board,
+            result["candidates"], elo_tier_id, profile_id, board=board,
         )
         if chosen is None:
             return {"error": "Aucun coup candidat trouvé pour cette position.", "profile": profile_id}
@@ -749,10 +675,6 @@ class BridgeState:
     def close(self):
         try:
             self.engine.close()
-        except Exception:
-            pass
-        try:
-            self.elo_engine.close()
         except Exception:
             pass
 

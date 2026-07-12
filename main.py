@@ -111,7 +111,7 @@ class CoachApp:
         jusqu'ici AUCUN redémarrage automatique : un crash rendait le coach
         inutilisable en boucle jusqu'à fermeture manuelle du programme.
         """
-        print(f"⚠ Le moteur Stockfish semble avoir crashé, redémarrage... ({reason})")
+        print(f"⚠ Le moteur semble avoir crashé, redémarrage... ({reason})")
         old_engine = self.engine
 
         def _cleanup_old_engine():
@@ -125,7 +125,7 @@ class CoachApp:
         self.engine = ChessCoachEngine(
             self.stockfish_path, threads=self.threads, hash_mb=self.hash_mb
         )
-        print("✅ Stockfish redémarré.")
+        print("✅ Moteur redémarré.")
 
     def _run_one_analysis(self):
         try:
@@ -380,8 +380,8 @@ def interactive_menu():
 
         elif choice == "4":
             sf_input = input(
-                "Chemin vers stockfish.exe (laisse vide pour utiliser "
-                "STOCKFISH_PATH ou le PATH système) : "
+                "Chemin vers le moteur principal (Stockfish, Berserk, ...) "
+                "(laisse vide pour utiliser STOCKFISH_PATH ou le PATH système) : "
             ).strip()
             stockfish_path = resolve_stockfish_path(sf_input or None)
             print("Démarrage du mode navigateur...")
