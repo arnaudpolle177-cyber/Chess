@@ -57,6 +57,15 @@ jobs:
           cp dist/CoachEchecs.exe package/CoachEchecs/
           cp dist/stockfish.exe package/CoachEchecs/
           cp README_UTILISATEUR.md package/CoachEchecs/LISEZ-MOI.md
+          # Livre d'ouvertures : optionnel. S'il est présent à la racine du
+          # dépôt (voir opening_book.py), on l'embarque à côté de l'exe --
+          # sinon le coach fonctionne quand même, juste sans lui.
+          if [ -f opening_book.bin ]; then
+            cp opening_book.bin package/CoachEchecs/
+            echo "Livre d'ouvertures inclus dans le package."
+          else
+            echo "Pas de opening_book.bin trouvé à la racine du dépôt -- package sans livre d'ouvertures."
+          fi
           cd package
           7z a -r CoachEchecs-windows.zip CoachEchecs
 
