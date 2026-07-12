@@ -43,6 +43,24 @@ import app_paths
 DEFAULT_PORT = 8765
 
 
+def _infer_move_to_square(old_board, new_board):
+    """
+    Déduction légère (pas une vérité absolue, juste un indice stylistique)
+    de la case d'arrivée du coup joué entre 2 positions consécutives : la
+    case qui contient maintenant une pièce alors qu'elle était vide ou
+    occupée différemment avant. En cas de plusieurs candidats (roque :
+    roi + tour bougent tous les deux), retourne le premier trouvé -- un
+    léger flou ici n'a qu'un impact cosmétique sur le bonus de cohérence de
+    plan, jamais sur la validité des coups proposés.
+    """
+    for square in chess.SQUARES:
+        old_piece = old_board.piece_at(square)
+        new_piece = new_board.piece_at(square)
+        if new_piece is not None and new_piece != old_piece:
+            return square
+    return None
+
+
 class BridgeState:
     """État partagé entre le serveur HTTP et le reste du programme."""
 
@@ -87,6 +105,12 @@ class BridgeState:
         self.engine_lock = threading.Lock()
         self.last_fen = None
         self.my_side = "w"
+        # Suivi pour le bonus de "cohérence de plan" (voir human_profile.py,
+        # _plan_coherence_bonus) : dernière position VRAIMENT nouvelle vue
+        # (pour calculer le diff), et case d'arrivée déduite du dernier
+        # coup réellement joué (le mien ou celui de l'adversaire).
+        self._prev_tracked_board = None
+        self._last_move_to_square = None
         # Niveau Elo actif (voir human_profile.ELO_TIERS). Change le style
         # de jeu proposé par les 4 profils, PAS juste la profondeur -- voir
         # human_profile.py pour le détail.
@@ -112,6 +136,16 @@ class BridgeState:
         # bloquer le reste du coach). Bornée en taille pour ne pas grossir
         # indéfiniment sur une très longue session.
         self._elo_advisor_blacklist = set()
+        # Même principe pour le moteur PRINCIPAL (analyse multi-candidats) :
+        # certaines positions très tactiques/déséquilibrées font planter la
+        # recherche multi-lignes de Stockfish de façon reproductible (crash
+        # observé en pratique, jamais lié au CPU). Une position qui a déjà
+        # fait planter l'analyse complète (multipv=3) bascule directement
+        # sur une analyse dégradée mais fiable (multipv=1, profondeur
+        # réduite) au lieu de retenter la même config qui replanterait --
+        # les 4 profils partagent alors le même coup pour cette position
+        # précise, plutôt que de rester bloqués sans rien afficher.
+        self._main_engine_degraded = set()
         # Référence vers l'analyse Stockfish actuellement en cours (objet
         # chess.engine.AnalysisResult), pour pouvoir l'interrompre depuis un
         # autre thread si une position plus récente arrive.
@@ -131,6 +165,25 @@ class BridgeState:
         """side: 'w' ou 'b'."""
         with self.lock:
             self.my_side = side
+
+    def _update_last_move_tracking(self, new_board):
+        """
+        Appelé uniquement quand une position VRAIMENT nouvelle arrive (pas
+        à chaque requête de profil). Déduit la case d'arrivée du coup qui
+        vient d'être joué (diff avec la position précédemment suivie), pour
+        le bonus de cohérence de plan -- voir human_profile.py.
+        Best-effort : une déduction imprécise (ex: 1er coup de la partie,
+        ou plateau réinitialisé) n'a qu'un impact cosmétique mineur (juste
+        un petit bonus de scoring en moins), donc jamais bloquant.
+        """
+        if self._prev_tracked_board is not None:
+            try:
+                to_sq = _infer_move_to_square(self._prev_tracked_board, new_board)
+                if to_sq is not None:
+                    self._last_move_to_square = to_sq
+            except Exception:
+                pass  # cosmétique seulement, pas grave si ça échoue
+        self._prev_tracked_board = new_board.copy()
 
     def set_elo_tier(self, tier_id):
         """tier_id : 1, 2 ou 3 (voir human_profile.ELO_TIERS)."""
@@ -257,6 +310,7 @@ class BridgeState:
 
         if is_new_position:
             self._cancel_current_analysis_if_any()
+            self._update_last_move_tracking(board)
 
         side_to_move = "w" if board.turn else "b"
         if side_to_move != my_side:
@@ -306,7 +360,23 @@ class BridgeState:
 
                 # 2. Hors théorie (ou pas de livre) -> Stockfish comme avant.
                 self._register_active_analysis(None)  # pas d'objet analysis() streamé ici, rien à annuler en cours de route
-                result, brd = self.engine.analyze_candidates(fen, multipv=tier.multipv, depth=tier.random_depth())
+                effective_multipv = 1 if fen in self._main_engine_degraded else tier.multipv
+                try:
+                    result, brd = self.engine.analyze_candidates(fen, multipv=effective_multipv, depth=tier.random_depth())
+                except chess.engine.EngineError as e:
+                    self._restart_engine(reason=f"{type(e).__name__}: {e}")
+                    if fen not in self._main_engine_degraded:
+                        print(f"⚠ Position basculée en mode dégradé (multipv=1) pour le moteur principal (crash répété) : {fen}")
+                        if len(self._main_engine_degraded) < 500:  # borne de sécurité
+                            self._main_engine_degraded.add(fen)
+                    # On retente UNE fois en mode dégradé (multipv=1,
+                    # profondeur plus modeste) -- beaucoup moins de risque
+                    # de crash qu'une recherche multi-lignes complète. Si
+                    # même ÇA replante, l'exception remonte normalement
+                    # jusqu'au bloc try/except autour de _run_candidates()
+                    # (voir plus bas), qui retourne une erreur propre pour
+                    # CETTE requête plutôt que de planter tout le serveur.
+                    result, brd = self.engine.analyze_candidates(fen, multipv=1, depth=min(tier.random_depth(), 14))
                 if result.get("game_over"):
                     elo_suggestion = None
                 elif fen in self._elo_advisor_blacklist:
@@ -364,6 +434,7 @@ class BridgeState:
 
         chosen = human_profile.select_move(
             result["candidates"], elo_tier_id, profile_id, elo_suggestion_uci=elo_suggestion,
+            board=board,
         )
         if chosen is None:
             return {"error": "Aucun coup candidat trouvé pour cette position.", "profile": profile_id}

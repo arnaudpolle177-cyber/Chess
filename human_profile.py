@@ -33,9 +33,11 @@ Architecture évolutive :
 - Futur curseur "Humanité" -> humanity devient un paramètre venant de l'UI
   au lieu de DEFAULT_HUMANITY.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 import random
+
+import chess
 
 
 @dataclass(frozen=True)
@@ -69,14 +71,24 @@ class EloTier:
 
 ELO_TIERS = {
     1: EloTier(id=1, label="1800-2200", elo_min=1800, elo_max=2200, elo_reference=2000,
-               multipv=4, depth_min=11, depth_max=13, max_eval_loss_cp=90, typical_eval_loss_cp=35),
+               # multipv=3 (pas 4) : dans les crashs Stockfish observés en
+               # pratique, la recherche plantait systématiquement AVANT
+               # d'établir la 3e/4e meilleure ligne, toujours sur des
+               # positions très tactiques/déséquilibrées -- signe d'un vrai
+               # bug de Stockfish dans sa recherche multi-lignes sur ce
+               # type de position, pas un souci CPU ni de notre code. On
+               # réduit la marge (moins de lignes à établir) pour limiter
+               # le risque, quitte à perdre un peu de diversité entre les
+               # 4 profils (toujours 4 flèches -- voir le mécanisme de
+               # repli dans web_bridge.py si même ça continue à planter).
+               multipv=3, depth_min=11, depth_max=13, max_eval_loss_cp=90, typical_eval_loss_cp=35),
     2: EloTier(id=2, label="2300-2700", elo_min=2300, elo_max=2700, elo_reference=2500,
-               multipv=4, depth_min=15, depth_max=17, max_eval_loss_cp=50, typical_eval_loss_cp=18),
+               multipv=3, depth_min=15, depth_max=17, max_eval_loss_cp=50, typical_eval_loss_cp=18),
     3: EloTier(id=3, label="2800-3200", elo_min=2800, elo_max=3200, elo_reference=3000,
                # Plafonné à 19 (pas 20) : depth 20 en multipv=4 est nettement
                # plus lent pour un gain de précision marginal à ce niveau
                # déjà quasi-parfait -- pas un bon rapport temps/qualité.
-               multipv=4, depth_min=18, depth_max=19, max_eval_loss_cp=20, typical_eval_loss_cp=6),
+               multipv=3, depth_min=18, depth_max=19, max_eval_loss_cp=20, typical_eval_loss_cp=6),
 }
 DEFAULT_ELO_TIER = 2
 
@@ -88,6 +100,57 @@ DEFAULT_ELO_TIER = 2
 # problème "coup d'ordinateur". 0.35 laisse une vraie variation coup après
 # coup, tout en restant dans la fenêtre Elo (jamais un blunder).
 DEFAULT_HUMANITY = 0.35
+
+
+def compute_tightening_factor(board):
+    """
+    FEATURE : resserre automatiquement la fenêtre de tolérance Elo dans les
+    positions où un humain n'a de toute façon pas vraiment le choix (échec
+    avec peu de réponses, très peu de coups légaux). Dans ces positions, même
+    un joueur plus faible trouve généralement LE bon coup -- il n'y a pas de
+    vraie marge d'erreur "humaine" à simuler, contrairement à une position
+    calme avec plein d'options raisonnables.
+
+    Retourne un facteur multiplicatif (0 < f <= 1) appliqué à
+    max_eval_loss_cp ET typical_eval_loss_cp du niveau choisi -- 1.0 = aucun
+    resserrement (position normale, plein de choix).
+    """
+    try:
+        n_legal = board.legal_moves.count()
+    except Exception:
+        return 1.0
+
+    if board.is_check():
+        if n_legal <= 2:
+            return 0.25  # échec avec 1-2 réponses possibles : quasi forcé
+        if n_legal <= 4:
+            return 0.5
+
+    if n_legal <= 3:
+        return 0.35  # très peu de coups légaux, échec ou non
+    if n_legal <= 6:
+        return 0.65
+
+    return 1.0
+
+
+def _tiered_for_position(tier: EloTier, board):
+    """
+    Applique compute_tightening_factor() au niveau Elo choisi pour CETTE
+    position précise, sans jamais modifier ELO_TIERS lui-même (EloTier est
+    immuable -- dataclasses.replace() crée une copie ajustée à la volée).
+    """
+    if board is None:
+        return tier
+    factor = compute_tightening_factor(board)
+    if factor >= 1.0:
+        return tier
+    return replace(
+        tier,
+        max_eval_loss_cp=max(5, round(tier.max_eval_loss_cp * factor)),
+        typical_eval_loss_cp=max(2, round(tier.typical_eval_loss_cp * factor)),
+    )
+
 
 
 def _eligible_candidates(candidates, tier: EloTier):
@@ -147,6 +210,10 @@ def _score_creative(c, tier, elo_suggestion_uci):
     restant dans la tolérance. Vise délibérément une perte un peu plus
     élevée que "popular"/"classical" (plus de personnalité, jamais au-delà
     du plafond du niveau).
+
+    Volontairement PAS de bonus de cohérence de plan ici : ce profil vise
+    justement à s'écarter de l'évident -- rester dans le même secteur du
+    plateau à chaque coup irait à l'encontre de son principe.
     """
     target = tier.typical_eval_loss_cp * 1.3
     novelty = 0
@@ -206,15 +273,19 @@ def _softmax_pick(scored, humanity, rng):
 
 
 def select_move(candidates, elo_tier_id, profile_id, elo_suggestion_uci=None,
-                 humanity=DEFAULT_HUMANITY, rng=None):
+                 humanity=DEFAULT_HUMANITY, rng=None, board=None):
     """
     candidates : liste de dicts (voir ChessCoachEngine.analyze_candidates),
     déjà analysés à pleine force.
+    board : position actuelle (chess.Board), optionnel -- sert à resserrer
+    automatiquement la fenêtre de tolérance dans les positions très forcées
+    (voir compute_tightening_factor). Si omis, aucun resserrement.
     Retourne UN candidat (dict), ou None si `candidates` est vide.
     """
     if not candidates:
         return None
     tier = ELO_TIERS.get(elo_tier_id, ELO_TIERS[DEFAULT_ELO_TIER])
+    tier = _tiered_for_position(tier, board)
     eligible = _eligible_candidates(candidates, tier)
     rng = rng or random
 
