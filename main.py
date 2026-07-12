@@ -217,6 +217,7 @@ class BrowserBridgeApp:
             self.stockfish_path,
             explain_mode=self.explain_mode,
             on_update=self._on_update,
+            on_depth_update=self._on_depth_update,
             port=self.port,
             threads=self.threads,
             hash_mb=self.hash_mb,
@@ -237,10 +238,20 @@ class BrowserBridgeApp:
                 self.state.close()
 
     def _on_update(self, lines, explanation):
+        # N'arrive plus qu'avec lines=None (messages ponctuels : au tour de
+        # l'adversaire, partie terminée, erreur) -- les résultats d'analyse
+        # progressive passent maintenant par _on_depth_update ci-dessous.
         if lines is None:
             self.overlay.show_error(explanation)
         else:
             self.overlay.update_content(lines=lines, explanation=explanation)
+
+    def _on_depth_update(self, depth, entry):
+        # Met à jour uniquement la ligne du palier concerné (les autres
+        # restent affichées telles quelles). L'explication n'est incluse
+        # dans entry que pour le palier le plus profond (voir web_bridge.py)
+        # -- update_depth_line() l'affiche automatiquement si présente.
+        self.overlay.update_depth_line(depth, entry)
 
 
 def resolve_stockfish_path(cli_path):

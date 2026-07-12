@@ -4,10 +4,6 @@ Pont HTTP local entre ton site web (qui lit le plateau directement dans le
 DOM en JavaScript, voir chess_coach_bridge.user.js) et le moteur Stockfish
 côté Python.
 
-Remplace complètement la capture d'écran + reconnaissance d'image : le
-navigateur connaît déjà la position exacte (c'est lui qui l'affiche), donc
-il n'y a plus aucune erreur de reconnaissance possible.
-
 Fonctionnement :
 - Le JS de ta page fait un POST http://127.0.0.1:8765/fen avec {"fen": "..."}
   à chaque coup joué (le sien ou celui de l'adversaire).
@@ -15,12 +11,20 @@ Fonctionnement :
   d'approfondissement itératif) et répond en NDJSON (une ligne JSON par
   palier de profondeur atteint : 10, puis 15, puis 20 par défaut), au fil de
   l'eau plutôt que d'attendre la fin complète de l'analyse.
-- Le JS utilise chaque ligne pour dessiner/mettre à jour la flèche
-  correspondante (vert = depth 10, bleu = depth 15, rouge = depth 20).
 - Si ce n'est pas le tour du camp choisi ("Changer de camp" dans la fenêtre
   Python), on ne calcule/n'affiche rien pour l'adversaire.
-- En parallèle, le dernier résultat (profondeur max atteinte) est aussi
-  transmis à la petite fenêtre Tkinter existante (texte + explication).
+- Chaque palier reçu met aussi à jour, en direct, la ligne correspondante
+  dans la fenêtre Tkinter (on_depth_update), et l'explication finale est
+  ajoutée une fois le palier le plus profond atteint.
+
+Annulation des analyses obsolètes (important) :
+- Si une nouvelle position arrive alors qu'une analyse précédente tourne
+  encore, on NE LA MET PAS EN ATTENTE derrière un verrou (ça faisait
+  s'accumuler des threads bloqués au fil d'une partie -> plantage à la
+  longue). On demande activement à Stockfish d'arrêter la recherche en
+  cours (analysis.stop()) : l'ancienne analyse, devenue inutile de toute
+  façon, se termine alors quasi instantanément et libère la place pour la
+  nouvelle.
 """
 import json
 import threading
@@ -39,7 +43,7 @@ class BridgeState:
     """État partagé entre le serveur HTTP et le reste du programme."""
 
     def __init__(self, stockfish_path, explain_mode="local", on_update=None,
-                 threads=None, hash_mb=256, depth=None):
+                 on_depth_update=None, threads=None, hash_mb=256, depth=None):
         self.stockfish_path = stockfish_path
         self.threads = threads
         self.hash_mb = hash_mb
@@ -49,19 +53,48 @@ class BridgeState:
         self.depths = (depth,) if depth is not None else PROGRESSIVE_DEPTHS
         self.engine = ChessCoachEngine(stockfish_path, threads=threads, hash_mb=hash_mb)
         self.explain_mode = explain_mode
-        self.on_update = on_update  # callback(lines, explanation) -> ex: overlay.update_content
+        self.on_update = on_update            # callback(lines, explanation) -> messages ponctuels (skip/erreur/fin de partie)
+        self.on_depth_update = on_depth_update  # callback(depth, entry) -> une ligne progressive
+        # self.lock protège UNIQUEMENT les petites variables d'état
+        # ci-dessous (jamais tenu pendant le calcul Stockfish ou l'écriture
+        # réseau, contrairement à avant).
         self.lock = threading.Lock()
+        # self.engine_lock garantit qu'un seul thread parle à Stockfish à la
+        # fois (le moteur ne supporte qu'une recherche à la fois).
+        self.engine_lock = threading.Lock()
         self.last_fen = None
-        # Camp pour lequel on veut des conseils ("w" ou "b"). Quand ce n'est
-        # pas le tour de ce camp, on ignore l'analyse (pas la peine de
-        # montrer les meilleurs coups pour l'adversaire, ni de solliciter
-        # Stockfish pour rien).
         self.my_side = "w"
+        # Référence vers l'analyse Stockfish actuellement en cours (objet
+        # chess.engine.AnalysisResult), pour pouvoir l'interrompre depuis un
+        # autre thread si une position plus récente arrive.
+        self.active_analysis = None
 
     def set_my_side(self, side):
         """side: 'w' ou 'b'."""
         with self.lock:
             self.my_side = side
+
+    def _register_active_analysis(self, analysis):
+        with self.lock:
+            self.active_analysis = analysis
+
+    def _clear_active_analysis(self):
+        with self.lock:
+            self.active_analysis = None
+
+    def _cancel_current_analysis_if_any(self):
+        """
+        Demande à Stockfish d'arrêter la recherche en cours, si une analyse
+        tourne déjà (elle est de toute façon obsolète : une position plus
+        récente vient d'arriver). Ne bloque pas : c'est juste une demande.
+        """
+        with self.lock:
+            analysis = self.active_analysis
+        if analysis is not None:
+            try:
+                analysis.stop()
+            except Exception:
+                pass  # déjà arrêtée / moteur mort -> pas grave
 
     def _restart_engine(self):
         """
@@ -70,6 +103,7 @@ class BridgeState:
         inutilisable jusqu'au redémarrage complet du programme.
         """
         print("⚠ Le moteur Stockfish semble avoir crashé, redémarrage...")
+        self._clear_active_analysis()
         try:
             self.engine.close()
         except Exception:
@@ -85,13 +119,20 @@ class BridgeState:
         UNE fois et reprend l'analyse depuis le début si le moteur meurt en
         cours de route (EngineError). Si ça replante une 2e fois, laisse
         l'exception remonter (pas de boucle infinie si Stockfish est
-        introuvable/cassé).
+        introuvable/cassé). Enregistre aussi l'analyse en cours pour
+        permettre son annulation externe (voir _cancel_current_analysis_if_any).
         """
         try:
-            yield from self.engine.analyze_fen_progressive(fen, depths=self.depths)
+            yield from self.engine.analyze_fen_progressive(
+                fen, depths=self.depths, on_analysis_started=self._register_active_analysis
+            )
         except chess.engine.EngineError:
             self._restart_engine()
-            yield from self.engine.analyze_fen_progressive(fen, depths=self.depths)
+            yield from self.engine.analyze_fen_progressive(
+                fen, depths=self.depths, on_analysis_started=self._register_active_analysis
+            )
+        finally:
+            self._clear_active_analysis()
 
     def handle_fen_stream(self, fen):
         """
@@ -103,44 +144,52 @@ class BridgeState:
         - soit une série de messages {"depth": 10/15/20, "move_uci": ...,
           "move_san": ..., "score": ..., "pv_san": [...]}
         """
+        try:
+            board = chess.Board(fen)
+        except ValueError as e:
+            yield {"error": f"FEN invalide reçu du navigateur : {e}"}
+            return
+
         with self.lock:
-            try:
-                board = chess.Board(fen)
-            except ValueError as e:
-                yield {"error": f"FEN invalide reçu du navigateur : {e}"}
-                return
-
             self.last_fen = fen
+            my_side = self.my_side
 
-            side_to_move = "w" if board.turn else "b"
-            if side_to_move != self.my_side:
-                # Pas mon tour : on ne calcule/n'affiche rien pour le camp
-                # adverse. last_fen reste stocké pour le bouton "Rafraîchir".
-                if self.on_update:
-                    camp = "Blancs" if self.my_side == "w" else "Noirs"
-                    self.on_update(None, f"Au tour de l'adversaire (tu joues les {camp}).")
-                yield {"skip": True}
-                return
+        side_to_move = "w" if board.turn else "b"
+        if side_to_move != my_side:
+            # Pas mon tour : on ne calcule/n'affiche rien pour le camp
+            # adverse. last_fen reste stocké pour le bouton "Rafraîchir".
+            if self.on_update:
+                camp = "Blancs" if my_side == "w" else "Noirs"
+                self.on_update(None, f"Au tour de l'adversaire (tu joues les {camp}).")
+            yield {"skip": True}
+            return
 
-            if board.is_game_over():
-                if self.on_update:
-                    self.on_update(None, f"Partie terminée : {board.result()}")
-                yield {"game_over": True, "result": board.result()}
-                return
+        if board.is_game_over():
+            if self.on_update:
+                self.on_update(None, f"Partie terminée : {board.result()}")
+            yield {"game_over": True, "result": board.result()}
+            return
 
+        # Une position plus récente vient d'arriver : si une ancienne
+        # analyse tourne encore, on lui demande de s'arrêter tout de suite
+        # au lieu d'attendre passivement derrière elle.
+        self._cancel_current_analysis_if_any()
+
+        with self.engine_lock:
             try:
                 deepest_seen = None
                 for entry in self._progressive_with_auto_restart(fen):
                     deepest_seen = entry
+                    if self.on_depth_update:
+                        self.on_depth_update(entry["depth"], dict(entry))
                     yield entry
             except Exception as e:
                 yield {"error": f"Moteur Stockfish indisponible : {e}"}
                 return
 
             # Une fois le palier le plus profond atteint, on calcule
-            # l'explication en langage clair et on met à jour la fenêtre
-            # Tkinter (une seule fois, pas à chaque palier -- inutile de
-            # regénérer l'explication 3 fois pour la même position).
+            # l'explication en langage clair une seule fois (pas à chaque
+            # palier) et on la transmet accolée à l'entrée la plus profonde.
             if deepest_seen is not None:
                 move_obj = chess.Move.from_uci(deepest_seen["move_uci"])
                 if self.explain_mode == "api":
@@ -150,15 +199,16 @@ class BridgeState:
                 else:
                     explanation = explain_move_local(board, move_obj, deepest_seen["pv_san"])
 
-                if self.on_update:
-                    self.on_update([deepest_seen], explanation)
+                if self.on_depth_update:
+                    final_entry = dict(deepest_seen)
+                    final_entry["explanation"] = explanation
+                    self.on_depth_update(deepest_seen["depth"], final_entry)
 
     def refresh_last(self):
         """
         Relance l'analyse sur la dernière position reçue (utilisé par le
-        bouton "Rafraîchir"). Ne renvoie rien au navigateur (c'est un
-        rafraîchissement de la fenêtre Tkinter uniquement) : on consomme le
-        générateur nous-mêmes pour que on_update soit appelé.
+        bouton "Rafraîchir"). On consomme le générateur nous-mêmes pour que
+        les callbacks (on_update / on_depth_update) soient appelés.
         """
         if self.last_fen is None:
             if self.on_update:
@@ -259,8 +309,8 @@ def _make_handler(state: BridgeState):
     return Handler
 
 
-def start_bridge_server(stockfish_path, explain_mode="local", on_update=None, port=DEFAULT_PORT,
-                         threads=None, hash_mb=256, depth=None):
+def start_bridge_server(stockfish_path, explain_mode="local", on_update=None, on_depth_update=None,
+                         port=DEFAULT_PORT, threads=None, hash_mb=256, depth=None):
     """
     Démarre le serveur en tâche de fond (thread daemon) et retourne
     (server, state). Appelle state.close() pour bien fermer Stockfish
@@ -268,7 +318,7 @@ def start_bridge_server(stockfish_path, explain_mode="local", on_update=None, po
     """
     state = BridgeState(
         stockfish_path, explain_mode=explain_mode, on_update=on_update,
-        threads=threads, hash_mb=hash_mb, depth=depth,
+        on_depth_update=on_depth_update, threads=threads, hash_mb=hash_mb, depth=depth,
     )
     handler_cls = _make_handler(state)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)

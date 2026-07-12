@@ -10,6 +10,7 @@ import tkinter as tk
 import queue
 
 from board_overlay import BoardOverlay
+from engine_analysis import PROGRESSIVE_DEPTHS
 
 MAX_LINES_DISPLAYED = 3
 
@@ -43,7 +44,10 @@ class CoachOverlay:
         self.lines_frame.pack(pady=(2, 6), padx=8, fill="x")
 
         self.line_labels = []
-        line_colors = ["#a6e3a1", "#89dceb", "#cba6f7"]  # 1er, 2e, 3e coup
+        # Couleurs alignées sur DEPTH_STYLE dans chess_coach_bridge.user.js
+        # (vert=depth10, bleu=depth15, rose=depth20) pour reconnaître d'un
+        # coup d'œil quelle ligne correspond à quelle flèche sur l'échiquier.
+        line_colors = ["#a6e3a1", "#89dceb", "#f38ba8"]
         for i in range(MAX_LINES_DISPLAYED):
             row = tk.Frame(self.lines_frame, bg="#313244")
             row.pack(fill="x", pady=2)
@@ -139,6 +143,44 @@ class CoachOverlay:
 
         if self.board_overlay:
             self.board_overlay.update_moves(lines)
+
+    def update_depth_line(self, depth, entry):
+        """
+        Thread-safe : met à jour UNIQUEMENT la ligne correspondant à ce
+        palier de profondeur (10/15/20), sans toucher aux 2 autres lignes
+        déjà affichées. Contrairement à update_content() (qui écrase les 3
+        lignes d'un coup), c'est ce qu'il faut utiliser en mode navigateur
+        progressif : chaque palier arrive séparément, à des moments
+        différents, et doit rester visible pendant que les autres arrivent.
+
+        entry : dict {"move_san", "score", "pv_san", ...} et, uniquement
+        sur le palier le plus profond, une clé "explanation" en plus.
+        """
+        self._queue.put((self._update_depth_line_impl, (depth, entry)))
+
+    def _update_depth_line_impl(self, depth, entry):
+        try:
+            idx = PROGRESSIVE_DEPTHS.index(depth)
+        except ValueError:
+            return  # profondeur inconnue (ex: --depth CLI custom), rien à faire ici
+        if idx >= len(self.line_labels):
+            return
+        widgets = self.line_labels[idx]
+        widgets["move"].config(text=f"d{depth} {entry['move_san']}")
+        widgets["score"].config(text=entry["score"])
+        widgets["pv"].config(text=" ".join(entry["pv_san"]))
+
+        if "explanation" in entry:
+            self.explanation_text.delete("1.0", tk.END)
+            self.explanation_text.insert(tk.END, entry["explanation"])
+
+    def update_explanation(self, text):
+        """Thread-safe : met à jour uniquement le texte d'explication, sans toucher aux lignes de coups."""
+        self._queue.put((self._update_explanation_impl, (text,)))
+
+    def _update_explanation_impl(self, text):
+        self.explanation_text.delete("1.0", tk.END)
+        self.explanation_text.insert(tk.END, text)
 
     def append_warning(self, message):
         """Thread-safe : ajoute une ligne d'avertissement à la suite de l'explication."""

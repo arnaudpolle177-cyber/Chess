@@ -36,12 +36,20 @@ class ChessCoachEngine:
         except chess.engine.EngineError as e:
             print(f"⚠ Impossible de configurer Threads/Hash sur ce Stockfish : {e}")
 
-    def analyze_fen_progressive(self, fen, depths=PROGRESSIVE_DEPTHS):
+    def analyze_fen_progressive(self, fen, depths=PROGRESSIVE_DEPTHS, on_analysis_started=None):
         """
         Générateur : analyse la position en UN SEUL passage Stockfish
         (approfondissement itératif natif -- Stockfish calcule déjà depth 1,
         2, 3... jusqu'à la profondeur max en interne), et yield un résultat
         dès que chaque palier demandé (ex: 10, 15, 20) est atteint.
+
+        on_analysis_started(analysis_obj) : callback optionnel appelé juste
+        après le démarrage de la recherche, avec l'objet
+        chess.engine.AnalysisResult. Permet à l'appelant de stocker une
+        référence pour pouvoir interrompre cette recherche depuis un autre
+        thread (analysis_obj.stop()) si elle devient obsolète (ex: une
+        position plus récente vient d'arriver côté web_bridge.py) --
+        évite d'accumuler des recherches Stockfish concurrentes/en attente.
 
         Chaque élément produit : {"depth", "move_uci", "move_san", "score",
         "pv_san"}. Si la partie est déjà terminée, yield un seul
@@ -60,6 +68,8 @@ class ChessCoachEngine:
         # à l'info UCI à CHAQUE profondeur traversée pendant la recherche,
         # sans jamais relancer le calcul depuis zéro.
         with self.engine.analysis(board, chess.engine.Limit(depth=max_depth)) as analysis:
+            if on_analysis_started:
+                on_analysis_started(analysis)
             for info in analysis:
                 depth = info.get("depth")
                 pv = info.get("pv")
