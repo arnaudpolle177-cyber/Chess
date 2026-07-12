@@ -33,21 +33,26 @@ jobs:
       - name: Compiler CoachEchecs.exe
         run: pyinstaller coach.spec
 
-      - name: Télécharger Stockfish (dernière version Windows)
+      - name: Vérifier que le moteur (stockfish.exe) est bien présent dans le dépôt
         shell: bash
         run: |
           set -e
-          api_url="https://api.github.com/repos/official-stockfish/Stockfish/releases/latest"
-          asset_url=$(curl -s "$api_url" \
-            | grep "browser_download_url.*windows-x86-64-avx2.zip" \
-            | head -n1 \
-            | cut -d '"' -f4)
-          echo "Téléchargement: $asset_url"
-          curl -L -o stockfish.zip "$asset_url"
-          mkdir stockfish_extracted
-          unzip -q stockfish.zip -d stockfish_extracted
-          # Le zip officiel contient un dossier stockfish/ avec l'exe dedans
-          find stockfish_extracted -iname "stockfish*.exe" -exec cp {} dist/stockfish.exe \;
+          # Ne télécharge PLUS Stockfish automatiquement -- le coach
+          # utilise maintenant Berserk (ou un autre moteur au choix), pas
+          # forcément Stockfish. Le binaire doit être committé À LA RACINE
+          # DU DÉPÔT sous le nom "stockfish.exe" (même si c'est en réalité
+          # Berserk renommé -- voir app_paths.py / resolve_stockfish_path,
+          # qui cherchent ce nom par défaut). Sans ça, le build s'arrête ici
+          # avec un message clair plutôt que d'empaqueter un .exe manquant
+          # ou -- pire -- de re-télécharger silencieusement le vrai
+          # Stockfish comme avant.
+          if [ ! -f stockfish.exe ]; then
+            echo "❌ Aucun stockfish.exe trouvé à la racine du dépôt."
+            echo "   Ajoute ton moteur (ex: Berserk renommé en stockfish.exe) à la racine du dépôt et relance le build."
+            exit 1
+          fi
+          echo "✅ Moteur trouvé : stockfish.exe ($(du -h stockfish.exe | cut -f1))"
+          cp stockfish.exe dist/stockfish.exe
 
       - name: Préparer le package final
         shell: bash
