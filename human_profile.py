@@ -63,9 +63,12 @@ DEFAULT_ELO_TIER = 2
 
 # 0 = toujours le mieux noté par le profil (déterministe)
 # 1 = quasi uniforme parmi les coups éligibles pour ce niveau
-# Valeur modeste par défaut : la précision ne doit jamais être à 100%, sans
-# pour autant rendre le coach imprévisible dès la phase 1.
-DEFAULT_HUMANITY = 0.15
+# Remonté par rapport à la version précédente (0.15) : avec un scoring en
+# "bande ciblée" (voir _band_penalty ci-dessous), un humanity trop bas
+# retombait presque toujours sur le même candidat -> retrouvait le
+# problème "coup d'ordinateur". 0.35 laisse une vraie variation coup après
+# coup, tout en restant dans la fenêtre Elo (jamais un blunder).
+DEFAULT_HUMANITY = 0.35
 
 
 def _eligible_candidates(candidates, tier: EloTier):
@@ -79,37 +82,86 @@ def _eligible_candidates(candidates, tier: EloTier):
     return eligible or candidates[:1]
 
 
+def _band_penalty(eval_loss, target_cp, factor):
+    """
+    Pénalité en "bande ciblée" plutôt qu'en minimisation pure : au lieu de
+    toujours préférer eval_loss=0 (ce qui donne systématiquement le coup
+    Stockfish exact, donc un jeu perçu comme "d'ordinateur"), on pénalise
+    l'ÉCART à une perte d'éval typique visée (target_cp). Un candidat qui
+    perd exactement target_cp est donc mieux noté qu'un candidat parfait
+    (0 perte) -- reflète qu'un joueur humain ne trouve pas systématiquement
+    LE coup optimal, sans jamais dépasser tier.max_eval_loss_cp (déjà filtré
+    par _eligible_candidates en amont).
+    """
+    return -abs(eval_loss - target_cp) * factor
+
+
 def _score_solid(c, tier):
-    """Vert : coups peu risqués, proches de l'optimal, pas de complications inutiles."""
-    penalty = c["eval_loss"]
+    """
+    Vert : coups sûrs, peu de complications, mais pas obligatoirement LE
+    meilleur coup -- vise une perte d'éval modeste (proche de zéro sans y
+    être collé) plutôt que le zéro absolu.
+    """
+    target = tier.typical_eval_loss_cp * 0.35
+    penalty = _band_penalty(c["eval_loss"], target, 1.1)
     if c["is_capture"] and c["eval_loss"] > tier.typical_eval_loss_cp:
-        penalty += 15  # capture qui perd de l'éval = complication risquée, pas "solide"
-    return -penalty
+        penalty -= 15  # capture qui perd beaucoup d'éval = complication risquée, pas "solide"
+    return penalty
 
 
 def _score_popular(c, tier, elo_suggestion_uci):
-    """Bleu : ce qu'un moteur bridé à cet Elo jouerait naturellement (signal réaliste de fréquence de jeu à ce niveau)."""
-    bonus = 40 if elo_suggestion_uci and c["move_uci"] == elo_suggestion_uci else 0
-    return bonus - c["eval_loss"] * 0.6
+    """
+    Bleu : CE QUE JOUERAIT UN MOTEUR BRIDÉ À CET ELO -- signal réaliste de
+    fréquence de jeu à ce niveau. Signal PRINCIPAL propre à ce profil (les
+    autres profils ne l'utilisent plus, pour éviter qu'ils convergent tous
+    sur le même coup).
+    """
+    target = tier.typical_eval_loss_cp * 0.8
+    bonus = 22 if elo_suggestion_uci and c["move_uci"] == elo_suggestion_uci else 0
+    return bonus + _band_penalty(c["eval_loss"], target, 0.7)
 
 
-def _score_creative(c, tier):
-    """Rose : s'écarte un peu du choix "évident" tout en restant dans la tolérance -- capture, poussée centrale, coup moins attendu."""
+def _score_creative(c, tier, elo_suggestion_uci):
+    """
+    Rose : s'écarte du choix "évident" (le meilleur ET celui du moteur
+    bridé) -- capture, poussée centrale, coup moins attendu -- tout en
+    restant dans la tolérance. Vise délibérément une perte un peu plus
+    élevée que "popular"/"classical" (plus de personnalité, jamais au-delà
+    du plafond du niveau).
+    """
+    target = tier.typical_eval_loss_cp * 1.3
     novelty = 0
     if c["eval_loss"] > 0:
-        novelty += 10  # pas LE meilleur coup, un peu de personnalité
+        novelty += 8  # pas LE meilleur coup, un peu de personnalité
     if c["to_square_central"]:
         novelty += 8
     if c["is_capture"]:
         novelty += 6
-    return novelty - c["eval_loss"] * 0.8
+    if elo_suggestion_uci and c["move_uci"] == elo_suggestion_uci:
+        novelty -= 10  # justement PAS le choix "populaire" -- sinon ça reconverge avec ce profil
+    return novelty + _band_penalty(c["eval_loss"], target, 0.5)
 
 
-def _score_classical(c, tier, elo_suggestion_uci):
-    """Noir & blanc : coup naturel/développement, proche du choix Elo-bridé, faible complexité tactique."""
-    bonus = 25 if elo_suggestion_uci and c["move_uci"] == elo_suggestion_uci else 0
-    simplicity = -5 if (c["is_capture"] or c["is_check"]) else 5
-    return bonus + simplicity - c["eval_loss"] * 0.7
+def _score_classical(c, tier):
+    """
+    Blanc : coup NATUREL/développement/textbook -- basé sur des traits
+    INTRINSÈQUES au coup (développement de pièce mineure, poussée centrale,
+    roque, absence de complication tactique), PAS sur l'avis Elo-bridé
+    (contrairement à avant, où ce profil utilisait EXACTEMENT le même
+    signal que "populaire" et convergeait presque toujours sur le même
+    coup). C'est ce qui rend ce profil vraiment différent de "populaire".
+    """
+    target = tier.typical_eval_loss_cp * 0.6
+    naturalness = 0
+    if c["is_developing_minor"]:
+        naturalness += 14
+    if c["is_pawn_center_push"]:
+        naturalness += 10
+    if c["is_castle"]:
+        naturalness += 12
+    if not c["is_capture"] and not c["is_check"]:
+        naturalness += 6  # coup calme, pas de complication tactique forcée
+    return naturalness + _band_penalty(c["eval_loss"], target, 0.9)
 
 
 # Ordre = ordre d'affichage (vert, bleu, rose, noir&blanc). Ajouter un
@@ -152,9 +204,9 @@ def select_move(candidates, elo_tier_id, profile_id, elo_suggestion_uci=None,
     elif profile_id == "popular":
         scored = [(c, _score_popular(c, tier, elo_suggestion_uci)) for c in eligible]
     elif profile_id == "creative":
-        scored = [(c, _score_creative(c, tier)) for c in eligible]
+        scored = [(c, _score_creative(c, tier, elo_suggestion_uci)) for c in eligible]
     elif profile_id == "classical":
-        scored = [(c, _score_classical(c, tier, elo_suggestion_uci)) for c in eligible]
+        scored = [(c, _score_classical(c, tier)) for c in eligible]
     else:
         raise ValueError(f"Profil de jeu inconnu : {profile_id!r}")
 

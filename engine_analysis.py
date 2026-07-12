@@ -73,6 +73,18 @@ class ChessCoachEngine:
             for mv in pv[:6]:
                 pv_san.append(san_board.san(mv))
                 san_board.push(mv)
+            piece = board.piece_at(move.from_square)
+            piece_type = piece.piece_type if piece else None
+            from_rank = chess.square_rank(move.from_square)
+            back_rank = 0 if board.turn == chess.WHITE else 7
+            # Développe une pièce mineure (cavalier/fou) depuis sa case de
+            # départ -- signal "classique/naturel" indépendant de tout avis
+            # Elo, contrairement à avant où "populaire" et "classique"
+            # s'ancraient sur EXACTEMENT le même signal et convergeaient
+            # presque toujours sur le même coup.
+            is_developing_minor = piece_type in (chess.KNIGHT, chess.BISHOP) and from_rank == back_rank
+            is_pawn_center_push = piece_type == chess.PAWN and chess.square_file(move.to_square) in (3, 4)
+
             candidates.append({
                 "move_uci": move.uci(),
                 "move_san": board.san(move),
@@ -82,6 +94,8 @@ class ChessCoachEngine:
                 "is_capture": board.is_capture(move),
                 "is_check": tmp_board.is_check(),
                 "is_castle": board.is_castling(move),
+                "is_developing_minor": is_developing_minor,
+                "is_pawn_center_push": is_pawn_center_push,
                 "to_square_central": chess.square_file(move.to_square) in (3, 4)
                                       and chess.square_rank(move.to_square) in (3, 4),
                 "pv_san": pv_san,
