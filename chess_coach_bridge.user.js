@@ -40,11 +40,41 @@
  * Le seul point qui peut avoir besoin d'ajustement : getSideToMove() plus
  * bas, si jamais la détection automatique du tour de jeu se désynchronise
  * (rare, voir le commentaire dans la fonction).
+ *
+ * ⚠ RECOMMANDÉ SI TU PRE-MOVES (préshot des coups rapidement) :
+ *   Par défaut, le script DEVINE qui vient de jouer en comparant 2 lectures
+ *   du plateau et en repérant la première case qui a changé. Si 2 coups (le
+ *   tien + celui de l'adversaire) se jouent tous les deux avant la lecture
+ *   suivante, cette déduction peut se tromper de camp -- pas juste être en
+ *   retard, vraiment se tromper -- et rester désynchronisée jusqu'au
+ *   prochain coup. Puisque c'est TON site, la solution fiable à 100% est de
+ *   lui faire exposer directement le trait actuel, en ajoutant dans le JS
+ *   de ta page (PAS dans ce fichier) :
+ *
+ *       window.chessCoachGetTurn = function() {
+ *         return monEtatDePartie.trait === "blanc" ? "w" : "b";
+ *         // adapte à la variable/fonction qui donne déjà le trait sur ton site
+ *       };
+ *
+ *   Dès que cette fonction existe, ce script l'utilise automatiquement en
+ *   priorité (voir getSideToMove() plus bas) et la déduction par diff n'est
+ *   plus qu'un repli pour les autres sites.
  * -----------------------------------------------------------------------
  */
 (function () {
   const COACH_ENDPOINT = "http://127.0.0.1:8765/fen";
-  const ARROW_COLORS = ["#a6e3a1", "#89dceb", "#cba6f7"]; // 1er, 2e, 3e coup (mêmes couleurs que la fenêtre coach)
+  // Vert = 1er palier (rapide, moins profond), Bleu = palier intermédiaire,
+  // Rouge = palier le plus profond (le plus fiable). Doit rester cohérent
+  // avec PROGRESSIVE_DEPTHS dans engine_analysis.py (10, 15, 20 par défaut).
+  const DEPTH_STYLE = {
+    // width décroissant + opacity croissant avec la profondeur : quand les
+    // 3 profondeurs tombent d'accord sur le même coup, les 3 flèches se
+    // superposent en formant une "cible" (halo vert large et pâle, anneau
+    // bleu, cœur rose vif) au lieu que la plus large masque les autres.
+    10: { color: "#a6e3a1", width: 10, opacity: 0.35 }, // vert, halo extérieur
+    15: { color: "#89dceb", width: 6, opacity: 0.6 },   // bleu, anneau intermédiaire
+    20: { color: "#f38ba8", width: 3, opacity: 0.95 },  // rose, cœur (le plus fiable)
+  };
   const PIECE_LETTERS = { pawn: "p", knight: "n", bishop: "b", rook: "r", queen: "q", king: "k" };
 
   // Passe à true si tu as besoin de déboguer la lecture du plateau : affiche
@@ -59,9 +89,21 @@
   // différent, qui déclenche un envoi au serveur pour rien, et donc un
   // effacement + redessin des flèches -> c'est CA le flicker. En exigeant
   // 2 lectures stables d'affilée, on filtre ces faux positifs.
+  //
+  // Avec POLL_INTERVAL_MS=150, ça représente ~300ms de latence de
+  // détection (au lieu de ~1.4s avant) -- réduit fortement (sans l'éliminer
+  // complètement, voir le hook chessCoachGetTurn ci-dessus) le risque que 2
+  // coups réels se jouent avant qu'on ait eu le temps de les distinguer.
   const STABLE_READS_REQUIRED = 2;
+  const POLL_INTERVAL_MS = 150;
 
   let lastSentBoardPart = null;
+  // Position actuellement en cours d'envoi (requête pas encore résolue).
+  // Sans ça, comme lastSentBoardPart n'est plus verrouillé tant que la
+  // requête n'a pas réussi, le poll suivant (avant que la 1re requête,
+  // qui peut prendre jusqu'à 20s, ait répondu) renverrait la même position
+  // en double.
+  let inFlightBoardPart = null;
   let localTurnToggle = "w"; // repli si getSideToMove() ne peut rien déterminer (voir plus bas)
   let lastStableGrid = null; // dernière position confirmée (grille 8x8), pour déduire qui vient de jouer
 
@@ -69,6 +111,11 @@
   let pendingStableCount = 0;
 
   let lastDrawnMovesKey = null; // pour éviter de redessiner les flèches si le résultat n'a pas changé
+  // Dernier coup connu pour chaque palier de profondeur reçu pour LA
+  // POSITION EN COURS (remis à zéro à chaque nouvel envoi). Permet
+  // d'afficher/mettre à jour une flèche dès qu'un palier arrive, sans
+  // attendre les autres.
+  let currentDepthEntries = {};
 
   // ---------------------------------------------------------------------
   // 1. Lecture du plateau (DOM chessground -> grille 8x8 -> FEN)
@@ -176,6 +223,13 @@
     return null; // aucune case n'a "perdu" de pièce -> déduction impossible
   }
 
+  // Correction manuelle ponctuelle : posée par le bouton flottant "⇄
+  // Corriger le trait" (voir plus bas). S'applique UNE SEULE fois (au tout
+  // prochain calcul du trait), puis se remet à null -- après ça, la
+  // déduction automatique reprend normalement à partir de cette valeur
+  // corrigée.
+  let forcedTurnForNextSend = null;
+
   function getSideToMove(newGrid) {
     if (window.chessCoachGetTurn) {
       try {
@@ -183,6 +237,12 @@
       } catch (e) {
         console.warn("chessCoachGetTurn() a levé une erreur, repli sur la déduction automatique :", e);
       }
+    }
+    if (forcedTurnForNextSend !== null) {
+      const t = forcedTurnForNextSend;
+      forcedTurnForNextSend = null;
+      localTurnToggle = t;
+      return t;
     }
     if (lastStableGrid) {
       const moverColor = inferMoverColor(lastStableGrid, newGrid);
@@ -250,45 +310,103 @@
   // 2. Envoi au serveur Python + réception des coups recommandés
   // ---------------------------------------------------------------------
 
-  async function sendFenToCoach(fen) {
+  async function sendFenToCoach(fen, boardPart) {
     return new Promise((resolve) => {
+      // Nouvelle position -> on repart d'un état de flèches vierge, elles
+      // seront redessinées une par une au fil des paliers reçus.
+      currentDepthEntries = {};
+
+      let processedLen = 0; // longueur de responseText déjà traitée (lignes NDJSON complètes uniquement)
+      let gotAnyEntry = false;
+
+      const processNewText = (fullText) => {
+        const newText = fullText.slice(processedLen);
+        const lastNewline = newText.lastIndexOf("\n");
+        if (lastNewline === -1) return; // pas encore de ligne complète depuis la dernière fois
+        const completeChunk = newText.slice(0, lastNewline);
+        processedLen += lastNewline + 1;
+        completeChunk.split("\n").forEach((line) => {
+          if (!line.trim()) return;
+          let payload;
+          try {
+            payload = JSON.parse(line);
+          } catch (e) {
+            console.warn("Coach d'échecs : ligne NDJSON invalide, ignorée.", e, line);
+            return;
+          }
+          gotAnyEntry = true;
+          handleCoachPayload(payload, boardPart);
+        });
+      };
+
       GM_xmlhttpRequest({
         method: "POST",
         url: COACH_ENDPOINT,
         headers: { "Content-Type": "application/json" },
         data: JSON.stringify({ fen }),
-        timeout: 8000,
+        // Un peu plus que le temps qu'une analyse profondeur 20 devrait
+        // raisonnablement prendre : au-delà, mieux vaut abandonner et
+        // retenter au prochain poll plutôt que de bloquer indéfiniment.
+        timeout: 25000,
+        onprogress: (response) => {
+          processNewText(response.responseText || "");
+        },
         onload: (response) => {
-          try {
-            const data = JSON.parse(response.responseText);
-            if (data.error) {
-              console.warn("Coach d'échecs :", data.error);
-              clearArrows();
-            } else if (data.game_over) {
-              clearArrows();
-            } else {
-              drawArrows(data.lines);
-            }
-          } catch (e) {
-            console.warn("Coach d'échecs : réponse invalide du serveur local.", e);
+          processNewText(response.responseText || ""); // traite le reliquat final
+          if (!gotAnyEntry) {
+            console.warn("Coach d'échecs : réponse vide ou invalide du serveur local.");
           }
+          inFlightBoardPart = null;
           resolve();
         },
         onerror: () => {
           // Le serveur Python n'est probablement pas lancé -> pas grave, on
-          // réessaiera au prochain coup détecté.
+          // réessaiera au prochain coup détecté. On NE verrouille PAS
+          // lastSentBoardPart : cette position n'a jamais été traitée avec
+          // succès, elle doit rester éligible à un nouvel essai.
           console.warn(
             "Coach d'échecs : impossible de contacter le serveur local (port 8765). " +
             "Vérifie que le programme Python tourne bien (option 'Mode navigateur')."
           );
+          inFlightBoardPart = null;
           resolve();
         },
         ontimeout: () => {
+          // Timeout global : on ne verrouille pas si aucun palier n'est
+          // jamais arrivé (retenté depuis zéro au prochain poll). Si des
+          // paliers sont déjà arrivés entre-temps, ils restent affichés.
           console.warn("Coach d'échecs : le serveur local met trop de temps à répondre.");
+          inFlightBoardPart = null;
           resolve();
         },
       });
     });
+  }
+
+  function handleCoachPayload(data, boardPart) {
+    if (data.error) {
+      console.warn("Coach d'échecs :", data.error);
+      clearArrows();
+      lastSentBoardPart = boardPart; // erreur applicative : pas la peine de retenter, elle échouera pareil
+    } else if (data.game_over) {
+      clearArrows();
+      lastSentBoardPart = boardPart;
+    } else if (data.skip) {
+      // Pas le tour du camp choisi (bouton "Changer de camp") : pas de
+      // flèches à afficher pour le coup de l'adversaire.
+      clearArrows();
+      lastSentBoardPart = boardPart;
+    } else if (data.depth) {
+      // Un palier de profondeur vient d'arriver -> on met à jour
+      // uniquement la flèche correspondante, les autres restent affichées
+      // telles quelles en attendant leur propre mise à jour.
+      currentDepthEntries[data.depth] = data;
+      redrawDepthArrows();
+      // Dès le 1er palier reçu, l'envoi est un succès confirmé pour cette
+      // position (pas la peine de la retenter même si un palier plus
+      // profond arrive encore après).
+      lastSentBoardPart = boardPart;
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -308,9 +426,9 @@
       svg.style.zIndex = "9999";
 
       const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-      ARROW_COLORS.forEach((color, i) => {
+      Object.entries(DEPTH_STYLE).forEach(([depth, style]) => {
         const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
-        marker.setAttribute("id", `cc-arrowhead-${i}`);
+        marker.setAttribute("id", `cc-arrowhead-${depth}`);
         marker.setAttribute("markerWidth", "6");
         marker.setAttribute("markerHeight", "6");
         marker.setAttribute("refX", "3");
@@ -318,7 +436,7 @@
         marker.setAttribute("orient", "auto");
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
         path.setAttribute("d", "M0,0 L6,3 L0,6 Z");
-        path.setAttribute("fill", color);
+        path.setAttribute("fill", style.color);
         marker.appendChild(path);
         defs.appendChild(marker);
       });
@@ -351,6 +469,7 @@
   }
 
   function clearArrows() {
+    currentDepthEntries = {};
     lastDrawnMovesKey = null;
     const svg = document.getElementById("chess-coach-arrows");
     if (svg) {
@@ -358,25 +477,33 @@
     }
   }
 
-  function drawArrows(lines) {
-    const movesKey = JSON.stringify((lines || []).map((l) => l.move_uci));
-    if (movesKey === lastDrawnMovesKey) return; // deja affiche, rien a refaire
+  function redrawDepthArrows() {
+    // Redessine TOUTES les flèches actuellement connues pour la position en
+    // cours (jusqu'à 3 : vert/bleu/rouge), à partir de currentDepthEntries.
+    // Appelé à chaque nouveau palier reçu -- pas cher (3 lignes max).
+    const depths = Object.keys(currentDepthEntries).map(Number).sort((a, b) => a - b);
+    const movesKey = JSON.stringify(depths.map((d) => `${d}:${currentDepthEntries[d].move_uci}`));
+    if (movesKey === lastDrawnMovesKey) return; // déjà affiché tel quel, rien à refaire
 
     const els = getBoardElements();
     if (!els) return;
     const { isWhiteOrientation, squareSize } = readGrid(els);
     const svg = getOrCreateSvgLayer(els);
-    clearArrows();
+
+    // Efface uniquement les lignes existantes (pas currentDepthEntries,
+    // qu'on est justement en train d'utiliser pour redessiner).
+    svg.querySelectorAll("line").forEach((n) => n.remove());
     lastDrawnMovesKey = movesKey;
 
-    lines.forEach((entry, i) => {
+    depths.forEach((depth) => {
+      const entry = currentDepthEntries[depth];
       const uci = entry.move_uci;
       if (!uci) return;
+      const style = DEPTH_STYLE[depth] || { color: "#cccccc", width: 5, opacity: 0.6 };
       const fromSq = uci.slice(0, 2);
       const toSq = uci.slice(2, 4);
       const from = squareToXY(fromSq, squareSize, isWhiteOrientation);
       const to = squareToXY(toSq, squareSize, isWhiteOrientation);
-      const color = ARROW_COLORS[i] || "#cccccc";
 
       // Raccourcit légèrement la ligne pour laisser de la place à la pointe.
       const dx = to.x - from.x;
@@ -391,11 +518,11 @@
       line.setAttribute("y1", from.y);
       line.setAttribute("x2", endX);
       line.setAttribute("y2", endY);
-      line.setAttribute("stroke", color);
-      line.setAttribute("stroke-width", i === 0 ? 8 : 5);
+      line.setAttribute("stroke", style.color);
+      line.setAttribute("stroke-width", style.width);
       line.setAttribute("stroke-linecap", "round");
-      line.setAttribute("opacity", i === 0 ? 0.85 : 0.6);
-      line.setAttribute("marker-end", `url(#cc-arrowhead-${i})`);
+      line.setAttribute("opacity", style.opacity);
+      line.setAttribute("marker-end", `url(#cc-arrowhead-${depth})`);
       svg.appendChild(line);
     });
   }
@@ -404,11 +531,43 @@
   // 4. Surveillance du plateau (détecte chaque coup joué)
   // ---------------------------------------------------------------------
 
+  // Position de départ standard : sert à détecter qu'une NOUVELLE partie
+  // vient de commencer (plutôt qu'un simple coup dans la partie en cours),
+  // pour réinitialiser tout l'état interne du script (sinon des restes de
+  // l'ancienne partie -- dernier plateau connu, camp actif, flèches -- 
+  // pouvaient fausser la lecture des tout premiers coups de la partie
+  // suivante).
+  const START_BOARD_PART = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
+
+  function resetTrackingState(reason) {
+    console.log(`♟ Coach d'échecs : réinitialisation de l'état (${reason}).`);
+    lastSentBoardPart = null;
+    inFlightBoardPart = null;
+    localTurnToggle = "w";
+    lastStableGrid = null;
+    pendingBoardPart = null;
+    pendingStableCount = 0;
+    clearArrows();
+  }
+
   function onBoardChanged() {
     if (countPieces() === 0) return; // état transitoire probable, on retente au prochain tick
     const state = readBoardState();
     if (!state) return;
     const { grid, boardPart, whiteKings, blackKings } = state;
+
+    // Nouvelle partie détectée (retour à la position de départ alors qu'on
+    // avait déjà une position différente en mémoire) -> on oublie tout ce
+    // qui concerne l'ancienne partie avant de continuer, plutôt que de
+    // comparer la position de départ à la dernière position de la partie
+    // précédente (ce qui donnerait un diff n'importe quoi et un trait
+    // déduit au hasard pour les premiers coups).
+    if (boardPart === START_BOARD_PART && lastStableGrid !== null) {
+      const wasDifferent = gridToFenBoardPart(lastStableGrid) !== START_BOARD_PART;
+      if (wasDifferent) {
+        resetTrackingState("nouvelle partie détectée (retour à la position de départ)");
+      }
+    }
 
     // IMPORTANT : on stabilise/compare uniquement la position des PIÈCES,
     // jamais le trait ("w"/"b"). Comparer le FEN complet (trait inclus)
@@ -429,6 +588,7 @@
     if (pendingStableCount < STABLE_READS_REQUIRED) return;
 
     if (boardPart === lastSentBoardPart) return; // le plateau n'a pas vraiment changé, rien à refaire
+    if (boardPart === inFlightBoardPart) return; // une requête pour cette même position est déjà en cours
 
     // Garde-fou : même stable, une position sans exactement 1 roi de chaque
     // couleur est forcément une mauvaise lecture -> pas la peine d'embêter
@@ -443,14 +603,93 @@
     const finalFen = `${boardPart} ${turn} KQkq - 0 1`;
 
     lastStableGrid = grid;
-    lastSentBoardPart = boardPart;
-    sendFenToCoach(finalFen);
+    inFlightBoardPart = boardPart;
+    // On NE verrouille plus lastSentBoardPart ici : si l'envoi échoue
+    // (timeout, serveur down...), cette position doit rester "à retenter"
+    // au prochain poll. Le verrouillage se fait uniquement en cas de succès
+    // confirmé, dans sendFenToCoach() ci-dessous.
+    sendFenToCoach(finalFen, boardPart);
   }
 
   function countPieces() {
     const els = getBoardElements();
     if (!els) return 0;
     return els.board.querySelectorAll("piece").length;
+  }
+
+  // ---------------------------------------------------------------------
+  // 5. Correction manuelle (boutons flottants injectés sur la page)
+  // ---------------------------------------------------------------------
+  // Comme on ne peut pas toucher au code du site, ces boutons sont ajoutés
+  // directement par le script -- aucune coopération du site nécessaire.
+
+  function forceRefresh() {
+    // Force un nouvel envoi immédiat, même si le plateau "semble" identique
+    // au dernier envoi confirmé, et sans attendre les lectures de stabilité
+    // habituelles (l'utilisateur a explicitement demandé un recalcul, donc
+    // pas la peine de re-filtrer).
+    lastSentBoardPart = null;
+    const state = readBoardState();
+    if (!state) return;
+    pendingBoardPart = state.boardPart;
+    pendingStableCount = STABLE_READS_REQUIRED;
+    onBoardChanged();
+  }
+
+  function forceTurnFlipAndRefresh() {
+    // "Le coach pense que c'est à l'adversaire, mais c'est en fait mon
+    // tour (ou l'inverse)" -- corrige le trait déduit puis relance
+    // immédiatement une analyse avec la valeur corrigée.
+    forcedTurnForNextSend = localTurnToggle === "w" ? "b" : "w";
+    forceRefresh();
+  }
+
+  function injectControls() {
+    if (document.getElementById("chess-coach-controls")) return;
+    const box = document.createElement("div");
+    box.id = "chess-coach-controls";
+    box.style.position = "fixed";
+    box.style.bottom = "16px";
+    box.style.right = "16px";
+    box.style.zIndex = "10000";
+    box.style.display = "flex";
+    box.style.flexDirection = "column";
+    box.style.gap = "6px";
+    box.style.fontFamily = "Arial, sans-serif";
+
+    const makeButton = (label, title, onClick) => {
+      const btn = document.createElement("button");
+      btn.textContent = label;
+      btn.title = title;
+      btn.style.padding = "8px 12px";
+      btn.style.borderRadius = "8px";
+      btn.style.border = "none";
+      btn.style.cursor = "pointer";
+      btn.style.fontSize = "13px";
+      btn.style.fontWeight = "bold";
+      btn.style.color = "#1e1e2e";
+      btn.style.background = "#89b4fa";
+      btn.style.boxShadow = "0 2px 6px rgba(0,0,0,0.3)";
+      btn.addEventListener("click", onClick);
+      return btn;
+    };
+
+    const refreshBtn = makeButton(
+      "🔁 Recalculer",
+      "Le coach semble bloqué sur un ancien coup : force un nouveau calcul immédiat.",
+      forceRefresh
+    );
+
+    const flipBtn = makeButton(
+      "⇄ Corriger le trait",
+      "Le coach pense que c'est à l'adversaire de jouer, mais c'est en fait ton tour (ou l'inverse) : corrige et recalcule.",
+      forceTurnFlipAndRefresh
+    );
+    flipBtn.style.background = "#f38ba8";
+
+    box.appendChild(refreshBtn);
+    box.appendChild(flipBtn);
+    document.body.appendChild(box);
   }
 
   function startWatching() {
@@ -461,12 +700,26 @@
       return;
     }
     console.log("♟ Coach d'échecs connecté : lecture directe du plateau (aucune capture d'écran).");
+    injectControls();
     // Vérification périodique plutôt qu'un MutationObserver : plus simple
     // et insensible aux cas où le site remplace/redessine entièrement le
     // plateau entre deux coups (ce qui pouvait faire rater une mise à jour
     // avec l'ancienne approche basée sur les mutations DOM).
-    setInterval(onBoardChanged, 700);
+    setInterval(onBoardChanged, POLL_INTERVAL_MS);
     onBoardChanged(); // première tentative immédiate
+
+    // Les navigateurs ralentissent fortement setInterval() sur un onglet en
+    // arrière-plan (throttling, pour économiser la batterie) -- c'est une
+    // limitation du navigateur, pas de ce script, et il n'y a pas de vrai
+    // contournement pour "changer de fenêtre sans jamais rien perdre".
+    // Ce qu'on PEUT faire : dès que l'onglet redevient actif, vérifier tout
+    // de suite l'état du plateau au lieu d'attendre le prochain tick throttlé
+    // -> tu vois la bonne analyse dès que tu reviens, sans délai de rattrapage.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") {
+        onBoardChanged();
+      }
+    });
   }
 
   startWatching();
