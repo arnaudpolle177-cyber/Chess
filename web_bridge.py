@@ -27,6 +27,7 @@ Annulation des analyses obsolètes (important) :
   nouvelle.
 """
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -36,6 +37,8 @@ import chess.engine
 from engine_analysis import ChessCoachEngine, PROGRESSIVE_DEPTHS
 from explain import explain_move_local, explain_move_via_api
 import human_profile
+import opening_book
+import app_paths
 
 DEFAULT_PORT = 8765
 
@@ -54,6 +57,11 @@ class BridgeState:
         # progressif par défaut (10/15/20).
         self.depths = (depth,) if depth is not None else PROGRESSIVE_DEPTHS
         self.engine = ChessCoachEngine(stockfish_path, threads=threads, hash_mb=hash_mb)
+        # Livre d'ouvertures (optionnel) : cherché à côté de l'exécutable
+        # (même dossier que stockfish.exe), fichier "opening_book.bin". Rien
+        # ne casse si le fichier est absent -- voir opening_book.py.
+        book_path = os.path.join(app_paths.get_base_dir(), "opening_book.bin")
+        self.opening_book = opening_book.OpeningBook(book_path)
         # Second moteur Stockfish, INDÉPENDANT du principal, dédié aux avis
         # "que jouerait un joueur de cet Elo" (voir human_profile.py,
         # profils "populaire"/"classique"). Avant, on reconfigurait
@@ -276,6 +284,27 @@ class BridgeState:
                     # position/niveau -- on réutilise, pas de nouvel appel
                     # Stockfish.
                     return self._candidates_cache_value
+
+                # 1. Livre d'ouvertures d'abord (gratuit en performance : la
+                #    position elle-même dit si on est encore "dans la
+                #    théorie" -- aucun compteur de coups à tenir à jour, et
+                #    ça marche pareil que ce soit MON coup ou celui d'un
+                #    adversaire qui vient de jouer). Si la position n'y est
+                #    pas (ou pas de livre chargé), bascule silencieusement
+                #    sur Stockfish juste en dessous.
+                book_entries = self.opening_book.lookup(board)
+                if book_entries:
+                    book_candidates = opening_book.candidates_from_book_entries(
+                        board, book_entries, max_candidates=tier.multipv
+                    )
+                    if book_candidates:
+                        result = {"game_over": False, "candidates": book_candidates}
+                        value = (result, board, None)  # pas d'avis Elo-bridé nécessaire en mode livre
+                        self._candidates_cache_key = cache_key
+                        self._candidates_cache_value = value
+                        return value
+
+                # 2. Hors théorie (ou pas de livre) -> Stockfish comme avant.
                 self._register_active_analysis(None)  # pas d'objet analysis() streamé ici, rien à annuler en cours de route
                 result, brd = self.engine.analyze_candidates(fen, multipv=tier.multipv, depth=tier.random_depth())
                 if result.get("game_over"):
