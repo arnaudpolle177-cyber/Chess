@@ -336,11 +336,20 @@
     // seront redessinées une par une au fil des profils reçus.
     currentProfileEntries = {};
 
-    // Une requête HTTP INDÉPENDANTE par profil (au lieu d'un seul flux
+    // 1. Aperçu rapide (depth 12, quasi instantané) : les 4 profils d'un
+    // coup, affichés immédiatement. On l'ATTEND avant de lancer les vraies
+    // requêtes -- sinon rien ne garantit qu'elle arrive au serveur (et
+    // donc au verrou moteur) avant les 4 requêtes plus lourdes, ce qui la
+    // rendrait aussi lente que le reste. Un petit délai fixe (~100-300ms
+    // typiquement), largement rentabilisé par l'affichage immédiat.
+    await sendQuickTake(fen, boardPart);
+
+    // 2. Une requête HTTP INDÉPENDANTE par profil (au lieu d'un seul flux
     // streamé) : plus robuste, chaque profil arrive et s'affiche dès qu'IL
     // est prêt, sans dépendre du support d'onprogress() du navigateur/
     // gestionnaire d'extensions (voir le commentaire dans web_bridge.py,
-    // handle_single_profile).
+    // handle_single_profile). Remplace automatiquement l'aperçu rapide dès
+    // qu'elle arrive (voir handleCoachPayload).
     const results = await Promise.all(
       PROFILE_IDS.map((profileId) => sendOneProfile(fen, boardPart, profileId))
     );
@@ -354,6 +363,64 @@
       console.warn("Coach d'échecs : aucun des 4 profils n'a répondu pour cette position.");
     }
     inFlightBoardPart = null;
+  }
+
+  function sendQuickTake(fen, boardPart) {
+    if (DEBUG) console.log("Coach d'échecs [debug] : envoi aperçu rapide (quick take)...");
+    return new Promise((resolve) => {
+      GM_xmlhttpRequest({
+        method: "POST",
+        url: COACH_ENDPOINT,
+        headers: { "Content-Type": "application/json" },
+        data: JSON.stringify({ fen, quick: true }),
+        // depth 12 doit être quasi instantané -- pas la peine d'attendre
+        // longtemps ; si ça traîne, on laisse juste les vraies requêtes
+        // prendre le relais sans aperçu préalable pour cette position.
+        timeout: 2000,
+        onload: (response) => {
+          if (DEBUG) console.log("Coach d'échecs [debug] : aperçu rapide reçu, statut", response.status, "corps brut:", response.responseText);
+          let payload;
+          try {
+            payload = JSON.parse(response.responseText || "{}");
+          } catch (e) {
+            if (DEBUG) console.warn("Coach d'échecs [debug] : aperçu rapide -- JSON invalide.", e);
+            resolve();
+            return;
+          }
+          handleQuickTakePayload(payload, boardPart);
+          resolve();
+        },
+        onerror: (response) => {
+          if (DEBUG) console.warn("Coach d'échecs [debug] : aperçu rapide -- erreur réseau.", response);
+          resolve();
+        },
+        ontimeout: () => {
+          if (DEBUG) console.warn("Coach d'échecs [debug] : aperçu rapide -- timeout (>2s), abandon pour cette position.");
+          resolve();
+        },
+      });
+    });
+  }
+
+  function handleQuickTakePayload(data, boardPart) {
+    if (data.error || data.game_over || data.skip || data.stale || !data.profiles) {
+      if (DEBUG) console.log("Coach d'échecs [debug] : aperçu rapide ignoré, raison :", data);
+      return; // rien à afficher pour l'instant, la vraie requête suivra de toute façon
+    }
+    let updated = false;
+    Object.entries(data.profiles).forEach(([profileId, entry]) => {
+      // Ne remplace jamais un résultat déjà présent pour ce profil (garde-fou
+      // si jamais une vraie réponse arrivait avant, cas rare mais possible) :
+      // l'aperçu rapide ne doit jamais écraser un résultat plus fiable.
+      if (!currentProfileEntries[profileId]) {
+        currentProfileEntries[profileId] = { ...entry, profile: profileId };
+        updated = true;
+      } else if (DEBUG) {
+        console.log(`Coach d'échecs [debug] : aperçu rapide pour ${profileId} ignoré (déjà une entrée présente).`);
+      }
+    });
+    if (DEBUG) console.log("Coach d'échecs [debug] : aperçu rapide -- profils reçus:", Object.keys(data.profiles), "mise à jour appliquée:", updated);
+    if (updated) redrawProfileArrows();
   }
 
   function sendOneProfile(fen, boardPart, profileId) {

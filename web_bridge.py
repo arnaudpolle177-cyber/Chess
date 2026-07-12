@@ -248,7 +248,7 @@ class BridgeState:
             yield from self.engine.analyze_fen_progressive(
                 fen, depths=self.depths, on_analysis_started=self._register_active_analysis
             )
-        except chess.engine.EngineError as e:
+        except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
             # On garde la VRAIE raison (type + message de l'exception) dans
             # les logs -- avant, le message était toujours générique et ne
             # permettait pas de savoir POURQUOI Stockfish était mort.
@@ -291,26 +291,25 @@ class BridgeState:
                 self._register_active_analysis(None)
                 # Réutilise la même liste que l'analyse principale (voir
                 # handle_single_profile) : si cette position est déjà
-                # connue pour faire planter le moteur en multi-lignes, pas
-                # la peine de le retenter ici non plus.
-                quick_multipv = 1 if fen in self._main_engine_degraded else QUICK_MULTIPV
+                # connue pour faire planter le mode natif, on passe direct
+                # en mode sûr (recherches successives) plutôt que de la
+                # retenter en natif pour rien.
+                is_degraded = fen in self._main_engine_degraded
 
-                def _run_quick(mpv):
-                    result, brd = self.engine.analyze_candidates(fen, multipv=mpv, depth=QUICK_DEPTH)
+                def _run_quick(mpv, safe):
+                    result, brd = self.engine.analyze_candidates(fen, multipv=mpv, depth=QUICK_DEPTH, safe_mode=safe)
                     return result
 
                 try:
-                    result = _run_quick(quick_multipv)
-                except chess.engine.EngineError as e:
+                    result = _run_quick(QUICK_MULTIPV, is_degraded)
+                except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
                     self._restart_engine(reason=f"{type(e).__name__}: {e}")
                     if fen not in self._main_engine_degraded and len(self._main_engine_degraded) < 500:
                         self._main_engine_degraded.add(fen)
                     try:
-                        result = _run_quick(1)  # repli direct sur multipv=1 après un crash
+                        result = _run_quick(1, True)  # repli direct sur le mode sûr après un crash
                     except Exception as e2:
                         return {"quick": True, "error": f"Moteur Stockfish indisponible : {e2}"}
-                except Exception as e:
-                    return {"quick": True, "error": f"Moteur Stockfish indisponible : {e}"}
                 finally:
                     self._clear_active_analysis()
 
@@ -404,23 +403,28 @@ class BridgeState:
 
                 # 2. Hors théorie (ou pas de livre) -> Stockfish comme avant.
                 self._register_active_analysis(None)  # pas d'objet analysis() streamé ici, rien à annuler en cours de route
-                effective_multipv = 1 if fen in self._main_engine_degraded else tier.multipv
+                is_degraded = fen in self._main_engine_degraded
                 try:
-                    result, brd = self.engine.analyze_candidates(fen, multipv=effective_multipv, depth=tier.random_depth())
-                except chess.engine.EngineError as e:
+                    result, brd = self.engine.analyze_candidates(
+                        fen, multipv=tier.multipv, depth=tier.random_depth(), safe_mode=is_degraded,
+                    )
+                except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
                     self._restart_engine(reason=f"{type(e).__name__}: {e}")
                     if fen not in self._main_engine_degraded:
-                        print(f"⚠ Position basculée en mode dégradé (multipv=1) pour le moteur principal (crash répété) : {fen}")
+                        print(f"⚠ Position basculée en mode sûr (recherches successives) pour le moteur principal (crash) : {fen}")
                         if len(self._main_engine_degraded) < 500:  # borne de sécurité
                             self._main_engine_degraded.add(fen)
-                    # On retente UNE fois en mode dégradé (multipv=1,
+                    # On retente en mode SÛR (recherches successives,
                     # profondeur plus modeste) -- beaucoup moins de risque
-                    # de crash qu'une recherche multi-lignes complète. Si
-                    # même ÇA replante, l'exception remonte normalement
-                    # jusqu'au bloc try/except autour de _run_candidates()
-                    # (voir plus bas), qui retourne une erreur propre pour
-                    # CETTE requête plutôt que de planter tout le serveur.
-                    result, brd = self.engine.analyze_candidates(fen, multipv=1, depth=min(tier.random_depth(), 14))
+                    # de crash que la recherche multi-lignes native qui
+                    # vient de planter. Si même ÇA replante, l'exception
+                    # remonte normalement jusqu'au bloc try/except autour
+                    # de _run_candidates() (voir plus bas), qui retourne
+                    # une erreur propre pour CETTE requête plutôt que de
+                    # planter tout le serveur.
+                    result, brd = self.engine.analyze_candidates(
+                        fen, multipv=tier.multipv, depth=min(tier.random_depth(), 14), safe_mode=True,
+                    )
                 if result.get("game_over"):
                     elo_suggestion = None
                 elif fen in self._elo_advisor_blacklist:
@@ -439,7 +443,7 @@ class BridgeState:
                     # redémarrer le moteur principal pour rien.
                     try:
                         elo_suggestion = self.elo_engine.suggest_move(fen, tier.elo_reference)
-                    except chess.engine.EngineError as e:
+                    except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
                         self._restart_elo_engine(reason=f"{type(e).__name__}: {e}")
                         try:
                             elo_suggestion = self.elo_engine.suggest_move(fen, tier.elo_reference)
@@ -458,14 +462,12 @@ class BridgeState:
 
             try:
                 result, brd, elo_suggestion = _run_candidates()
-            except chess.engine.EngineError as e:
+            except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
                 self._restart_engine(reason=f"{type(e).__name__}: {e}")
                 try:
                     result, brd, elo_suggestion = _run_candidates()
                 except Exception as e2:
                     return {"error": f"Moteur Stockfish indisponible : {e2}", "profile": profile_id}
-            except Exception as e:
-                return {"error": f"Moteur Stockfish indisponible : {e}", "profile": profile_id}
             finally:
                 self._clear_active_analysis()
 
@@ -569,14 +571,12 @@ class BridgeState:
 
             try:
                 entry = _run_once()
-            except chess.engine.EngineError as e:
+            except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
                 self._restart_engine(reason=f"{type(e).__name__}: {e}")
                 try:
                     entry = _run_once()
                 except Exception as e2:
                     return {"error": f"Moteur Stockfish indisponible : {e2}", "depth": depth}
-            except Exception as e:
-                return {"error": f"Moteur Stockfish indisponible : {e}", "depth": depth}
             finally:
                 self._clear_active_analysis()
 

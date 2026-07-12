@@ -37,24 +37,39 @@ class ChessCoachEngine:
         except chess.engine.EngineError as e:
             print(f"⚠ Impossible de configurer Threads/Hash sur ce Stockfish : {e}")
 
-    def analyze_candidates(self, fen, multipv=4, depth=18):
+    def analyze_candidates(self, fen, multipv=4, depth=18, safe_mode=False):
         """
-        Retourne jusqu'à `multipv` coups candidats objectivement bons
-        (MultiPV Stockfish), triés du meilleur au moins bon, chacun avec sa
-        perte d'éval ("eval_loss", en centipawns) par rapport au meilleur.
-        Utilisé par human_profile.py pour choisir LEQUEL de ces bons coups
-        correspond à chaque profil/niveau -- contrairement à
-        analyze_fen_progressive(), ceci ne varie jamais la profondeur pour
-        "faire plus faible" : la profondeur ici sert uniquement à avoir une
-        éval fiable de chaque candidat, pas à limiter la force.
+        Retourne jusqu'à `multipv` coups candidats objectivement bons,
+        triés du meilleur au moins bon, chacun avec sa perte d'éval
+        ("eval_loss", en centipawns) par rapport au meilleur. Utilisé par
+        human_profile.py pour choisir LEQUEL de ces bons coups correspond à
+        chaque profil/niveau.
+
+        Deux modes :
+        - safe_mode=False (par défaut) : recherche multi-lignes NATIVE de
+          Stockfish (option UCI MultiPV), rapide (le travail est partagé
+          entre les lignes). C'est le mode normal pour l'immense majorité
+          des positions.
+        - safe_mode=True : `multipv` recherches simple-ligne SUCCESSIVES,
+          en excluant à chaque fois le(s) coup(s) déjà trouvé(s) via
+          `root_moves` (équivalent UCI "searchmoves"). Plus lent (pas de
+          travail partagé entre les recherches), mais évite complètement le
+          code multi-PV natif de Stockfish -- utilisé UNIQUEMENT pour les
+          positions déjà connues pour faire planter le mode natif (voir
+          web_bridge.py, _main_engine_degraded). Inutile de payer ce coût
+          de vitesse pour toutes les positions alors que la grande
+          majorité n'a jamais posé de problème.
         """
         board = chess.Board(fen)
         if board.is_game_over():
             return {"game_over": True, "result": board.result()}, board
 
-        info_list = self.engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv)
-        if isinstance(info_list, dict):
-            info_list = [info_list]
+        if safe_mode:
+            info_list = self._analyse_successive(board, multipv, depth)
+        else:
+            info_list = self.engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv)
+            if isinstance(info_list, dict):
+                info_list = [info_list]
 
         candidates = []
         best_cp = None
@@ -62,10 +77,11 @@ class ChessCoachEngine:
             pv = info.get("pv")
             if not pv:
                 continue
+            move = pv[0]
             cp = info["score"].pov(board.turn).score(mate_score=100000)
             if best_cp is None:
                 best_cp = cp
-            move = pv[0]
+
             tmp_board = board.copy()
             tmp_board.push(move)
             pv_san = []
@@ -100,7 +116,28 @@ class ChessCoachEngine:
                                       and chess.square_rank(move.to_square) in (3, 4),
                 "pv_san": pv_san,
             })
+
         return {"game_over": False, "candidates": candidates}, board
+
+    def _analyse_successive(self, board, multipv, depth):
+        """
+        Génère `multipv` résultats d'analyse simple-ligne successifs (voir
+        analyze_candidates, safe_mode=True), en excluant à chaque fois le
+        coup déjà trouvé.
+        """
+        remaining_moves = list(board.legal_moves)
+        n_wanted = min(multipv, len(remaining_moves))
+        results = []
+        for _ in range(n_wanted):
+            if not remaining_moves:
+                break
+            info = self.engine.analyse(board, chess.engine.Limit(depth=depth), root_moves=remaining_moves)
+            pv = info.get("pv")
+            if not pv:
+                break
+            results.append(info)
+            remaining_moves = [m for m in remaining_moves if m != pv[0]]
+        return results
 
     def configure_as_elo_advisor(self):
         """
