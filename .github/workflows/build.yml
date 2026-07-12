@@ -33,26 +33,30 @@ jobs:
       - name: Compiler CoachEchecs.exe
         run: pyinstaller coach.spec
 
-      - name: Vérifier que le moteur (stockfish.exe) est bien présent dans le dépôt
+      - name: Télécharger Berserk (dernière version Windows)
         shell: bash
         run: |
           set -e
-          # Ne télécharge PLUS Stockfish automatiquement -- le coach
-          # utilise maintenant Berserk (ou un autre moteur au choix), pas
-          # forcément Stockfish. Le binaire doit être committé À LA RACINE
-          # DU DÉPÔT sous le nom "stockfish.exe" (même si c'est en réalité
-          # Berserk renommé -- voir app_paths.py / resolve_stockfish_path,
-          # qui cherchent ce nom par défaut). Sans ça, le build s'arrête ici
-          # avec un message clair plutôt que d'empaqueter un .exe manquant
-          # ou -- pire -- de re-télécharger silencieusement le vrai
-          # Stockfish comme avant.
-          if [ ! -f stockfish.exe ]; then
-            echo "❌ Aucun stockfish.exe trouvé à la racine du dépôt."
-            echo "   Ajoute ton moteur (ex: Berserk renommé en stockfish.exe) à la racine du dépôt et relance le build."
+          # Berserk plutôt que Stockfish : téléchargé automatiquement à
+          # chaque build (comme on le faisait avant pour Stockfish), pour
+          # éviter d'avoir à committer un gros .exe dans le dépôt (GitHub
+          # bloque l'upload web au-delà de 25 Mo). avx2 : bon compromis
+          # vitesse/compatibilité pour un CPU 2013+ (Haswell/Zen ou plus
+          # récent) -- voir le README si ta machine est plus ancienne.
+          api_url="https://api.github.com/repos/jhonnold/berserk/releases/latest"
+          asset_url=$(curl -s "$api_url" \
+            | grep "browser_download_url.*avx2.*\.exe" \
+            | grep -v "pext" \
+            | head -n1 \
+            | cut -d '"' -f4)
+          if [ -z "$asset_url" ]; then
+            echo "❌ Impossible de trouver un binaire Berserk avx2 dans la dernière release."
+            echo "   Vérifie manuellement : https://github.com/jhonnold/berserk/releases"
             exit 1
           fi
-          echo "✅ Moteur trouvé : stockfish.exe ($(du -h stockfish.exe | cut -f1))"
-          cp stockfish.exe dist/stockfish.exe
+          echo "Téléchargement: $asset_url"
+          curl -L -o dist/stockfish.exe "$asset_url"
+          echo "✅ Berserk téléchargé ($(du -h dist/stockfish.exe | cut -f1))"
 
       - name: Préparer le package final
         shell: bash
