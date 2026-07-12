@@ -316,6 +316,7 @@
       // seront redessinées une par une au fil des paliers reçus.
       currentDepthEntries = {};
 
+      const requestStartedAt = performance.now(); // [debug perf]
       let processedLen = 0; // longueur de responseText déjà traitée (lignes NDJSON complètes uniquement)
       let gotAnyEntry = false;
 
@@ -335,7 +336,7 @@
             return;
           }
           gotAnyEntry = true;
-          handleCoachPayload(payload, boardPart);
+          handleCoachPayload(payload, boardPart, requestStartedAt);
         });
       };
 
@@ -383,7 +384,7 @@
     });
   }
 
-  function handleCoachPayload(data, boardPart) {
+  function handleCoachPayload(data, boardPart, requestStartedAt) {
     if (data.error) {
       console.warn("Coach d'échecs :", data.error);
       clearArrows();
@@ -397,6 +398,14 @@
       clearArrows();
       lastSentBoardPart = boardPart;
     } else if (data.depth) {
+      // [debug perf] Temps écoulé côté NAVIGATEUR depuis l'envoi de la
+      // requête jusqu'à la réception de ce palier -- à comparer avec les
+      // temps "[stockfish] palier ... atteint en ..." affichés dans le
+      // terminal Python pour la MÊME position. Un gros écart entre les
+      // deux indique un problème de transmission/affichage plutôt que de
+      // calcul Stockfish.
+      const elapsed = ((performance.now() - requestStartedAt) / 1000).toFixed(2);
+      console.log(`Coach d'échecs [debug perf] : palier ${data.depth} reçu côté navigateur après ${elapsed}s`);
       // Un palier de profondeur vient d'arriver -> on met à jour
       // uniquement la flèche correspondante, les autres restent affichées
       // telles quelles en attendant leur propre mise à jour.
