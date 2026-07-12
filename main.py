@@ -201,11 +201,11 @@ class CoachApp:
 class BrowserBridgeApp:
     """
     Mode 'navigateur' : le plateau est lu directement dans le DOM de ta
-    page (via chess_coach_bridge.js), donc plus de capture d'écran ni de
-    reconnaissance d'image. Ce mode se contente de démarrer le serveur
-    local que le JS contacte, et affiche le texte/l'explication dans la
-    même fenêtre Tkinter que le mode classique (les flèches, elles,
-    s'affichent directement sur ta page web, pas ici).
+    page (via le script Tampermonkey chess_coach_bridge.user.js), donc plus
+    de capture d'écran ni de reconnaissance d'image. Ce mode se contente de
+    démarrer le serveur local que le JS contacte, et affiche le texte/
+    l'explication dans la même fenêtre Tkinter que le mode classique (les
+    flèches, elles, s'affichent directement sur ta page web, pas ici).
     """
 
     def __init__(self, stockfish_path, explain_mode, port, threads=None, hash_mb=1024, depth=None):
@@ -271,8 +271,8 @@ class BrowserBridgeApp:
         self.overlay.explanation_text.insert(
             "1.0",
             f"En attente de ton site...\n\n"
-            f"Vérifie que chess_coach_bridge.js est bien chargé sur ta page "
-            f"de jeu (port {self.port}).\n\n"
+            f"Vérifie que chess_coach_bridge.user.js est bien activé dans "
+            f"Tampermonkey sur ta page de jeu (port {self.port}).\n\n"
             f"Camp actif : Blancs. Utilise \u2194 Changer de camp si tu joues "
             f"les Noirs."
         )
@@ -385,7 +385,7 @@ def interactive_menu():
             ).strip()
             stockfish_path = resolve_stockfish_path(sf_input or None)
             print("Démarrage du mode navigateur...")
-            print("N'oublie pas d'ajouter chess_coach_bridge.js sur ta page de jeu si ce n'est pas déjà fait.")
+            print("N'oublie pas d'activer chess_coach_bridge.user.js dans Tampermonkey sur ta page de jeu si ce n'est pas déjà fait.")
             try:
                 app = BrowserBridgeApp(
                     stockfish_path, explain_mode="local", port=8765,
@@ -411,7 +411,7 @@ def main():
     parser.add_argument("--interval", type=float, default=3.0, help="Secondes entre 2 analyses auto")
     parser.add_argument("--explain-mode", choices=["local", "api"], default="local")
     parser.add_argument("--web-bridge", action="store_true",
-                         help="Mode navigateur : lit le plateau via chess_coach_bridge.js au lieu de la capture d'écran")
+                         help="Mode navigateur : lit le plateau via chess_coach_bridge.user.js (Tampermonkey) au lieu de la capture d'écran")
     parser.add_argument("--bridge-port", type=int, default=8765)
     parser.add_argument("--depth", type=int, default=None,
                          help="Profondeur de recherche Stockfish (défaut: 20). Plus haut = plus fort mais plus lent.")

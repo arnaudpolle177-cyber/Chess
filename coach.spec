@@ -16,6 +16,7 @@ a = Analysis(
     hiddenimports=[
         'chess',
         'chess.engine',
+        'chess.polyglot',
         'mss',
         'cv2',
         'numpy',

@@ -41,24 +41,13 @@ import opening_book
 import app_paths
 
 DEFAULT_PORT = 8765
-
-
-def _infer_move_to_square(old_board, new_board):
-    """
-    Déduction légère (pas une vérité absolue, juste un indice stylistique)
-    de la case d'arrivée du coup joué entre 2 positions consécutives : la
-    case qui contient maintenant une pièce alors qu'elle était vide ou
-    occupée différemment avant. En cas de plusieurs candidats (roque :
-    roi + tour bougent tous les deux), retourne le premier trouvé -- un
-    léger flou ici n'a qu'un impact cosmétique sur le bonus de cohérence de
-    plan, jamais sur la validité des coups proposés.
-    """
-    for square in chess.SQUARES:
-        old_piece = old_board.piece_at(square)
-        new_piece = new_board.piece_at(square)
-        if new_piece is not None and new_piece != old_piece:
-            return square
-    return None
+# Aperçu rapide (depth 12, quasi instantané) : calculé UNE fois pour les 4
+# profils d'un coup (comme le cache principal), affiché immédiatement côté
+# navigateur pendant que la vraie analyse (au niveau Elo choisi, plus
+# profonde) tourne derrière et vient remplacer l'affichage dès qu'elle est
+# prête. Voir handle_quick_take() plus bas.
+QUICK_DEPTH = 12
+QUICK_MULTIPV = 3
 
 
 class BridgeState:
@@ -105,12 +94,6 @@ class BridgeState:
         self.engine_lock = threading.Lock()
         self.last_fen = None
         self.my_side = "w"
-        # Suivi pour le bonus de "cohérence de plan" (voir human_profile.py,
-        # _plan_coherence_bonus) : dernière position VRAIMENT nouvelle vue
-        # (pour calculer le diff), et case d'arrivée déduite du dernier
-        # coup réellement joué (le mien ou celui de l'adversaire).
-        self._prev_tracked_board = None
-        self._last_move_to_square = None
         # Niveau Elo actif (voir human_profile.ELO_TIERS). Change le style
         # de jeu proposé par les 4 profils, PAS juste la profondeur -- voir
         # human_profile.py pour le détail.
@@ -124,6 +107,12 @@ class BridgeState:
         # (jamais lu/écrit hors de ce verrou).
         self._candidates_cache_key = None      # (fen, elo_tier_id)
         self._candidates_cache_value = None    # (result_dict, board, elo_suggestion_uci)
+        # Cache SÉPARÉ pour l'aperçu rapide (depth 12) -- ne doit surtout
+        # pas se mélanger avec le cache principal ci-dessus (qui est à la
+        # profondeur du niveau Elo choisi) : sinon la "vraie" requête
+        # pourrait par erreur réutiliser le résultat rapide et peu profond.
+        self._quick_cache_key = None           # fen
+        self._quick_cache_value = None         # liste de candidats (depth 12)
         # Positions pour lesquelles le moteur "conseiller Elo" a déjà
         # planté 2 fois de suite (échec initial + échec après redémarrage).
         # Certaines positions (tactiques, souvent avec un sacrifice
@@ -165,25 +154,6 @@ class BridgeState:
         """side: 'w' ou 'b'."""
         with self.lock:
             self.my_side = side
-
-    def _update_last_move_tracking(self, new_board):
-        """
-        Appelé uniquement quand une position VRAIMENT nouvelle arrive (pas
-        à chaque requête de profil). Déduit la case d'arrivée du coup qui
-        vient d'être joué (diff avec la position précédemment suivie), pour
-        le bonus de cohérence de plan -- voir human_profile.py.
-        Best-effort : une déduction imprécise (ex: 1er coup de la partie,
-        ou plateau réinitialisé) n'a qu'un impact cosmétique mineur (juste
-        un petit bonus de scoring en moins), donc jamais bloquant.
-        """
-        if self._prev_tracked_board is not None:
-            try:
-                to_sq = _infer_move_to_square(self._prev_tracked_board, new_board)
-                if to_sq is not None:
-                    self._last_move_to_square = to_sq
-            except Exception:
-                pass  # cosmétique seulement, pas grave si ça échoue
-        self._prev_tracked_board = new_board.copy()
 
     def set_elo_tier(self, tier_id):
         """tier_id : 1, 2 ou 3 (voir human_profile.ELO_TIERS)."""
@@ -289,6 +259,81 @@ class BridgeState:
         finally:
             self._clear_active_analysis()
 
+    def handle_quick_take(self, fen):
+        """
+        Version rapide (depth 12, quasi instantanée) des 4 profils en UNE
+        seule requête -- affichée immédiatement côté navigateur pendant que
+        la vraie analyse (plus profonde, au niveau Elo choisi) tourne
+        derrière. Ne calcule PAS l'avis Elo-bridé (pour rester rapide) --
+        les profils "populaire"/"classique" s'en passent juste pour cet
+        aperçu, ils l'auront dans la vraie réponse qui suit.
+        """
+        try:
+            board = chess.Board(fen)
+        except ValueError as e:
+            return {"quick": True, "error": f"FEN invalide reçu du navigateur : {e}"}
+
+        with self.lock:
+            self.last_fen = fen  # l'aperçu rapide arrive en premier, avant les vraies requêtes profil
+            my_side = self.my_side
+            elo_tier_id = self.elo_tier_id
+
+        side_to_move = "w" if board.turn else "b"
+        if side_to_move != my_side:
+            return {"quick": True, "skip": True}
+        if board.is_game_over():
+            return {"quick": True, "game_over": True, "result": board.result()}
+
+        with self.engine_lock:
+            if self._quick_cache_key == fen:
+                candidates = self._quick_cache_value
+            else:
+                self._register_active_analysis(None)
+                # Réutilise la même liste que l'analyse principale (voir
+                # handle_single_profile) : si cette position est déjà
+                # connue pour faire planter le moteur en multi-lignes, pas
+                # la peine de le retenter ici non plus.
+                quick_multipv = 1 if fen in self._main_engine_degraded else QUICK_MULTIPV
+
+                def _run_quick(mpv):
+                    result, brd = self.engine.analyze_candidates(fen, multipv=mpv, depth=QUICK_DEPTH)
+                    return result
+
+                try:
+                    result = _run_quick(quick_multipv)
+                except chess.engine.EngineError as e:
+                    self._restart_engine(reason=f"{type(e).__name__}: {e}")
+                    if fen not in self._main_engine_degraded and len(self._main_engine_degraded) < 500:
+                        self._main_engine_degraded.add(fen)
+                    try:
+                        result = _run_quick(1)  # repli direct sur multipv=1 après un crash
+                    except Exception as e2:
+                        return {"quick": True, "error": f"Moteur Stockfish indisponible : {e2}"}
+                except Exception as e:
+                    return {"quick": True, "error": f"Moteur Stockfish indisponible : {e}"}
+                finally:
+                    self._clear_active_analysis()
+
+                if result.get("game_over"):
+                    return {"quick": True, "game_over": True, "result": result["result"]}
+                candidates = result["candidates"]
+                self._quick_cache_key = fen
+                self._quick_cache_value = candidates
+
+        profiles_out = {}
+        for profile_id in human_profile.PROFILE_IDS:
+            chosen = human_profile.select_move(
+                candidates, elo_tier_id, profile_id, elo_suggestion_uci=None, board=board,
+            )
+            if chosen is not None:
+                profiles_out[profile_id] = {
+                    "move_uci": chosen["move_uci"],
+                    "move_san": chosen["move_san"],
+                    "score": chosen["score"],
+                    "pv_san": chosen["pv_san"],
+                }
+        return {"quick": True, "profiles": profiles_out}
+
     def handle_single_profile(self, fen, profile_id):
         """
         Analyse la position pour UN SEUL profil de jeu ("solid", "popular",
@@ -310,7 +355,6 @@ class BridgeState:
 
         if is_new_position:
             self._cancel_current_analysis_if_any()
-            self._update_last_move_tracking(board)
 
         side_to_move = "w" if board.turn else "b"
         if side_to_move != my_side:
@@ -747,11 +791,15 @@ def _make_handler(state: BridgeState):
                 fen = data["fen"]
                 depth = data.get("depth")      # ancien mode : un seul palier de profondeur
                 profile = data.get("profile")  # nouveau mode : un seul profil "humain"
+                quick = data.get("quick", False)  # aperçu rapide (depth 12) des 4 profils d'un coup
             except Exception:
                 self._send_single(400, {"error": "JSON invalide, champ \"fen\" attendu"})
                 return
 
-            if profile is not None:
+            if quick:
+                result = state.handle_quick_take(fen)
+                self._send_single(200, result)
+            elif profile is not None:
                 result = state.handle_single_profile(fen, profile)
                 self._send_single(200, result)
             elif depth is not None:

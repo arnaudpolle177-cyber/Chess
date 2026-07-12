@@ -71,24 +71,25 @@ class EloTier:
 
 ELO_TIERS = {
     1: EloTier(id=1, label="1800-2200", elo_min=1800, elo_max=2200, elo_reference=2000,
-               # multipv=3 (pas 4) : dans les crashs Stockfish observés en
-               # pratique, la recherche plantait systématiquement AVANT
-               # d'établir la 3e/4e meilleure ligne, toujours sur des
-               # positions très tactiques/déséquilibrées -- signe d'un vrai
-               # bug de Stockfish dans sa recherche multi-lignes sur ce
-               # type de position, pas un souci CPU ni de notre code. On
-               # réduit la marge (moins de lignes à établir) pour limiter
-               # le risque, quitte à perdre un peu de diversité entre les
-               # 4 profils (toujours 4 flèches -- voir le mécanisme de
-               # repli dans web_bridge.py si même ça continue à planter).
-               multipv=3, depth_min=11, depth_max=13, max_eval_loss_cp=90, typical_eval_loss_cp=35),
+               # multipv=4 : remonté après avoir ajouté le mode dégradé
+               # (voir web_bridge.py, _main_engine_degraded) qui absorbe
+               # maintenant proprement les crashs Stockfish observés sur
+               # certaines positions tactiques/déséquilibrées (bascule
+               # automatique sur multipv=1 pour CETTE position précise si
+               # ça replante, sans jamais bloquer le programme). Plus
+               # besoin de sacrifier la diversité entre les 4 profils par
+               # précaution générale.
+               multipv=4, depth_min=11, depth_max=13,
+               max_eval_loss_cp=90, typical_eval_loss_cp=35),
     2: EloTier(id=2, label="2300-2700", elo_min=2300, elo_max=2700, elo_reference=2500,
-               multipv=3, depth_min=15, depth_max=17, max_eval_loss_cp=50, typical_eval_loss_cp=18),
+               multipv=4, depth_min=15, depth_max=17,
+               max_eval_loss_cp=50, typical_eval_loss_cp=18),
     3: EloTier(id=3, label="2800-3200", elo_min=2800, elo_max=3200, elo_reference=3000,
                # Plafonné à 19 (pas 20) : depth 20 en multipv=4 est nettement
                # plus lent pour un gain de précision marginal à ce niveau
                # déjà quasi-parfait -- pas un bon rapport temps/qualité.
-               multipv=3, depth_min=18, depth_max=19, max_eval_loss_cp=20, typical_eval_loss_cp=6),
+               multipv=4, depth_min=18, depth_max=19,
+               max_eval_loss_cp=20, typical_eval_loss_cp=6),
 }
 DEFAULT_ELO_TIER = 2
 
