@@ -13,15 +13,15 @@ from board_overlay import BoardOverlay
 from engine_analysis import PROGRESSIVE_DEPTHS
 import human_profile
 
-MAX_LINES_DISPLAYED = 4
+MAX_LINES_DISPLAYED = 3
 
 
 class CoachOverlay:
     # Couleurs alignées sur PROFILE_STYLE dans chess_coach_bridge.user.js,
-    # dans l'ORDRE de human_profile.PROFILE_IDS (solid, popular, creative,
-    # classical) -- vert, bleu, rose, blanc.
-    PROFILE_COLORS = ["#a6e3a1", "#89dceb", "#f38ba8", "#f5f5f5"]
-    PROFILE_LABELS = {"solid": "Solide", "popular": "Populaire", "creative": "Créatif", "classical": "Classique"}
+    # dans l'ORDRE de human_profile.PROFILE_IDS (popular, creative,
+    # classical) -- bleu, rose, blanc.
+    PROFILE_COLORS = ["#89dceb", "#f38ba8", "#f5f5f5"]
+    PROFILE_LABELS = {"popular": "Pragmatique", "creative": "Tactique", "classical": "Textbook"}
 
     def __init__(self, on_refresh_click=None, on_toggle_side_click=None, on_elo_change=None, board_region=None):
         self.root = tk.Tk()
@@ -236,7 +236,7 @@ class CoachOverlay:
     def update_profile_line(self, profile_id, entry):
         """
         Thread-safe : met à jour UNIQUEMENT la ligne correspondant à ce
-        profil ("solid"/"popular"/"creative"/"classical"), sans toucher aux
+        profil ("popular"/"creative"/"classical"), sans toucher aux
         3 autres lignes déjà affichées -- même logique que
         update_depth_line() mais pour le nouveau système de profils
         "humains" (voir human_profile.py).

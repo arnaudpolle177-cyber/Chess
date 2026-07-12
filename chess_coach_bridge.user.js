@@ -63,20 +63,19 @@
  */
 (function () {
   const COACH_ENDPOINT = "http://127.0.0.1:8765/fen";
-  // 4 profils de jeu "humains" (voir human_profile.py côté serveur) --
+  // 3 profils de jeu "humains" (voir human_profile.py côté serveur) --
   // l'ordre ici doit rester cohérent avec human_profile.PROFILE_IDS.
   // Le niveau Elo (slider dans la fenêtre Python) ne change PAS ces
   // couleurs/profils : il change la fenêtre de tolérance utilisée par le
   // serveur pour choisir CHAQUE coup, en amont de ce script.
-  const PROFILE_IDS = ["solid", "popular", "creative", "classical"];
+  const PROFILE_IDS = ["popular", "creative", "classical"];
   const PROFILE_STYLE = {
     // width décroissant + opacity croissant : quand plusieurs profils
     // tombent d'accord sur le même coup, les flèches se superposent en
     // formant une "cible" au lieu que l'une masque les autres.
-    solid:     { color: "#a6e3a1", width: 10, opacity: 0.35 }, // vert : coup solide/simple
-    popular:   { color: "#89dceb", width: 7,  opacity: 0.55 }, // bleu : coup fréquent à ce niveau
-    creative:  { color: "#f38ba8", width: 4,  opacity: 0.8 },  // rose : coup plus créatif/intuitif
-    classical: { color: "#f5f5f5", width: 2,  opacity: 1.0 },  // blanc : coup classique/naturel
+    popular:   { color: "#89dceb", width: 9, opacity: 0.45 }, // bleu : coup pragmatique, bonnes chances de gain
+    creative:  { color: "#f38ba8", width: 5, opacity: 0.75 }, // rose : coup tactique/sacrificiel
+    classical: { color: "#f5f5f5", width: 2, opacity: 1.0 },  // blanc : coup textbook, sensible à la phase de partie
   };
   const PIECE_LETTERS = { pawn: "p", knight: "n", bishop: "b", rook: "r", queen: "q", king: "k" };
 

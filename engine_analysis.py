@@ -20,6 +20,11 @@ DEFAULT_DEPTH = 20
 # plus lent pour rien.
 PROGRESSIVE_DEPTHS = (10, 15, 20)
 
+# Valeurs de pièces (convention standard) -- utilisées pour repérer les
+# échanges déséquilibrés (esprit "sacrifice"/créatif) et les échanges "à
+# volume égal" (technique classique de fin de partie).
+PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
+
 
 class ChessCoachEngine:
     def __init__(self, stockfish_path, threads=None, hash_mb=1024):
@@ -117,6 +122,17 @@ class ChessCoachEngine:
             # presque toujours sur le même coup.
             is_developing_minor = piece_type in (chess.KNIGHT, chess.BISHOP) and from_rank == back_rank
             is_pawn_center_push = piece_type == chess.PAWN and chess.square_file(move.to_square) in (3, 4)
+            is_king_move = piece_type == chess.KING and not board.is_castling(move)
+
+            # Valeurs de pièces -- utilisées pour repérer les échanges
+            # déséquilibrés (esprit "sacrifice"/créatif) et les échanges "à
+            # volume égal" (technique classique de fin de partie : échanger
+            # quand on a l'avantage). None si ce n'est pas une capture.
+            moving_piece_value = PIECE_VALUES.get(piece_type, 0)
+            captured_piece = board.piece_at(move.to_square)
+            captured_piece_value = PIECE_VALUES.get(captured_piece.piece_type, 0) if captured_piece else None
+            if board.is_en_passant(move):
+                captured_piece_value = 1
 
             # WDL (Win/Draw/Loss) du point de vue du camp qui joue ce coup,
             # si le moteur le fournit (voir __init__, UCI_ShowWDL) -- sert
@@ -139,11 +155,14 @@ class ChessCoachEngine:
                 "is_capture": board.is_capture(move),
                 "is_check": tmp_board.is_check(),
                 "is_castle": board.is_castling(move),
+                "is_king_move": is_king_move,
                 "is_developing_minor": is_developing_minor,
                 "is_pawn_center_push": is_pawn_center_push,
                 "to_square_central": chess.square_file(move.to_square) in (3, 4)
                                       and chess.square_rank(move.to_square) in (3, 4),
                 "win_prob": win_prob,
+                "moving_piece_value": moving_piece_value,
+                "captured_piece_value": captured_piece_value,  # None si pas une capture
                 "pv_san": pv_san,
             })
 

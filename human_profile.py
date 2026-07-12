@@ -180,6 +180,32 @@ def _tiered_for_position(tier: EloTier, board):
 
 
 
+def _material_count(board):
+    """Total des points de matériel sur l'échiquier (hors rois), les 2 camps confondus."""
+    total = 0
+    for piece_type, value in ((chess.PAWN, 1), (chess.KNIGHT, 3), (chess.BISHOP, 3), (chess.ROOK, 5), (chess.QUEEN, 9)):
+        total += len(board.pieces(piece_type, chess.WHITE)) * value
+        total += len(board.pieces(piece_type, chess.BLACK)) * value
+    return total
+
+
+def _game_phase(board):
+    """
+    "opening" / "middlegame" / "endgame", à partir du matériel restant sur
+    l'échiquier (pas du numéro de coup -- pas fiable ici, voir
+    chess_coach_bridge.user.js qui reconstruit toujours un FEN avec
+    compteurs à "0 1"). Départ = 78 points de matériel (hors rois).
+    """
+    if board is None:
+        return "middlegame"
+    material = _material_count(board)
+    if material >= 60:
+        return "opening"
+    if material >= 24:
+        return "middlegame"
+    return "endgame"
+
+
 def _eligible_candidates(candidates, tier: EloTier):
     """
     Coups dont la perte d'éval reste dans la tolérance du niveau. Filet de
@@ -205,94 +231,106 @@ def _band_penalty(eval_loss, target_cp, factor):
     return -abs(eval_loss - target_cp) * factor
 
 
-def _score_solid(c, tier):
-    """
-    Vert : coups sûrs, peu de complications, mais pas obligatoirement LE
-    meilleur coup -- vise une perte d'éval modeste (proche de zéro sans y
-    être collé) plutôt que le zéro absolu.
-    """
-    target = tier.typical_eval_loss_cp * 0.35
-    penalty = _band_penalty(c["eval_loss"], target, 1.1)
-    if c["is_capture"] and c["eval_loss"] > tier.typical_eval_loss_cp:
-        penalty -= 15  # capture qui perd beaucoup d'éval = complication risquée, pas "solide"
-    return penalty
-
-
 def _score_popular(c, tier):
     """
-    Bleu : maximise les CHANCES DE GAIN PRATIQUES (WDL -- Win/Draw/Loss),
-    pas juste l'éval brute en centipawns. Signal PRINCIPAL propre à ce
-    profil : un coup qui garde une position plus "convertible" en pratique
-    (moins de risque de nulle, chances de gain solides) plutôt que le coup
-    mathématiquement optimal mais délicat à jouer -- une différence
-    reconnaissable de "comment les joueurs choisissent en pratique".
-
-    (Avant, ce profil s'ancrait sur l'avis d'un Stockfish bridé en Elo
-    -- UCI_LimitStrength/UCI_Elo, des extensions propres à Stockfish,
-    absentes de la plupart des autres moteurs. Remplacé par un signal WDL,
-    une option UCI standard supportée par la majorité des moteurs modernes,
-    y compris Berserk.)
+    Bleu -- PRAGMATIQUE : maximise les CHANCES DE GAIN PRATIQUES (WDL --
+    Win/Draw/Loss), pas juste l'éval brute en centipawns, avec une cible de
+    perte resserrée (proche de l'optimal) -- c'est le profil "sûr et
+    efficace" : il absorbe ce que faisait avant le profil "solide" (retiré,
+    jugé redondant), tout en gardant son signal principal propre (WDL, pas
+    juste "perte d'éval minimale"). Pénalise en plus les captures qui
+    perdent de l'éval (complication inutile, peu pragmatique).
     """
-    target = tier.typical_eval_loss_cp * 0.8
-    win_bonus = 0
+    target = tier.typical_eval_loss_cp * 0.55
+    bonus = 0
     if c.get("win_prob") is not None:
         # Échelle empirique : +30 points pour un coup à 100% de chances de
         # gain plutôt que 0% -- suffisant pour départager des coups très
         # proches en éval sans jamais l'emporter sur le plafond Elo (déjà
         # filtré en amont).
-        win_bonus = c["win_prob"] * 30
-    return win_bonus + _band_penalty(c["eval_loss"], target, 0.7)
+        bonus += c["win_prob"] * 30
+    if c["is_capture"] and c["eval_loss"] > tier.typical_eval_loss_cp:
+        bonus -= 12  # capture qui perd de l'éval = complication risquée, pas pragmatique
+    return bonus + _band_penalty(c["eval_loss"], target, 0.75)
 
 
 def _score_creative(c, tier):
     """
-    Rose : s'écarte du choix "évident" (le meilleur ET le plus "convertible"
-    en pratique) -- capture, poussée centrale, coup moins attendu -- tout
-    en restant dans la tolérance. Vise délibérément une perte un peu plus
-    élevée que "popular"/"classical" (plus de personnalité, jamais au-delà
-    du plafond du niveau).
-
-    Volontairement PAS de bonus de cohérence de plan ici : ce profil vise
-    justement à s'écarter de l'évident -- rester dans le même secteur du
-    plateau à chaque coup irait à l'encontre de son principe.
+    Rose -- TACTIQUE/SACRIFICIEL : favorise les coups forcing (échecs), les
+    captures qui donnent du matériel pour l'initiative (esprit sacrifice --
+    pièce de plus grande valeur qui en prend une de moindre valeur), et
+    s'écarte activement de ce qui ressemble à un choix "pragmatique" (WDL
+    élevé) ou "classique" (développement calme, roque) -- laisse ce terrain
+    aux 2 autres profils. Vise délibérément une perte un peu plus élevée
+    (plus de personnalité), jamais au-delà du plafond du niveau.
     """
     target = tier.typical_eval_loss_cp * 1.3
     novelty = 0
     if c["eval_loss"] > 0:
-        novelty += 8  # pas LE meilleur coup, un peu de personnalité
-    if c["to_square_central"]:
-        novelty += 8
+        novelty += 6  # pas LE meilleur coup, un peu de personnalité
+    if c["is_check"]:
+        novelty += 10  # coup forcing -- esprit intuitif/attaquant
     if c["is_capture"]:
         novelty += 6
+        cv, mv = c.get("captured_piece_value"), c.get("moving_piece_value")
+        if cv is not None and mv is not None and mv > cv:
+            novelty += 14  # sacrifie du matériel pour l'initiative -- signature "créative"
+    if c["to_square_central"]:
+        novelty += 6
     if c.get("win_prob") is not None:
-        novelty -= c["win_prob"] * 10  # justement PAS le choix le plus "sûr en pratique" -- sinon ça reconverge avec "populaire"
+        novelty -= c["win_prob"] * 10  # justement pas le choix le plus "sûr en pratique"
+    if c.get("is_developing_minor") or c.get("is_castle"):
+        novelty -= 6  # laisse ce terrain-là à "classique"
     return novelty + _band_penalty(c["eval_loss"], target, 0.5)
 
 
-def _score_classical(c, tier):
+def _score_classical(c, tier, phase, is_ahead):
     """
-    Blanc : coup NATUREL/développement/textbook -- basé sur des traits
-    INTRINSÈQUES au coup (développement de pièce mineure, poussée centrale,
-    roque, absence de complication tactique). Signal totalement indépendant
-    des autres profils -- c'est ce qui le rend vraiment différent de
-    "populaire" (WDL) et "solide" (perte d'éval minimale).
+    Blanc -- TEXTBOOK, sensible à la PHASE DE PARTIE (contrairement aux 2
+    autres profils, qui gardent le même principe du début à la fin) :
+    - Ouverture : développement de pièce mineure, poussée centrale, roque,
+      coups calmes -- les principes classiques d'ouverture.
+    - Milieu de partie : coups calmes, échanges "propres" (pièce prise de
+      valeur égale ou supérieure -- pas un sacrifice), roque encore valorisé
+      s'il n'a pas encore eu lieu.
+    - Finale : activation du roi vers le centre (LA technique classique de
+      fin de partie), échanger les pièces quand on a l'avantage (simplifier
+      pour convertir), reste globalement sobre.
     """
     target = tier.typical_eval_loss_cp * 0.6
     naturalness = 0
-    if c["is_developing_minor"]:
-        naturalness += 14
-    if c["is_pawn_center_push"]:
-        naturalness += 10
-    if c["is_castle"]:
-        naturalness += 12
-    if not c["is_capture"] and not c["is_check"]:
-        naturalness += 6  # coup calme, pas de complication tactique forcée
+
+    if phase == "opening":
+        if c["is_developing_minor"]:
+            naturalness += 14
+        if c["is_pawn_center_push"]:
+            naturalness += 10
+        if c["is_castle"]:
+            naturalness += 12
+        if not c["is_capture"] and not c["is_check"]:
+            naturalness += 6
+    elif phase == "endgame":
+        if c["is_king_move"]:
+            naturalness += 14 if c["to_square_central"] else 6  # roi actif vers le centre
+        if c["is_capture"] and is_ahead:
+            naturalness += 10  # simplifier pour convertir un avantage -- technique classique
+        if not c["is_capture"] and not c["is_check"]:
+            naturalness += 4
+    else:  # middlegame
+        if not c["is_capture"] and not c["is_check"]:
+            naturalness += 6
+        cv, mv = c.get("captured_piece_value"), c.get("moving_piece_value")
+        if c["is_capture"] and cv is not None and mv is not None and cv >= mv:
+            naturalness += 6  # échange "propre", pas un sacrifice
+        if c["is_castle"]:
+            naturalness += 8  # roque encore valorisé s'il n'a pas eu lieu
+
     return naturalness + _band_penalty(c["eval_loss"], target, 0.9)
 
 
-# Ordre = ordre d'affichage (vert, bleu, rose, noir&blanc). Ajouter un
-# profil = ajouter son id ici + son cas dans select_move() ci-dessous.
-PROFILE_IDS = ("solid", "popular", "creative", "classical")
+# Ordre = ordre d'affichage (bleu, rose, blanc). Ajouter un profil =
+# ajouter son id ici + son cas dans select_move() ci-dessous.
+PROFILE_IDS = ("popular", "creative", "classical")
 
 
 def _softmax_pick(scored, humanity, rng):
@@ -335,14 +373,18 @@ def select_move(candidates, elo_tier_id, profile_id,
     tier, is_inaccuracy = _apply_inaccuracy_roll(tier, elo_tier_id, rng)
     eligible = _eligible_candidates(candidates, tier)
 
-    if profile_id == "solid":
-        scored = [(c, _score_solid(c, tier)) for c in eligible]
-    elif profile_id == "popular":
+    if profile_id == "popular":
         scored = [(c, _score_popular(c, tier)) for c in eligible]
     elif profile_id == "creative":
         scored = [(c, _score_creative(c, tier)) for c in eligible]
     elif profile_id == "classical":
-        scored = [(c, _score_classical(c, tier)) for c in eligible]
+        phase = _game_phase(board)
+        # "En avantage" : le meilleur candidat objectif (candidates[0],
+        # toujours trié meilleur -> moins bon) a une éval nettement positive
+        # pour le camp au trait -- sert au profil classique en finale
+        # (simplifier pour convertir un avantage, voir _score_classical).
+        is_ahead = candidates[0].get("cp", 0) >= 150
+        scored = [(c, _score_classical(c, tier, phase, is_ahead)) for c in eligible]
     else:
         raise ValueError(f"Profil de jeu inconnu : {profile_id!r}")
 

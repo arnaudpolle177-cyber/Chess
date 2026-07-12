@@ -294,7 +294,7 @@ class BridgeState:
 
     def handle_single_profile(self, fen, profile_id):
         """
-        Analyse la position pour UN SEUL profil de jeu ("solid", "popular",
+        Analyse la position pour UN SEUL profil de jeu ("popular",
         "creative", "classical" -- voir human_profile.py) au niveau Elo
         actuellement sélectionné, et retourne directement un dict (même
         pattern que handle_single_depth : une requête HTTP par flèche, pas
