@@ -381,7 +381,15 @@ def select_move(candidates, elo_tier_id, profile_id,
         # toujours trié meilleur -> moins bon) a une éval nettement positive
         # pour le camp au trait -- sert au profil classique en finale
         # (simplifier pour convertir un avantage, voir _score_classical).
-        is_ahead = candidates[0].get("cp", 0) >= 150
+        # cp peut être None pour un coup issu du livre d'ouvertures (voir
+        # opening_book.py -- pas de vraie éval Stockfish en mode livre,
+        # c'est volontaire). .get("cp", 0) ne protège QUE contre une clé
+        # absente, pas contre une valeur None déjà présente -- sans ce
+        # filet explicite, None >= 150 plantait le serveur pour CHAQUE
+        # coup de livre côté profil "classique" (même bug déjà corrigé
+        # dans theme_detector.py, jamais reporté ici).
+        top_cp = candidates[0].get("cp")
+        is_ahead = top_cp is not None and top_cp >= 150
         scored = [(c, _score_classical(c, tier, phase, is_ahead)) for c in eligible]
     else:
         raise ValueError(f"Profil de jeu inconnu : {profile_id!r}")
