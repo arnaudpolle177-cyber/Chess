@@ -33,61 +33,59 @@ jobs:
       - name: Compiler CoachEchecs.exe
         run: pyinstaller coach.spec
 
-      - name: Télécharger Stockfish (dernière version Windows)
+      - name: Télécharger Berserk (dernière version Windows)
         shell: bash
         run: |
           set -e
-          api_url="https://api.github.com/repos/official-stockfish/Stockfish/releases/latest"
-          asset_url=$(curl -s "$api_url" \
-            | grep "browser_download_url.*windows-x86-64-avx2.zip" \
-            | head -n1 \
-            | cut -d '"' -f4)
+          # Le moteur réel est Berserk (jhonnold/berserk), renommé
+          # stockfish.exe par commodité -- voir le résumé technique du
+          # projet : Stockfish a été abandonné suite à des crashs natifs
+          # jamais élucidés. AVANT ce patch, ce bloc téléchargeait encore
+          # le VRAI Stockfish officiel et l'écrasait par-dessus -- c'est
+          # ce faux "Stockfish" (en réalité le vrai) qui finissait dans
+          # chaque package, jamais Berserk (voir la conversation : la
+          # taille du package avait doublé, signe que ce n'était plus le
+          # même binaire).
+          api_url="https://api.github.com/repos/jhonnold/berserk/releases/latest"
+          assets_json=$(curl -s "$api_url")
+
+          # Paliers de repli par jeu d'instructions -- avx2 en premier
+          # (support quasi universel sur les CPU depuis 2013, meilleur
+          # compromis performance/compatibilité pour un usage entre amis
+          # sans connaître à l'avance le CPU de chaque utilisateur),
+          # avx512 en tout DERNIER recours (support bien moins répandu,
+          # notamment absent ou désactivé sur beaucoup de CPU grand public
+          # -- le utiliser en 1er aurait pu télécharger un binaire qui
+          # plante silencieusement sur une machine qui ne le supporte pas).
+          for pattern in "avx2" "sse41" "x86-64" "avx512"; do
+            asset_url=""
+            asset_url=$(echo "$assets_json" \
+              | grep "browser_download_url" \
+              | grep -i "windows\|\.exe\|win64\|win-x64" \
+              | grep -i "$pattern" \
+              | grep -vi "pext" \
+              | head -n1 \
+              | cut -d '"' -f4)
+            if [ -n "$asset_url" ]; then
+              echo "Palier retenu : $pattern"
+              break
+            fi
+          done
+
+          if [ -z "$asset_url" ]; then
+            echo "Aucun binaire Windows Berserk trouvé parmi les paliers attendus (avx512/avx2/sse41/x86-64)."
+            echo "Assets disponibles sur cette release :"
+            echo "$assets_json" | grep "\"name\"" || true
+            exit 1
+          fi
+
           echo "Téléchargement: $asset_url"
-          curl -L -o stockfish.zip "$asset_url"
-          mkdir stockfish_extracted
-          unzip -q stockfish.zip -d stockfish_extracted
-          # Le zip officiel contient un dossier stockfish/ avec l'exe dedans
-          find stockfish_extracted -iname "stockfish*.exe" -exec cp {} dist/stockfish.exe \;
+          downloaded_name=$(basename "$asset_url")
+          curl -L -o "$downloaded_name" "$asset_url"
 
-      - name: Préparer le package final
-        shell: bash
-        run: |
-          set -e
-          mkdir -p package/CoachEchecs
-          cp dist/CoachEchecs.exe package/CoachEchecs/
-          cp dist/stockfish.exe package/CoachEchecs/
-          cp README_UTILISATEUR.md package/CoachEchecs/LISEZ-MOI.md
-          # Livre d'ouvertures : optionnel. S'il est présent à la racine du
-          # dépôt (voir opening_book.py), on l'embarque à côté de l'exe --
-          # sinon le coach fonctionne quand même, juste sans lui.
-          if [ -f opening_book.bin ]; then
-            cp opening_book.bin package/CoachEchecs/
-            echo "Livre d'ouvertures inclus dans le package."
+          if [[ "$downloaded_name" == *.zip ]]; then
+            mkdir berserk_extracted
+            unzip -q "$downloaded_name" -d berserk_extracted
+            find berserk_extracted -iname "*.exe" -exec cp {} dist/stockfish.exe \;
           else
-            echo "Pas de opening_book.bin trouvé à la racine du dépôt -- package sans livre d'ouvertures."
-          fi
-          # Base ECO locale (nom d'ouverture + points forts/faibles, voir
-          # opening_identity.py) : même principe que opening_book.bin
-          # ci-dessus -- optionnelle, embarquée si présente à la racine du
-          # dépôt, sinon le coach retombe sur les gabarits génériques.
-          if [ -f eco_openings.json ]; then
-            cp eco_openings.json package/CoachEchecs/
-            echo "Base d'ouvertures (ECO) incluse dans le package."
-          else
-            echo "Pas de eco_openings.json trouvé à la racine du dépôt -- package sans identification d'ouverture par nom."
-          fi
-          cd package
-          7z a -r CoachEchecs-windows.zip CoachEchecs
-
-      - name: Publier la Release avec le zip
-        uses: softprops/action-gh-release@v2
-        with:
-          files: package/CoachEchecs-windows.zip
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Garder aussi le zip comme artifact (pour les builds manuels sans tag)
-        uses: actions/upload-artifact@v4
-        with:
-          name: CoachEchecs-windows
-          path: package/CoachEchecs-windows.zip
+            # .exe déjà en asset direct (format 
