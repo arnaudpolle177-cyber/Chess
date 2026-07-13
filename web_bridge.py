@@ -231,6 +231,22 @@ class BridgeState:
             if not candidates:
                 return
             current_eval = candidates[0]["cp"]  # point de vue de mon camp
+            if current_eval is None:
+                # Coup de livre (voir opening_book.py) -- pas de vraie éval
+                # ici, donc pas de swing_cp fiable à calculer non plus.
+                # Repli sur le thème "neutre" (eval_cp=0 par défaut dans
+                # theme_detector.detect_theme) plutôt que de laisser une
+                # comparaison numérique planter sur None (voir le
+                # commentaire équivalent dans theme_detector.py).
+                try:
+                    theme_result = theme_detector.detect_theme(board, candidates)
+                except Exception as e:
+                    print(f"⚠ Détection de thème en erreur (coup de livre), repli neutre : {e}")
+                    theme_result = theme_detector.ThemeResult(theme_detector.EQUAL_POSITION, 0)
+                self._theme_cache_value = theme_result
+                self._theme_cache_key = fen
+                self._opponent_turn_eval = None
+                return
 
             opponent_eval_cp = None
             opponent_better_move_san = None
@@ -251,9 +267,24 @@ class BridgeState:
                 # compare à l'éval actuelle.
                 swing_cp = current_eval - (-opponent_eval_cp)
 
-            theme_result = theme_detector.detect_theme(
-                board, candidates, swing_cp=swing_cp, opponent_better_move_san=opponent_better_move_san,
-            )
+            try:
+                theme_result = theme_detector.detect_theme(
+                    board, candidates, swing_cp=swing_cp, opponent_better_move_san=opponent_better_move_san,
+                )
+            except Exception as e:
+                # Filet de sécurité : MÊME en cas d'erreur imprévue ici (pas
+                # seulement le cas cp=None déjà géré plus haut), le cache
+                # est mis à jour avec un thème neutre pour CETTE position --
+                # jamais laissé tel quel. Sans ça, une seule position qui
+                # fait planter detect_theme (pour n'importe quelle raison,
+                # même une qu'on n'a pas encore rencontrée) figeait le
+                # thème affiché sur une position bien plus ancienne, pour
+                # TOUTES les positions suivantes de la partie -- exactement
+                # le bug observé en pratique (thème "Finale" affiché en
+                # plein début de partie, jamais mis à jour ensuite).
+                print(f"⚠ Détection de thème en erreur, repli neutre pour cette position : {e}")
+                theme_result = theme_detector.ThemeResult(theme_detector.EQUAL_POSITION, current_eval or 0)
+
             # Valeur écrite AVANT la clé (pas l'inverse) : si un autre thread
             # lit ce cache pile entre les 2 lignes, il verra soit l'ancienne
             # paire clé/valeur cohérente, soit la nouvelle -- jamais une

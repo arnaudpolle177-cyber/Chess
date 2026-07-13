@@ -180,7 +180,16 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
     jamais None.
     """
     my_side = board.turn
-    eval_cp = candidates[0]["cp"] if candidates else 0
+    top_cp = candidates[0]["cp"] if candidates else None
+    # cp peut être None pour un coup issu du livre d'ouvertures (voir
+    # opening_book.py -- pas de vraie éval Stockfish en mode livre, c'est
+    # volontaire). Sans ce filet, une comparaison numérique (eval_cp >= X)
+    # plantait avec un coup de livre -- et une fois planté, le thème ne se
+    # mettait plus JAMAIS à jour pour les positions suivantes non plus
+    # (voir web_bridge.py, _update_eval_tracking_and_theme : l'exception
+    # est absorbée mais empêche le cache de thème d'avancer). 0 = repli
+    # neutre ("on ne sait pas, on suppose une position à peu près égale").
+    eval_cp = top_cp if top_cp is not None else 0
     phase = _game_phase(board)
     caution = _stalemate_caution(board, my_side, eval_cp, phase)
 
