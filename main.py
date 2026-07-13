@@ -3,38 +3,35 @@ main.py
 Point d'entrée du Coach d'échecs.
 
 Utilisation :
-    python main.py --calibrate     # (re)calibrer la zone de l'échiquier
-    python main.py --learn         # apprendre les pièces (plateau en position de départ)
-    python main.py                 # lancer le coach (overlay + analyse en direct)
+    python main.py --web-bridge    # lance le coach (mode navigateur, seul mode disponible)
+    python main.py                 # menu interactif (typiquement via double-clic sur le .exe)
 
 Options utiles :
-    --stockfish PATH   chemin vers l'exécutable stockfish (sinon variable STOCKFISH_PATH ou "stockfish" dans le PATH)
-    --interval N       secondes entre 2 analyses automatiques (défaut: 3)
+    --stockfish PATH   chemin vers l'exécutable moteur (Stockfish, Berserk, ...) --
+                        sinon variable STOCKFISH_PATH ou "stockfish" dans le PATH
     --explain-mode {local,api}   mode d'explication (défaut: local)
+
+Le mode "capture d'écran" (calibration + reconnaissance d'image) a été
+retiré du projet -- seul le mode navigateur (lecture directe du DOM via
+chess_coach_bridge.user.js) est encore utilisé.
 """
 import argparse
 import os
 import sys
 import threading
-import time
 
 
 def _make_process_dpi_aware():
     """
     CORRECTIF IMPORTANT : sous Windows, si l'affichage utilise une mise à
-    l'échelle (125%, 150%... très courant sur les laptops), Tkinter et mss
-    ne comptent pas les pixels de la même façon par défaut. Résultat : le
-    rectangle dessiné pendant la calibration (via Tkinter) ne correspond
-    plus exactement à la zone réellement capturée ensuite (via mss), avec
-    un décalage qui s'accumule en s'éloignant du point d'ancrage -> le haut
-    du plateau peut sembler à peu près bon tandis que le bas capture autre
-    chose (fond de page, autre élément de l'interface).
-
-    En rendant le PROCESSUS "DPI-aware" avant de créer la moindre fenêtre,
-    Windows arrête de mentir à Tkinter sur la taille de l'écran, et les
-    deux outils (Tkinter et mss) travaillent enfin dans le même référentiel
-    de pixels physiques. Doit être appelé tout en haut du programme, avant
-    tout import/usage de tkinter.
+    l'échelle (125%, 150%... très courant sur les laptops), les
+    bibliothèques d'interface graphique et Windows lui-même peuvent ne pas
+    compter les pixels de la même façon selon que le processus est
+    "DPI-aware" ou non -- ça peut se traduire par une fenêtre floue ou mal
+    dimensionnée. En rendant le PROCESSUS DPI-aware avant de créer la
+    moindre fenêtre, on évite ce genre de décalage. Doit être appelé tout
+    en haut du programme, avant tout import/usage d'une bibliothèque
+    d'interface graphique.
     """
     if sys.platform != "win32":
         return
@@ -55,165 +52,26 @@ def _make_process_dpi_aware():
 
 _make_process_dpi_aware()
 
-import chess
-import chess.engine
-
-from capture_utils import run_calibration, load_board_config
-from template_builder import build_templates_from_starting_position, load_templates
-from board_reader import read_board_with_retries, save_debug_capture
-from engine_analysis import ChessCoachEngine, DEFAULT_DEPTH
-from explain import explain_move_local, explain_move_via_api
-from overlay_ui import CoachOverlay
-
-
-class CoachApp:
-    def __init__(self, stockfish_path, interval, explain_mode, depth=None, threads=None, hash_mb=1024):
-        self.stockfish_path = stockfish_path
-        self.interval = interval
-        self.explain_mode = explain_mode
-        self.depth = depth if depth is not None else DEFAULT_DEPTH
-        self.threads = threads
-        self.hash_mb = hash_mb
-        self.active_color = "w"  # camp pour lequel on demande le meilleur coup
-        self.engine = None
-        self.running = True
-
-        board_region = load_board_config()
-        self.overlay = CoachOverlay(
-            on_refresh_click=self.trigger_refresh,
-            on_toggle_side_click=self.toggle_side,
-            board_region=board_region,
-        )
-        self._refresh_requested = threading.Event()
-        self._refresh_requested.set()  # premier refresh immédiat
-
-    def toggle_side(self):
-        self.active_color = "b" if self.active_color == "w" else "w"
-        self.trigger_refresh()
-
-    def trigger_refresh(self):
-        self._refresh_requested.set()
-
-    def analysis_loop(self):
-        self.engine = ChessCoachEngine(self.stockfish_path, threads=self.threads, hash_mb=self.hash_mb)
-        try:
-            while self.running:
-                triggered = self._refresh_requested.wait(timeout=self.interval)
-                self._refresh_requested.clear()
-                self._run_one_analysis()
-        finally:
-            self.engine.close()
-
-    def _restart_engine(self, reason=""):
-        """
-        Redémarre Stockfish après un crash (même logique que web_bridge.py,
-        voir les commentaires là-bas pour le détail). Le mode bureau n'avait
-        jusqu'ici AUCUN redémarrage automatique : un crash rendait le coach
-        inutilisable en boucle jusqu'à fermeture manuelle du programme.
-        """
-        print(f"⚠ Le moteur semble avoir crashé, redémarrage... ({reason})")
-        old_engine = self.engine
-
-        def _cleanup_old_engine():
-            try:
-                old_engine.close()
-            except Exception:
-                pass
-
-        threading.Thread(target=_cleanup_old_engine, daemon=True).start()
-
-        self.engine = ChessCoachEngine(
-            self.stockfish_path, threads=self.threads, hash_mb=self.hash_mb
-        )
-        print("✅ Moteur redémarré.")
-
-    def _run_one_analysis(self):
-        try:
-            result = read_board_with_retries(active_color=self.active_color, max_attempts=3)
-            grid = result["grid"]
-            min_score = result["min_score"]
-            debug_info = result["debug_info"]
-            fen = result["fen"]
-            board = result["board"]
-
-            if not result["valid"]:
-                debug_dir = save_debug_capture(
-                    debug_info, fen,
-                    reason=f"Position invalide (après {result['attempts']} tentatives)"
-                )
-                self.overlay.show_error(
-                    f"Position illisible ou invalide, même après {result['attempts']} "
-                    "tentatives (vérifie la calibration / que le plateau est bien visible).\n"
-                    f"Détails sauvegardés dans : {debug_dir}"
-                )
-                return
-
-            try:
-                result = self.engine.analyze_fen(fen, depth=self.depth, multipv=3)
-            except chess.engine.EngineError as e:
-                # Redémarre et retente UNE fois avant d'abandonner (même
-                # politique que le mode navigateur) plutôt que de laisser le
-                # moteur mort définitivement.
-                self._restart_engine(reason=f"{type(e).__name__}: {e}")
-                result = self.engine.analyze_fen(fen, depth=self.depth, multipv=3)
-
-            if result.get("game_over"):
-                self.overlay.show_error(f"Partie terminée : {result['result']}")
-                return
-
-            best = result["lines"][0]
-
-            if self.explain_mode == "api":
-                explanation = explain_move_via_api(
-                    fen, best["move_san"], best["pv_san"], best["score"]
-                )
-            else:
-                move_obj = chess.Move.from_uci(best["move_uci"])
-                explanation = explain_move_local(board, move_obj, best["pv_san"])
-
-            self.overlay.update_content(
-                lines=result["lines"],
-                explanation=explanation,
-            )
-
-            if min_score < 0.45:
-                self.overlay.append_warning(
-                    "\n\n⚠ Reconnaissance incertaine sur au moins une case, "
-                    "vérifie le résultat."
-                )
-        except Exception as e:
-            debug_info_local = locals().get("debug_info")
-            fen_local = locals().get("fen", "?")
-            if debug_info_local is not None:
-                try:
-                    save_debug_capture(debug_info_local, fen_local, reason=f"Exception: {e}")
-                except Exception:
-                    pass  # ne pas planter sur le rapport de diagnostic lui-meme
-            self.overlay.show_error(str(e))
-
-    def run(self):
-        thread = threading.Thread(target=self.analysis_loop, daemon=True)
-        thread.start()
-        self.overlay.run()
-        self.running = False
+from engine_analysis import DEFAULT_DEPTH
+from webview_ui import CoachWebview
 
 
 class BrowserBridgeApp:
     """
-    Mode 'navigateur' : le plateau est lu directement dans le DOM de ta
-    page (via le script Tampermonkey chess_coach_bridge.user.js), donc plus
-    de capture d'écran ni de reconnaissance d'image. Ce mode se contente de
-    démarrer le serveur local que le JS contacte, et affiche le texte/
-    l'explication dans la même fenêtre Tkinter que le mode classique (les
-    flèches, elles, s'affichent directement sur ta page web, pas ici).
+    Mode 'navigateur' (seul mode du projet) : le plateau est lu directement
+    dans le DOM de ta page (via le script Tampermonkey
+    chess_coach_bridge.user.js), donc pas de capture d'écran ni de
+    reconnaissance d'image. Ce mode démarre le serveur local que le JS
+    contacte, et affiche les résultats dans une fenêtre pywebview (voir
+    webview_ui.py) -- les flèches, elles, s'affichent directement sur ta
+    page web, pas dans cette fenêtre.
     """
 
     def __init__(self, stockfish_path, explain_mode, port, threads=None, hash_mb=1024, depth=None):
-        self.overlay = CoachOverlay(
+        self.overlay = CoachWebview(
             on_refresh_click=self.trigger_refresh,
             on_toggle_side_click=self.toggle_side,
             on_elo_change=self.change_elo_tier,
-            board_region=None,  # pas d'overlay bureau : les flèches sont dessinées dans la page
         )
         self.server = None
         self.state = None
@@ -234,10 +92,10 @@ class BrowserBridgeApp:
             # Recalcule tout de suite avec le nouveau niveau plutôt que
             # d'attendre le prochain coup joué -- sans ça, bouger le slider
             # ne semblait rien faire tant qu'aucun coup n'était joué. DANS
-            # UN THREAD séparé : ce callback est appelé directement par
-            # Tkinter pendant qu'on fait glisser le slider (thread
-            # principal / mainloop) -- lancer l'analyse Stockfish ici
-            # bloquerait/gèlerait toute la fenêtre pendant le calcul.
+            # UN THREAD séparé : ce callback est appelé directement depuis
+            # le pont JS pendant qu'on fait glisser le slider -- lancer
+            # l'analyse ici bloquerait/gèlerait toute la fenêtre pendant le
+            # calcul.
             threading.Thread(target=self.state.refresh_last_profiles, daemon=True).start()
 
     def toggle_side(self):
@@ -245,9 +103,8 @@ class BrowserBridgeApp:
             return
         new_side = "b" if self.state.my_side == "w" else "w"
         self.state.set_my_side(new_side)
-        camp = "Blancs" if new_side == "w" else "Noirs"
-        self.overlay.explanation_text.delete("1.0", "end")
-        self.overlay.explanation_text.insert("1.0", f"Camp actif : {camp}. En attente du prochain coup...")
+        self.overlay.set_camp(new_side)
+        self.overlay.show_status("Camp changé. En attente du prochain coup...")
         # Ré-évalue la dernière position connue avec le nouveau camp actif
         # (filtre normal) : affiche les flèches si c'est effectivement au
         # tour de ce camp, sinon le message "au tour de l'adversaire" --
@@ -268,13 +125,9 @@ class BrowserBridgeApp:
             hash_mb=self.hash_mb,
             depth=self.depth,
         )
-        self.overlay.explanation_text.insert(
-            "1.0",
-            f"En attente de ton site...\n\n"
-            f"Vérifie que chess_coach_bridge.user.js est bien activé dans "
-            f"Tampermonkey sur ta page de jeu (port {self.port}).\n\n"
-            f"Camp actif : Blancs. Utilise \u2194 Changer de camp si tu joues "
-            f"les Noirs."
+        self.overlay.show_status(
+            f"En attente de ton site... vérifie que chess_coach_bridge.user.js "
+            f"est bien activé dans Tampermonkey sur ta page de jeu (port {self.port})."
         )
         try:
             self.overlay.run()
@@ -288,19 +141,19 @@ class BrowserBridgeApp:
         # progressive passent maintenant par _on_depth_update /
         # _on_profile_update ci-dessous.
         if lines is None:
-            self.overlay.show_error(explanation)
-        else:
-            self.overlay.update_content(lines=lines, explanation=explanation)
+            self.overlay.show_status(explanation)
 
     def _on_depth_update(self, depth, entry):
         # Ancien mode (profondeur brute), conservé pour compatibilité si
-        # --depth est passé en CLI.
-        self.overlay.update_depth_line(depth, entry)
+        # --depth est passé en CLI. Affiché comme un profil générique dans
+        # la nouvelle fenêtre (pas vraiment son usage prévu, mais reste
+        # fonctionnel pour du diagnostic).
+        self.overlay.update_profile(f"depth{depth}", entry)
 
     def _on_profile_update(self, profile_id, entry):
-        # Nouveau mode par défaut : une ligne par profil "humain" (voir
-        # human_profile.py), indépendante des 3 autres.
-        self.overlay.update_profile_line(profile_id, entry)
+        # Mode par défaut : une entrée par profil "humain" (voir
+        # human_profile.py), indépendante des 2 autres.
+        self.overlay.update_profile(profile_id, entry)
 
 
 def resolve_stockfish_path(cli_path):
@@ -320,71 +173,23 @@ def _pause_avant_fermeture():
 def interactive_menu():
     """
     Menu affiché quand le programme est lancé sans argument (typiquement en
-    double-cliquant sur le .exe). Reste ouvert et permet d'enchaîner
-    calibration -> apprentissage -> lancement du coach sans jamais avoir à
-    ouvrir un terminal séparé ni taper de commande.
+    double-cliquant sur le .exe).
     """
     while True:
         print("\n" + "=" * 50)
         print("  ♟  Coach d'échecs — Menu")
         print("=" * 50)
-        config_ok = load_board_config() is not None
-        templates_ok = bool(load_templates())
-        print(f"  1. Calibrer l'échiquier          {'✅ déjà fait' if config_ok else '(à faire)'}")
-        print(f"  2. Apprendre les pièces          {'✅ déjà fait' if templates_ok else '(à faire)'}")
-        print("  3. Lancer le coach (capture d'écran)")
-        print("  4. Lancer le coach (mode navigateur — recommandé, sans capture d'écran)")
-        print("  5. Quitter")
-        choice = input("\nTon choix (1-5) : ").strip()
+        print("  1. Lancer le coach")
+        print("  2. Quitter")
+        choice = input("\nTon choix (1-2) : ").strip()
 
         if choice == "1":
-            try:
-                config = run_calibration()
-                print(f"✅ Calibration sauvegardée : {config}")
-            except Exception as e:
-                print(f"⚠ Erreur pendant la calibration : {e}")
-
-        elif choice == "2":
-            if load_board_config() is None:
-                print("⚠ Fais d'abord l'étape 1 (calibration).")
-                continue
-            print("Affiche le plateau en position de DÉPART sur ton site, puis appuie sur Entrée.")
-            input()
-            try:
-                paths = build_templates_from_starting_position()
-                print(f"✅ {len(paths)} templates de pièces sauvegardés.")
-            except Exception as e:
-                print(f"⚠ Erreur pendant l'apprentissage : {e}")
-
-        elif choice == "3":
-            if load_board_config() is None:
-                print("⚠ Fais d'abord l'étape 1 (calibration).")
-                continue
-            if not load_templates():
-                print("⚠ Fais d'abord l'étape 2 (apprentissage des pièces).")
-                continue
             sf_input = input(
-                "Chemin vers stockfish.exe (laisse vide pour utiliser "
-                "STOCKFISH_PATH ou le PATH système) : "
-            ).strip()
-            stockfish_path = resolve_stockfish_path(sf_input or None)
-            print("Lancement du coach... (ferme la fenêtre 'coach' pour revenir ici)")
-            try:
-                app = CoachApp(
-                    stockfish_path, interval=3.0, explain_mode="local",
-                    depth=DEFAULT_DEPTH, threads=None, hash_mb=1024,
-                )
-                app.run()
-            except Exception as e:
-                print(f"⚠ Erreur pendant le lancement du coach : {e}")
-
-        elif choice == "4":
-            sf_input = input(
-                "Chemin vers le moteur principal (Stockfish, Berserk, ...) "
+                "Chemin vers le moteur (Stockfish, Berserk, ...) "
                 "(laisse vide pour utiliser STOCKFISH_PATH ou le PATH système) : "
             ).strip()
             stockfish_path = resolve_stockfish_path(sf_input or None)
-            print("Démarrage du mode navigateur...")
+            print("Démarrage du coach...")
             print("N'oublie pas d'activer chess_coach_bridge.user.js dans Tampermonkey sur ta page de jeu si ce n'est pas déjà fait.")
             try:
                 app = BrowserBridgeApp(
@@ -393,89 +198,50 @@ def interactive_menu():
                 )
                 app.run()
             except Exception as e:
-                print(f"⚠ Erreur pendant le lancement du mode navigateur : {e}")
+                print(f"⚠ Erreur pendant le lancement : {e}")
 
-        elif choice == "5":
+        elif choice == "2":
             print("À bientôt !")
             break
 
         else:
-            print("Choix invalide, entre un chiffre entre 1 et 5.")
+            print("Choix invalide, entre 1 ou 2.")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Coach d'échecs en temps réel")
-    parser.add_argument("--calibrate", action="store_true", help="Recalibrer la zone de l'échiquier")
-    parser.add_argument("--learn", action="store_true", help="Apprendre les pièces (position de départ)")
-    parser.add_argument("--stockfish", default=None, help="Chemin vers l'exécutable Stockfish")
-    parser.add_argument("--interval", type=float, default=3.0, help="Secondes entre 2 analyses auto")
+    parser.add_argument("--stockfish", default=None, help="Chemin vers l'exécutable du moteur (Stockfish, Berserk, ...)")
     parser.add_argument("--explain-mode", choices=["local", "api"], default="local")
     parser.add_argument("--web-bridge", action="store_true",
-                         help="Mode navigateur : lit le plateau via chess_coach_bridge.user.js (Tampermonkey) au lieu de la capture d'écran")
+                         help="Lance le coach (mode navigateur, seul mode disponible)")
     parser.add_argument("--bridge-port", type=int, default=8765)
     parser.add_argument("--depth", type=int, default=None,
-                         help="Profondeur de recherche Stockfish (défaut: 20). Plus haut = plus fort mais plus lent.")
+                         help=f"Profondeur de recherche fixe (défaut: mode progressif par niveau Elo). "
+                              f"Ex: {DEFAULT_DEPTH} pour une profondeur unique classique.")
     parser.add_argument("--threads", type=int, default=None,
-                         help="Threads donnés à Stockfish (défaut: nb coeurs CPU - 1)")
+                         help="Threads donnés au moteur (défaut: nb coeurs CPU - 1)")
     parser.add_argument("--hash", type=int, default=1024, dest="hash_mb",
-                         help="Mémoire (Mo) pour la table de transposition Stockfish (défaut: 1024)")
+                         help="Mémoire (Mo) pour la table de transposition du moteur (défaut: 1024)")
     args = parser.parse_args()
-
-    # Résolution pour le mode bureau (CoachApp, capture d'écran) : ce mode
-    # fait une seule analyse par position, donc a besoin d'une profondeur
-    # concrète -- jamais None.
-    depth = args.depth if args.depth is not None else DEFAULT_DEPTH
 
     if args.web_bridge:
         stockfish_path = resolve_stockfish_path(args.stockfish)
         app = BrowserBridgeApp(
             stockfish_path, args.explain_mode, args.bridge_port,
-            # IMPORTANT : on passe args.depth BRUT ici, pas la variable
-            # `depth` résolue ci-dessus. En mode navigateur, None déclenche
-            # le mode progressif 10/15/20 (voir BridgeState) ; le remplacer
-            # par DEFAULT_DEPTH ici désactivait ce mode en permanence, même
-            # sans jamais préciser --depth sur la ligne de commande.
             threads=args.threads, hash_mb=args.hash_mb, depth=args.depth,
         )
         app.run()
         return
-
 
     # Aucun argument passé (typiquement : double-clic sur le .exe) -> menu interactif.
     if len(sys.argv) == 1:
         interactive_menu()
         return
 
-    if args.calibrate:
-        config = run_calibration()
-        print(f"✅ Calibration sauvegardée : {config}")
-        return
-
-    if args.learn:
-        if load_board_config() is None:
-            print("⚠ Aucune calibration trouvée, lance d'abord: python main.py --calibrate")
-            return
-        print("Assure-toi que le plateau affiche la position de DÉPART, puis appuie sur Entrée.")
-        print("(3 captures successives seront prises avec une petite pause entre chaque, "
-              "pour un apprentissage plus fiable — ne touche pas au plateau entre-temps.)")
-        input()
-        paths = build_templates_from_starting_position()
-        print(f"✅ {len(paths)} templates de pièces sauvegardés.")
-        return
-
-    if load_board_config() is None:
-        print("⚠ Aucune calibration trouvée. Lance d'abord : python main.py --calibrate")
-        return
-    if not load_templates():
-        print("⚠ Aucun template de pièce. Lance d'abord : python main.py --learn")
-        return
-
-    stockfish_path = resolve_stockfish_path(args.stockfish)
-    app = CoachApp(
-        stockfish_path, args.interval, args.explain_mode,
-        depth=depth, threads=args.threads, hash_mb=args.hash_mb,
-    )
-    app.run()
+    # Des arguments ont été passés mais pas --web-bridge : rien d'autre à
+    # faire (le mode capture d'écran a été retiré), on rappelle juste
+    # l'option disponible.
+    print("Aucun mode reconnu. Utilise --web-bridge pour lancer le coach, ou lance sans argument pour le menu interactif.")
 
 
 if __name__ == "__main__":
