@@ -187,6 +187,8 @@ _HTML = r"""
   #detail-lines p.secondary { color: var(--text-dim); }
   #detail-lines .block-label { font-weight: 600; color: var(--text); }
   #detail-lines p.secondary .block-label { color: var(--text-dim); }
+  #detail-lines p.suite { color: var(--text-dim); font-size: 12.5px; font-style: italic; }
+  #detail-lines p.caution { color: var(--warn); font-size: 12.5px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
   #status-line { font-size: 12.5px; color: var(--text-faint); margin: 0; }
 </style>
 </head>
@@ -281,9 +283,16 @@ _HTML = r"""
     themeEl.querySelector("svg").innerHTML = THEME_ICON_PATHS[n.theme_icon] || THEME_ICON_PATHS["info"];
     themeLabel.textContent = n.theme_label || "";
 
-    lines.innerHTML =
+    let html =
       '<p><span class="block-label">' + escapeHtml(n.label1 || "") + ' — </span>' + escapeHtml(n.text1 || "") + '</p>' +
       '<p class="secondary"><span class="block-label">' + escapeHtml(n.label2 || "") + ' — </span>' + escapeHtml(n.text2 || "") + '</p>';
+    if (n.suite) {
+      html += '<p class="suite"><span class="block-label">Suite envisagée — </span>' + escapeHtml(n.suite) + '</p>';
+    }
+    if (n.caution) {
+      html += '<p class="caution">' + escapeHtml(n.caution) + '</p>';
+    }
+    lines.innerHTML = html;
   }
 
   const THEME_ICON_PATHS = {

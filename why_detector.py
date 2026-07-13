@@ -21,7 +21,13 @@ PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, 
 
 
 def _material_diff_over_pv(board, pv_uci, my_side):
-    """Gain matériel net pour `my_side` en jouant toute la ligne, en points de matériel standard."""
+    """
+    Gain matériel net pour `my_side` en jouant toute la ligne, en points de
+    matériel standard -- compte les captures ET les promotions (une
+    promotion pion -> dame vaut +8 points de matériel, même sans capture :
+    oublié dans une version précédente, ce qui sous-estimait le gain réel
+    d'une séquence de finale se terminant par une promotion).
+    """
     tmp = board.copy()
     gain = 0
     for uci in pv_uci:
@@ -33,6 +39,9 @@ def _material_diff_over_pv(board, pv_uci, my_side):
             gain += value if mover_is_me else -value
         elif tmp.is_en_passant(move):
             gain += 1 if mover_is_me else -1
+        if move.promotion:
+            promo_gain = PIECE_VALUES.get(move.promotion, 0) - 1  # le pion (valeur 1) devient la pièce promue
+            gain += promo_gain if mover_is_me else -promo_gain
         tmp.push(move)
     return gain
 

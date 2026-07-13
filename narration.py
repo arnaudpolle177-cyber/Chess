@@ -52,7 +52,7 @@ THEME_LABELS_FR = {
     TACTICAL: "Thème tactique",
     ATTACK: "Attaque",
     DEFENSE: "Défense",
-    MISSED_OPPORTUNITY: "Coup précédent",
+    MISSED_OPPORTUNITY: "Occasion à saisir",
     ENDGAME: "Finale",
     OPENING: "Ouverture",
     STRATEGIC_ADVANTAGE: "Avantage stratégique",
@@ -234,18 +234,27 @@ def _defense_classical_1(t, c, wm, wd, board):
 def _missed_popular_1(t, c, wm, wd, board):
     pawns = _pawns(t.swing_cp) if t.swing_cp else None
     detail = f" (environ {pawns} pion{'s' if pawns and pawns > 1 else ''})" if pawns else ""
-    return {"label1": "Coup précédent", "text1": f"Le dernier coup a laissé filer un peu d'avantage{detail}.",
-            "label2": "Maintenant", "text2": "Rien n'est perdu, reprends l'initiative sur ce coup-ci."}
+    text1 = f"Ton adversaire n'a pas trouvé la ligne la plus incisive{detail}."
+    if t.opponent_better_move_san:
+        text1 = f"Ton adversaire avait {t.opponent_better_move_san} de disponible et n'a pas joué ça{detail}."
+    return {"label1": "Occasion pour toi", "text1": text1,
+            "label2": "Maintenant", "text2": "C'est le moment de prendre l'initiative, avant qu'il ne se reprenne."}
 
 
 def _missed_tactical_1(t, c, wm, wd, board):
-    return {"label1": "Occasion passée", "text1": "Il y avait plus fort à jouer juste avant.",
-            "label2": "Rattrape-toi", "text2": "Cherche à nouveau un coup qui force la décision, pas juste un bon coup."}
+    text1 = "Ton adversaire a joué la solution la plus calme, pas la plus dangereuse."
+    if t.opponent_better_move_san:
+        text1 = f"Il avait {t.opponent_better_move_san}, bien plus tranchant, et ne l'a pas joué."
+    return {"label1": "Il a hésité", "text1": text1,
+            "label2": "Fonce", "text2": "Ne lui laisse pas le temps de se reprendre -- pousse la position."}
 
 
 def _missed_classical_1(t, c, wm, wd, board):
-    return {"label1": "Constat", "text1": "Le dernier coup s'éloignait un peu du meilleur plan disponible.",
-            "label2": "Reprise", "text2": "Reviens aux principes de base pour ce coup-ci : sécurité, activité, structure."}
+    text1 = "L'adversaire s'est éloigné du plan le plus solide."
+    if t.opponent_better_move_san:
+        text1 = f"{t.opponent_better_move_san} suivait mieux les principes -- il ne l'a pas joué."
+    return {"label1": "Occasion pour toi", "text1": text1,
+            "label2": "Méthode", "text2": "Continue à jouer solidement, l'avantage devrait grandir naturellement."}
 
 
 def _endgame_popular_1(t, c, wm, wd, board):
@@ -377,18 +386,56 @@ TEMPLATES = {
 }
 
 
+CAUTION_TEXT_FR = {
+    "stalemate_risk": "Attention au pat : l'adversaire n'a presque plus de coups légaux -- vérifie que ton coup lui en laisse au moins un.",
+}
+
+
+def _suite_phrase(chosen, max_moves=3):
+    """
+    Résume la suite ENVISAGÉE par ce coup précis -- les coups qui suivent
+    dans la ligne réellement calculée par le moteur (jamais inventés),
+    SANS le coup lui-même (déjà visible via la flèche sur l'échiquier, pas
+    la peine de le répéter en texte). None si la ligne est trop courte
+    pour dire quoi que ce soit d'utile (ex: coup de livre, qui n'a pas de
+    ligne calculée au-delà de lui-même).
+
+    C'est ce qui permet au coach de répondre concrètement à "quelle suite
+    ce coup envisage-t-il ?", pas juste "pourquoi ce coup".
+    """
+    pv = chosen.get("pv_san") or []
+    follow_up = pv[1:1 + max_moves]
+    if not follow_up:
+        return None
+    return " ".join(follow_up)
+
+
 def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, board):
     """
     Retourne un dict prêt à afficher :
-    {"theme_label", "theme_icon", "label1", "text1", "label2", "text2"}
+    {"theme_label", "theme_icon", "label1", "text1", "label2", "text2",
+    "suite", "caution"} --
+    "suite" (optionnel) : la ligne concrètement envisagée après ce coup
+    (voir _suite_phrase) -- répond à "quelle suite ce coup a-t-il en tête",
+    distinct du "pourquoi" déjà couvert par label2/text2.
+    "caution" (optionnel) : avertissement transversal, indépendant du
+    thème principal (ex: risque de pat en finale gagnante).
     """
     theme = theme_result.theme
     profile_templates = TEMPLATES.get(theme, TEMPLATES[EQUAL_POSITION])
     variants = profile_templates.get(profile_id, profile_templates["popular"])
     tpl_fn = _pick(variants, board, profile_id)
     body = tpl_fn(theme_result, chosen, why_motif, why_detail, board)
-    return {
+    result = {
         "theme_label": THEME_LABELS_FR.get(theme, theme),
         "theme_icon": THEME_ICONS.get(theme, "info"),
         **body,
     }
+    suite = _suite_phrase(chosen)
+    if suite:
+        result["suite"] = suite
+    if theme_result.caution:
+        caution_text = CAUTION_TEXT_FR.get(theme_result.caution)
+        if caution_text:
+            result["caution"] = caution_text
+    return result

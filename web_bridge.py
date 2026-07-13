@@ -155,20 +155,21 @@ class BridgeState:
         # silencieusement la détection de blunder) si l'adversaire a joué
         # très vite ou si 2 coups se sont enchaînés entre-temps.
         self._position_seq = 0
-        # Éval objective (candidates[0]["cp"], point de vue de mon camp) la
-        # DERNIÈRE fois que c'était mon tour, AVANT que je ne rejoue --
-        # sert à mesurer si MON dernier coup a perdu du terrain
-        # (MISSED_OPPORTUNITY). Mis à jour à la fin de chaque analyse
-        # complète pour mon tour.
-        self._prev_my_eval_cp = None
         # Éval légère (une seule ligne, profondeur modeste) prise pendant
         # le tour de l'ADVERSAIRE (voir _track_opponent_eval) -- sert à
-        # mesurer l'ampleur d'un éventuel blunder adverse une fois que
-        # c'est de nouveau mon tour. Point de vue : camp adverse (celui au
-        # trait au moment de la mesure). Stocké avec le numéro de séquence
-        # de la position mesurée (voir _position_seq) -- jamais utilisé
-        # seul, uniquement via self._opponent_turn_eval (tuple).
-        self._opponent_turn_eval = None  # (position_seq, cp) | None
+        # mesurer l'ampleur d'un éventuel blunder/imprécision adverse une
+        # fois que c'est de nouveau mon tour. Point de vue : camp adverse
+        # (celui au trait au moment de la mesure). Contient aussi le
+        # meilleur coup qu'IL avait de disponible à ce moment-là (notation
+        # SAN, point de vue adverse) -- utilisé pour citer précisément ce
+        # qu'il aurait pu jouer de plus fort (voir MISSED_OPPORTUNITY).
+        # Volontairement PAS de suivi de "mon" propre coup manqué : le
+        # coach affiche toujours le coup à jouer via les flèches, un joueur
+        # qui les suit ne peut pas vraiment manquer son propre coup -- ce
+        # suivi ne concerne donc que l'adversaire. Stocké avec le numéro
+        # de séquence de la position mesurée (voir _position_seq) -- jamais
+        # utilisé seul, uniquement via self._opponent_turn_eval (tuple).
+        self._opponent_turn_eval = None  # (position_seq, cp, move_san) | None
         # Thème détecté pour la DERNIÈRE position -- calculé UNE SEULE fois
         # par position (voir theme_detector.py : "même thème, 3
         # philosophies différentes", pas 3 détections indépendantes) et
@@ -183,9 +184,10 @@ class BridgeState:
         branche "skip") : une évaluation LÉGÈRE (1 seule ligne, profondeur
         modeste -- pas les 4-5 candidats complets, pas la peine ici) pour
         pouvoir mesurer, une fois que c'est de nouveau mon tour, si son
-        coup a changé l'éval de façon significative (BLUNDER, voir
-        theme_detector.py). Best-effort : une erreur ici ne doit jamais
-        bloquer l'affichage du message "au tour de l'adversaire".
+        coup a changé l'éval de façon significative (BLUNDER/
+        MISSED_OPPORTUNITY, voir theme_detector.py). Best-effort : une
+        erreur ici ne doit jamais bloquer l'affichage du message "au tour
+        de l'adversaire".
 
         `position_seq` : capturé au moment de l'appel (voir _position_seq),
         pour que le consommateur (_update_eval_tracking_and_theme) puisse
@@ -198,7 +200,8 @@ class BridgeState:
             with self.engine_lock:
                 result, _ = self.engine.analyze_candidates(fen, multipv=1, depth=12)
             if result.get("candidates"):
-                self._opponent_turn_eval = (position_seq, result["candidates"][0]["cp"])
+                top = result["candidates"][0]
+                self._opponent_turn_eval = (position_seq, top["cp"], top.get("move_san"))
         except Exception:
             pass  # cosmétique (juste pour la narration) -- jamais bloquant
 
@@ -220,9 +223,9 @@ class BridgeState:
         associé par erreur à la mauvaise transition de position (ex: coups
         joués très vite, ou moteur occupé sur une analyse lourde) --
         faussant silencieusement la détection de blunder. Si périmé, on
-        l'ignore simplement (swing_cp reste None, pas de BLUNDER détecté
-        pour ce coup-ci, plutôt qu'une détection basée sur de mauvaises
-        données).
+        l'ignore simplement (swing_cp reste None, pas de thème basé sur
+        l'éval adverse pour ce coup-ci, plutôt qu'une détection basée sur
+        de mauvaises données).
         """
         try:
             if not candidates:
@@ -230,11 +233,13 @@ class BridgeState:
             current_eval = candidates[0]["cp"]  # point de vue de mon camp
 
             opponent_eval_cp = None
+            opponent_better_move_san = None
             stored = self._opponent_turn_eval
             if stored is not None:
-                stored_seq, stored_cp = stored
+                stored_seq, stored_cp, stored_move_san = stored
                 if stored_seq == current_seq - 1:
                     opponent_eval_cp = stored_cp
+                    opponent_better_move_san = stored_move_san
                 # sinon : périmé (arrivé en retard ou plusieurs coups en
                 # retard) -- on l'ignore silencieusement.
 
@@ -246,17 +251,8 @@ class BridgeState:
                 # compare à l'éval actuelle.
                 swing_cp = current_eval - (-opponent_eval_cp)
 
-            my_move_quality_cp = None
-            if opponent_eval_cp is not None and self._prev_my_eval_cp is not None:
-                # Écart entre mon éval AVANT de jouer (prev_my_eval_cp) et
-                # l'éval juste après mon coup, avant que l'adversaire ne
-                # réponde (opponent_eval_cp, reconverti de mon point de
-                # vue) -- mesure la qualité de MON dernier coup réellement
-                # joué (pas forcément celui suggéré par un profil).
-                my_move_quality_cp = (-opponent_eval_cp) - self._prev_my_eval_cp
-
             theme_result = theme_detector.detect_theme(
-                board, candidates, swing_cp=swing_cp, my_move_quality_cp=my_move_quality_cp,
+                board, candidates, swing_cp=swing_cp, opponent_better_move_san=opponent_better_move_san,
             )
             # Valeur écrite AVANT la clé (pas l'inverse) : si un autre thread
             # lit ce cache pile entre les 2 lignes, il verra soit l'ancienne
@@ -267,8 +263,7 @@ class BridgeState:
             self._theme_cache_value = theme_result
             self._theme_cache_key = fen
 
-            # Avance la mémoire pour le prochain cycle (mon prochain tour).
-            self._prev_my_eval_cp = current_eval
+            # Avance la mémoire pour le prochain cycle.
             self._opponent_turn_eval = None
         except Exception as e:
             print(f"⚠ Détection de thème indisponible pour ce coup : {e}")
