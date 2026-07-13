@@ -68,6 +68,7 @@ WHY_CONCEPT_NAME_FR = {
     "undefended": "une pièce non défendue",
     "not_recaptured": "une pièce non défendue",
     "forced_sequence": "une séquence forcée",
+    "open_file": "une colonne ouverte",
     "material_gain": "un gain de matériel net",
 }
 
@@ -98,6 +99,10 @@ def _why_phrase(why_motif, why_detail, chosen, board):
         return "l'adversaire ne peut pas reprendre sur cette case"
     if why_motif == "forced_sequence":
         return "la séquence est forcée, il n'y a pas d'alternative sérieuse"
+    if why_motif == "open_file":
+        status = why_detail.get("file_status")
+        label = "une colonne ouverte" if status == "open" else "une colonne semi-ouverte"
+        return f"cette pièce prend {label}, un vrai atout positionnel"
     if why_motif == "material_gain":
         gain = why_detail.get("gain", 0)
         return f"le gain net avoisine {gain} point{'s' if gain > 1 else ''} de matériel sur la ligne"
@@ -301,6 +306,9 @@ def _strategic_tactical_2(t, c, wm, wd, board):
 
 
 def _strategic_classical_1(t, c, wm, wd, board):
+    if t.has_bishop_pair:
+        return {"label1": "Nature de l'avantage", "text1": "Tu as la paire de fous -- un vrai atout à long terme, surtout si la position s'ouvre.",
+                "label2": "Plan", "text2": "Cherche à ouvrir la position plutôt qu'à la refermer, ça les rend plus forts."}
     return {"label1": "Nature de l'avantage", "text1": "L'avantage tient à la position des pièces, pas à un gain de matériel.",
             "label2": "Plan", "text2": "Continue à améliorer la coordination avant de chercher à forcer quoi que ce soit."}
 

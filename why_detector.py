@@ -10,9 +10,10 @@ Retourne un des motifs suivants (ou None si aucun ne s'applique clairement) :
 - "fork"              : la pièce jouée attaque 2+ pièces adverses de valeur à la fois
 - "pin"                : le coup cloue une pièce adverse qui ne l'était pas avant
 - "undefended"       : la case d'arrivée n'a aucun défenseur adverse
-- "material_gain"    : gain de matériel net sur la ligne calculée
-- "forced_sequence"  : chaque coup de la ligne est une capture ou un échec
 - "not_recaptured"   : après ma capture, l'adversaire ne reprend pas sur la case
+- "forced_sequence"  : chaque coup de la ligne est une capture ou un échec
+- "open_file"        : le coup place une tour/dame sur une colonne ouverte ou semi-ouverte
+- "material_gain"    : gain de matériel net sur la ligne calculée
 """
 import chess
 
@@ -112,6 +113,39 @@ def _is_pin(board, move):
     return False
 
 
+def _open_file_status(board, file_index, my_side):
+    """
+    'open' (aucun pion sur cette colonne, des 2 camps), 'half_open' (aucun
+    de MES pions, mais l'adversaire en a un -- colonne semi-ouverte pour
+    moi), ou None (fermée pour moi -- j'y ai encore un pion).
+    """
+    my_pawn_present = False
+    opp_pawn_present = False
+    for rank in range(8):
+        piece = board.piece_at(chess.square(file_index, rank))
+        if piece and piece.piece_type == chess.PAWN:
+            if piece.color == my_side:
+                my_pawn_present = True
+            else:
+                opp_pawn_present = True
+    if my_pawn_present:
+        return None
+    return "open" if not opp_pawn_present else "half_open"
+
+
+def _is_open_file_move(board, move):
+    """
+    Le coup place une tour ou une dame sur une colonne ouverte ou
+    semi-ouverte -- retourne "open"/"half_open", ou None si non applicable
+    (pas une tour/dame, ou colonne fermée pour moi).
+    """
+    piece = board.piece_at(move.from_square)
+    if piece is None or piece.piece_type not in (chess.ROOK, chess.QUEEN):
+        return None
+    file_index = chess.square_file(move.to_square)
+    return _open_file_status(board, file_index, board.turn)
+
+
 def detect_why(board, chosen):
     """
     board : position AVANT le coup choisi.
@@ -142,6 +176,10 @@ def detect_why(board, chosen):
 
     if _is_forced_sequence(board, pv_uci):
         return "forced_sequence", {}
+
+    open_file = _is_open_file_move(board, move)
+    if open_file is not None:
+        return "open_file", {"file_status": open_file}
 
     gain = _material_diff_over_pv(board, pv_uci, my_side)
     if gain >= 2:  # au moins l'équivalent de 2 pions gagnés sur la ligne

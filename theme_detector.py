@@ -59,6 +59,7 @@ class ThemeResult:
     king_square: Optional[int] = None    # roi concerné (ATTACK -> roi adverse, DEFENSE -> mon roi)
     phase: str = "middlegame"
     passed_pawn_square: Optional[int] = None  # un vrai pion passé de mon camp, si un existe (voir ENDGAME)
+    has_bishop_pair: bool = False              # j'ai mes 2 fous ET l'adversaire non (voir STRATEGIC_ADVANTAGE)
 
 
 def _find_passed_pawn(board, color):
@@ -118,6 +119,17 @@ def _king_safety_score(board, king_color):
     return attacked, defended
 
 
+def _has_bishop_pair_advantage(board, color):
+    """
+    Vrai si `color` possède ses 2 fous ET que l'adversaire n'a pas les
+    siens -- avantage positionnel classique (asymétrique : les 2 camps
+    ayant leurs 2 fous chacun n'est pas un avantage différenciant).
+    """
+    mine = len(board.pieces(chess.BISHOP, color))
+    theirs = len(board.pieces(chess.BISHOP, not color))
+    return mine >= 2 and theirs < 2
+
+
 def detect_theme(board, candidates, swing_cp=None, my_move_quality_cp=None):
     """
     board : position ACTUELLE (chess.Board), au trait de "mon" camp (my_side).
@@ -170,7 +182,8 @@ def detect_theme(board, candidates, swing_cp=None, my_move_quality_cp=None):
 
     # 6. STRATEGIC_ADVANTAGE -- avantage net mais sans motif tactique immédiat.
     if abs(eval_cp) >= STRATEGIC_EVAL_CP:
-        return ThemeResult(STRATEGIC_ADVANTAGE, eval_cp, phase=phase)
+        return ThemeResult(STRATEGIC_ADVANTAGE, eval_cp, phase=phase,
+                            has_bishop_pair=_has_bishop_pair_advantage(board, my_side))
 
     # 7. Filet de sécurité : position jugée équilibrée.
     return ThemeResult(EQUAL_POSITION, eval_cp, phase=phase)
