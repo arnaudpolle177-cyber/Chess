@@ -71,22 +71,15 @@ class EloTier:
 
 ELO_TIERS = {
     1: EloTier(id=1, label="1800-2200", elo_min=1800, elo_max=2200, elo_reference=2000,
-               multipv=4, depth_min=12, depth_max=14,
-               max_eval_loss_cp=90, typical_eval_loss_cp=35),
-    2: EloTier(id=2, label="2300-2700", elo_min=2300, elo_max=2700, elo_reference=2500,
-               multipv=5, depth_min=16, depth_max=19,
-               max_eval_loss_cp=50, typical_eval_loss_cp=18),
-    3: EloTier(id=3, label="2800-3200", elo_min=2800, elo_max=3200, elo_reference=3000,
-               # multipv=3, depth 20-22 : le mode natif (Berserk) s'est
-               # avéré rapide en pratique même à ce niveau -- les anciennes
-               # valeurs plus prudentes dataient de l'époque des recherches
-               # successives forcées (beaucoup plus lentes, abandonnées
-               # comme mode par défaut depuis). Le mode sûr (recherches
-               # successives) reste disponible en repli automatique pour
-               # les rares positions à problème -- voir web_bridge.py,
-               # _main_engine_degraded.
-               multipv=3, depth_min=20, depth_max=22,
-               max_eval_loss_cp=20, typical_eval_loss_cp=6),
+           multipv=4, depth_min=13, depth_max=15,
+           max_eval_loss_cp=90, typical_eval_loss_cp=35),
+2: EloTier(id=2, label="2300-2700", elo_min=2300, elo_max=2700, elo_reference=2500,
+           multipv=5, depth_min=17, depth_max=20,
+           max_eval_loss_cp=50, typical_eval_loss_cp=18),
+3: EloTier(id=3, label="2800-3200", elo_min=2800, elo_max=3200, elo_reference=3000,
+           multipv=5, depth_min=21, depth_max=24,
+           max_eval_loss_cp=20, typical_eval_loss_cp=6),
+              
 }
 DEFAULT_ELO_TIER = 2
 
@@ -109,7 +102,7 @@ DEFAULT_HUMANITY = 0.35
 # aux niveaux faibles (les joueurs moins forts ont plus souvent des
 # inexactitudes), plus rare au niveau 3. Chaque profil tire indépendamment
 # -- rien n'empêche qu'un seul des 4 arrive à ce moment-là.
-INACCURACY_CHANCE = {1: 0.30, 2: 0.20, 3: 0.10}
+INACCURACY_CHANCE = {1: 0.40, 2: 0.30, 3: 0.15}
 
 
 def _apply_inaccuracy_roll(tier, elo_tier_id, rng):

@@ -24,6 +24,9 @@ positions différentes ont de bonnes chances de varier.
 """
 import chess
 
+import opening_identity
+import variation_narrator
+
 from theme_detector import (
     BLUNDER, TACTICAL, ATTACK, DEFENSE, MISSED_OPPORTUNITY,
     ENDGAME, OPENING, STRATEGIC_ADVANTAGE, EQUAL_POSITION,
@@ -391,37 +394,113 @@ CAUTION_TEXT_FR = {
 }
 
 
-def _suite_phrase(chosen, max_moves=3):
+def _scenario_phrase(chosen, profile_id, board, engine, compute_eval=True):
     """
-    Résume la suite ENVISAGÉE par ce coup précis -- les coups qui suivent
-    dans la ligne réellement calculée par le moteur (jamais inventés),
-    SANS le coup lui-même (déjà visible via la flèche sur l'échiquier, pas
-    la peine de le répéter en texte). None si la ligne est trop courte
-    pour dire quoi que ce soit d'utile (ex: coup de livre, qui n'a pas de
-    ligne calculée au-delà de lui-même).
+    Remplace l'ancienne _suite_phrase() (qui affichait juste la liste des
+    coups de la PV, ex: "Rc8 → Nd2 → Nxd3") : transforme la même ligne
+    calculée par le moteur en un scénario en langage humain (voir
+    variation_narrator.py -- motifs structurels + trajectoire d'éval).
 
-    C'est ce qui permet au coach de répondre concrètement à "quelle suite
-    ce coup envisage-t-il ?", pas juste "pourquoi ce coup".
+    board : position AVANT le coup choisi (chosen) -- même `board` que
+    reçu par generate_narration. On joue `chosen` sur une copie pour
+    obtenir la position de départ de la ligne à analyser (pv_uci[0] EST
+    déjà chosen, on l'exclut : déjà visible via la flèche affichée, pas
+    la peine de le rejouer une 2e fois dans le texte).
+    engine : instance ChessCoachEngine, nécessaire pour la trajectoire
+    d'éval (voir variation_narrator.EVAL_DEPTH) -- si None, motifs
+    structurels seuls (aucun appel moteur).
+
+    None si la ligne est trop courte pour dire quoi que ce soit d'utile
+    (ex: coup de livre, pas de PV calculée au-delà du coup lui-même).
     """
-    pv = chosen.get("pv_san") or []
-    follow_up = pv[1:1 + max_moves]
-    if not follow_up:
+    pv_uci = chosen.get("pv_uci") or []
+    follow_up_uci = pv_uci[1:]
+    if not follow_up_uci:
         return None
-    return " ".join(follow_up)
+    try:
+        chosen_move = chess.Move.from_uci(chosen["move_uci"])
+        follow_up_moves = [chess.Move.from_uci(u) for u in follow_up_uci]
+    except (ValueError, KeyError):
+        return None
+    board_after_chosen = board.copy()
+    try:
+        board_after_chosen.push(chosen_move)
+    except AssertionError:
+        return None  # coup illégal sur cette position (désync improbable mais possible) -- pas de scénario plutôt qu'un crash
+    facts = variation_narrator.analyze_variation(
+        engine, board_after_chosen, follow_up_moves, compute_eval=compute_eval and engine is not None,
+    )
+    return variation_narrator.narrate_variation(facts, profile_id)
 
 
-def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, board):
+def _opening_identity_body(opening_match):
+    """
+    Construit le corps {"label1", "text1", "label2", "text2"} à partir d'un
+    match de la base ECO locale (voir opening_identity.py) -- remplace
+    ENTIÈREMENT les gabarits génériques _opening_xxx_1 pour cette position,
+    quel que soit le profil qui parle (le nom + les points forts/faibles
+    d'une ouverture sont des faits, pas une question de style). Le texte
+    pros_cons est rédigé à la main (voir eco_openings.json), jamais généré.
+    """
+    return {
+        "label1": f"{opening_match['name']} ({opening_match['eco']})",
+        "text1": opening_match["pros_cons"],
+        "label2": "Suite logique",
+        "text2": "Continue de suivre les principes de cette ouverture tant que rien de forcé n'apparaît.",
+    }
+
+
+def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, board,
+                        move_history=None, opening_book=None, engine=None, compute_scenario_eval=True):
     """
     Retourne un dict prêt à afficher :
     {"theme_label", "theme_icon", "label1", "text1", "label2", "text2",
     "suite", "caution"} --
-    "suite" (optionnel) : la ligne concrètement envisagée après ce coup
-    (voir _suite_phrase) -- répond à "quelle suite ce coup a-t-il en tête",
-    distinct du "pourquoi" déjà couvert par label2/text2.
+    "suite" (optionnel) : le SCÉNARIO en langage humain de la suite
+    envisagée par ce coup (voir _scenario_phrase / variation_narrator.py)
+    -- ne reproduit jamais la liste des coups en SAN, raconte l'IDÉE
+    (échange, rupture, pression sur le roi, repositionnement...) et la
+    tendance d'éval de la ligne. Distinct du "pourquoi" déjà couvert par
+    label2/text2.
     "caution" (optionnel) : avertissement transversal, indépendant du
     thème principal (ex: risque de pat en finale gagnante).
+
+    move_history / opening_book : historique des coups joués (voir
+    web_bridge.py, BridgeState._move_history) et instance
+    opening_identity.OpeningIdentity, utilisés UNIQUEMENT pour le thème
+    OPENING -- si un match est trouvé dans la base ECO locale, son nom et
+    son texte pros_cons remplacent entièrement les gabarits génériques
+    _opening_xxx_1 (mêmes gabarits utilisés en fallback si aucun match,
+    ex: partie déjà sortie de la théorie connue).
+    engine : instance ChessCoachEngine (voir engine_analysis.py), passée
+    au scénario pour calculer sa trajectoire d'éval (voir
+    variation_narrator.EVAL_DEPTH) -- si None, motifs structurels seuls.
+    compute_scenario_eval : coupe-circuit pour désactiver l'éval de la
+    ligne sans toucher au reste (ex: test de performance) -- True par
+    défaut.
+
+    Tous ces paramètres sont optionnels (défaut None/True) pour ne rien
+    casser des autres appels existants (thèmes autres que OPENING, tests).
     """
     theme = theme_result.theme
+
+    if theme == OPENING and opening_book is not None and move_history:
+        opening_match = opening_book.identify(move_history)
+        if opening_match is not None:
+            result = {
+                "theme_label": THEME_LABELS_FR.get(theme, theme),
+                "theme_icon": THEME_ICONS.get(theme, "info"),
+                **_opening_identity_body(opening_match),
+            }
+            suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval)
+            if suite:
+                result["suite"] = suite
+            if theme_result.caution:
+                caution_text = CAUTION_TEXT_FR.get(theme_result.caution)
+                if caution_text:
+                    result["caution"] = caution_text
+            return result
+
     profile_templates = TEMPLATES.get(theme, TEMPLATES[EQUAL_POSITION])
     variants = profile_templates.get(profile_id, profile_templates["popular"])
     tpl_fn = _pick(variants, board, profile_id)
@@ -431,7 +510,7 @@ def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, 
         "theme_icon": THEME_ICONS.get(theme, "info"),
         **body,
     }
-    suite = _suite_phrase(chosen)
+    suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval)
     if suite:
         result["suite"] = suite
     if theme_result.caution:

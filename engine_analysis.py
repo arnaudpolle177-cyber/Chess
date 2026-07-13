@@ -3,7 +3,6 @@ engine_analysis.py
 Interroge Stockfish pour obtenir le meilleur coup et l'évaluation.
 """
 import os
-import time
 import chess
 import chess.engine
 
@@ -12,13 +11,6 @@ import chess.engine
 # (NNUE) atteint facilement 20-25+ en 1-2 secondes dès qu'il a plusieurs
 # threads + un peu de mémoire (voir configure() ci-dessous).
 DEFAULT_DEPTH = 20
-
-# Paliers de profondeur par défaut pour le mode "3 flèches progressives"
-# (vert/bleu/rouge), utilisé en mode navigateur (web_bridge.py). Un seul
-# passage Stockfish (approfondissement itératif natif) suffit à produire
-# les trois -- pas besoin de relancer l'analyse 3 fois, ce qui serait 3x
-# plus lent pour rien.
-PROGRESSIVE_DEPTHS = (10, 15, 20)
 
 # Valeurs de pièces (convention standard) -- utilisées pour repérer les
 # échanges déséquilibrés (esprit "sacrifice"/créatif) et les échanges "à
@@ -169,7 +161,41 @@ class ChessCoachEngine:
                 "pv_uci": pv_uci,
             })
 
+        candidates = self._dedupe_by_root_move(candidates)
+
+        # Fallback enrichissement : en mode natif uniquement (jamais en
+        # safe_mode, trop coûteux/risqué -- voir web_bridge.py,
+        # _main_engine_degraded), si la déduplication laisse moins de 3
+        # coups uniques et qu'on n'a pas déjà demandé le maximum, on
+        # relance une analyse complète à multipv=8 pour donner aux profils
+        # un vrai choix de style plutôt que 1-2 coups imposés. Récursif
+        # une seule fois : le rappel passe déjà multipv=8, qui est le
+        # plafond, donc pas de boucle infinie.
+        if not safe_mode and len(candidates) < 3 and multipv < 8:
+            return self.analyze_candidates(fen, multipv=8, depth=depth, safe_mode=False)
+
         return {"game_over": False, "candidates": candidates}, board
+
+    @staticmethod
+    def _dedupe_by_root_move(candidates):
+        """
+        Regroupe les candidats par coup racine (move_uci) et ne garde que
+        la meilleure éval (cp le plus haut, du point de vue du camp au
+        trait) pour chaque coup unique -- évite qu'une transposition plus
+        loin dans la PV fasse artificiellement gonfler le nombre de choix
+        distincts vus par human_profile.py (2 PV commençant par le même
+        coup ne sont PAS 2 choix différents pour un joueur humain). L'ordre
+        d'entrée (déjà trié meilleur -> moins bon) garantit qu'on garde la
+        première occurrence rencontrée pour chaque coup.
+        """
+        seen = set()
+        deduped = []
+        for c in candidates:
+            if c["move_uci"] in seen:
+                continue
+            seen.add(c["move_uci"])
+            deduped.append(c)
+        return deduped
 
     def _analyse_successive(self, board, multipv, depth):
         """
@@ -190,74 +216,6 @@ class ChessCoachEngine:
             results.append(info)
             remaining_moves = [m for m in remaining_moves if m != pv[0]]
         return results
-
-    def analyze_fen_progressive(self, fen, depths=PROGRESSIVE_DEPTHS, on_analysis_started=None):
-        """
-        Générateur : analyse la position en UN SEUL passage Stockfish
-        (approfondissement itératif natif -- Stockfish calcule déjà depth 1,
-        2, 3... jusqu'à la profondeur max en interne), et yield un résultat
-        dès que chaque palier demandé (ex: 10, 15, 20) est atteint.
-
-        on_analysis_started(analysis_obj) : callback optionnel appelé juste
-        après le démarrage de la recherche, avec l'objet
-        chess.engine.AnalysisResult. Permet à l'appelant de stocker une
-        référence pour pouvoir interrompre cette recherche depuis un autre
-        thread (analysis_obj.stop()) si elle devient obsolète (ex: une
-        position plus récente vient d'arriver côté web_bridge.py) --
-        évite d'accumuler des recherches Stockfish concurrentes/en attente.
-
-        Chaque élément produit : {"depth", "move_uci", "move_san", "score",
-        "pv_san"}. Si la partie est déjà terminée, yield un seul
-        {"game_over": True, "result": ...} et s'arrête.
-        """
-        board = chess.Board(fen)
-        if board.is_game_over():
-            yield {"game_over": True, "result": board.result()}
-            return
-
-        targets = sorted(set(depths))
-        max_depth = targets[-1]
-        next_idx = 0
-        start_time = time.monotonic()  # [debug perf] pour mesurer le temps réel jusqu'à chaque palier
-
-        # engine.analysis() (et non analyse()) : mode streaming, donne accès
-        # à l'info UCI à CHAQUE profondeur traversée pendant la recherche,
-        # sans jamais relancer le calcul depuis zéro.
-        with self.engine.analysis(board, chess.engine.Limit(depth=max_depth)) as analysis:
-            if on_analysis_started:
-                on_analysis_started(analysis)
-            for info in analysis:
-                depth = info.get("depth")
-                pv = info.get("pv")
-                if depth is None or not pv:
-                    continue
-                # Une même profondeur peut être re-signalée (mise à jour de
-                # la meilleure ligne) -- on ne yield qu'au moment où on
-                # dépasse (ou atteint) le prochain palier demandé.
-                while next_idx < len(targets) and depth >= targets[next_idx]:
-                    elapsed = time.monotonic() - start_time  # [debug perf]
-                    print(f"[moteur] palier {targets[next_idx]} atteint en {elapsed:.2f}s (depth réel : {depth})")
-                    yield self._format_progressive_entry(board, info, targets[next_idx])
-                    next_idx += 1
-                if next_idx >= len(targets):
-                    break  # les 3 paliers sont produits, pas la peine de continuer la recherche
-
-    def _format_progressive_entry(self, board, info, depth_label):
-        pv = info["pv"]
-        score_str = self._format_score(info["score"], board.turn)
-        pv_san = []
-        tmp_board = board.copy()
-        for mv in pv[:6]:
-            pv_san.append(tmp_board.san(mv))
-            tmp_board.push(mv)
-        return {
-            "game_over": False,
-            "depth": depth_label,
-            "move_uci": pv[0].uci(),
-            "move_san": board.san(pv[0]),
-            "score": score_str,
-            "pv_san": pv_san,
-        }
 
     def analyze_fen(self, fen, depth=DEFAULT_DEPTH, multipv=1):
         """

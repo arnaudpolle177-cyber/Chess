@@ -52,7 +52,6 @@ def _make_process_dpi_aware():
 
 _make_process_dpi_aware()
 
-from engine_analysis import DEFAULT_DEPTH
 from webview_ui import CoachWebview
 
 
@@ -67,7 +66,7 @@ class BrowserBridgeApp:
     page web, pas dans cette fenêtre.
     """
 
-    def __init__(self, stockfish_path, explain_mode, port, threads=None, hash_mb=1024, depth=None):
+    def __init__(self, stockfish_path, explain_mode, port, threads=None, hash_mb=1024):
         self.overlay = CoachWebview(
             on_refresh_click=self.trigger_refresh,
             on_toggle_side_click=self.toggle_side,
@@ -80,7 +79,6 @@ class BrowserBridgeApp:
         self.port = port
         self.threads = threads
         self.hash_mb = hash_mb
-        self.depth = depth
 
     def trigger_refresh(self):
         if self.state:
@@ -118,12 +116,10 @@ class BrowserBridgeApp:
             self.stockfish_path,
             explain_mode=self.explain_mode,
             on_update=self._on_update,
-            on_depth_update=self._on_depth_update,
             on_profile_update=self._on_profile_update,
             port=self.port,
             threads=self.threads,
             hash_mb=self.hash_mb,
-            depth=self.depth,
         )
         self.overlay.show_status(
             f"En attente de ton site... vérifie que chess_coach_bridge.user.js "
@@ -136,23 +132,15 @@ class BrowserBridgeApp:
                 self.state.close()
 
     def _on_update(self, lines, explanation):
-        # N'arrive plus qu'avec lines=None (messages ponctuels : au tour de
+        # N'arrive qu'avec lines=None (messages ponctuels : au tour de
         # l'adversaire, partie terminée, erreur) -- les résultats d'analyse
-        # progressive passent maintenant par _on_depth_update /
-        # _on_profile_update ci-dessous.
+        # passent par _on_profile_update ci-dessous.
         if lines is None:
             self.overlay.show_status(explanation)
 
-    def _on_depth_update(self, depth, entry):
-        # Ancien mode (profondeur brute), conservé pour compatibilité si
-        # --depth est passé en CLI. Affiché comme un profil générique dans
-        # la nouvelle fenêtre (pas vraiment son usage prévu, mais reste
-        # fonctionnel pour du diagnostic).
-        self.overlay.update_profile(f"depth{depth}", entry)
-
     def _on_profile_update(self, profile_id, entry):
-        # Mode par défaut : une entrée par profil "humain" (voir
-        # human_profile.py), indépendante des 2 autres.
+        # Une entrée par profil "humain" (voir human_profile.py),
+        # indépendante des autres.
         self.overlay.update_profile(profile_id, entry)
 
 
@@ -194,7 +182,7 @@ def interactive_menu():
             try:
                 app = BrowserBridgeApp(
                     stockfish_path, explain_mode="local", port=8765,
-                    threads=None, hash_mb=1024, depth=None,  # None = mode progressif 10/15/20
+                    threads=None, hash_mb=1024,
                 )
                 app.run()
             except Exception as e:
@@ -215,9 +203,6 @@ def main():
     parser.add_argument("--web-bridge", action="store_true",
                          help="Lance le coach (mode navigateur, seul mode disponible)")
     parser.add_argument("--bridge-port", type=int, default=8765)
-    parser.add_argument("--depth", type=int, default=None,
-                         help=f"Profondeur de recherche fixe (défaut: mode progressif par niveau Elo). "
-                              f"Ex: {DEFAULT_DEPTH} pour une profondeur unique classique.")
     parser.add_argument("--threads", type=int, default=None,
                          help="Threads donnés au moteur (défaut: nb coeurs CPU - 1)")
     parser.add_argument("--hash", type=int, default=1024, dest="hash_mb",
@@ -228,7 +213,7 @@ def main():
         stockfish_path = resolve_stockfish_path(args.stockfish)
         app = BrowserBridgeApp(
             stockfish_path, args.explain_mode, args.bridge_port,
-            threads=args.threads, hash_mb=args.hash_mb, depth=args.depth,
+            threads=args.threads, hash_mb=args.hash_mb,
         )
         app.run()
         return

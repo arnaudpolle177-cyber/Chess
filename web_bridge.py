@@ -5,17 +5,16 @@ DOM en JavaScript, voir chess_coach_bridge.user.js) et le moteur Stockfish
 côté Python.
 
 Fonctionnement :
-- Le JS de ta page fait un POST http://127.0.0.1:8765/fen avec {"fen": "..."}
-  à chaque coup joué (le sien ou celui de l'adversaire).
-- Ce serveur interroge Stockfish en streaming (un seul passage
-  d'approfondissement itératif) et répond en NDJSON (une ligne JSON par
-  palier de profondeur atteint : 10, puis 15, puis 20 par défaut), au fil de
-  l'eau plutôt que d'attendre la fin complète de l'analyse.
+- Le JS de ta page fait, à chaque coup joué (le sien ou celui de
+  l'adversaire), un POST http://127.0.0.1:8765/fen : d'abord un aperçu
+  rapide {"fen": ..., "quick": true} (depth 12, quasi instantané), puis une
+  requête par profil de jeu {"fen": ..., "profile": "popular"|...} au niveau
+  Elo choisi.
+- Chaque requête est indépendante et se termine (et met à jour sa flèche)
+  dès qu'elle est prête, sans dépendre d'un streaming au fil de l'eau côté
+  navigateur -- voir handle_single_profile.
 - Si ce n'est pas le tour du camp choisi ("Changer de camp" dans la fenêtre
   Python), on ne calcule/n'affiche rien pour l'adversaire.
-- Chaque palier reçu met aussi à jour, en direct, la ligne correspondante
-  dans la fenêtre Tkinter (on_depth_update), et l'explication finale est
-  ajoutée une fois le palier le plus profond atteint.
 
 Annulation des analyses obsolètes (important) :
 - Si une nouvelle position arrive alors qu'une analyse précédente tourne
@@ -34,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import chess
 import chess.engine
 
-from engine_analysis import ChessCoachEngine, PROGRESSIVE_DEPTHS
+from engine_analysis import ChessCoachEngine
 from explain import explain_move_local, explain_move_via_api
 import human_profile
 import opening_book
@@ -42,6 +41,7 @@ import app_paths
 import theme_detector
 import why_detector
 import narration
+import opening_identity
 
 DEFAULT_PORT = 8765
 # Aperçu rapide (depth 12, quasi instantané) : calculé UNE fois pour les 4
@@ -57,25 +57,25 @@ class BridgeState:
     """État partagé entre le serveur HTTP et le reste du programme."""
 
     def __init__(self, stockfish_path, explain_mode="local", on_update=None,
-                 on_depth_update=None, on_profile_update=None, threads=None,
-                 hash_mb=1024, depth=None):
+                 on_profile_update=None, threads=None,
+                 hash_mb=1024):
         self.stockfish_path = stockfish_path
         self.threads = threads
         self.hash_mb = hash_mb
-        # Si --depth est passé explicitement en CLI, on retombe sur un seul
-        # palier (comportement classique, 1 seule flèche). Sinon, mode
-        # progressif par défaut (10/15/20).
-        self.depths = (depth,) if depth is not None else PROGRESSIVE_DEPTHS
         self.engine = ChessCoachEngine(stockfish_path, threads=threads, hash_mb=hash_mb)
         # Livre d'ouvertures (optionnel) : cherché à côté de l'exécutable
         # (même dossier que stockfish.exe), fichier "opening_book.bin". Rien
         # ne casse si le fichier est absent -- voir opening_book.py.
         book_path = os.path.join(app_paths.get_base_dir(), "opening_book.bin")
         self.opening_book = opening_book.OpeningBook(book_path)
+        # Base ECO locale (nom d'ouverture + points forts/faibles rédigés à
+        # la main) -- distincte du livre polyglot ci-dessus (qui donne des
+        # coups, jamais de noms). Voir opening_identity.py et narration.py.
+        eco_path = os.path.join(app_paths.get_base_dir(), "eco_openings.json")
+        self.opening_identity = opening_identity.OpeningIdentity(eco_path)
         self.explain_mode = explain_mode
         self.on_update = on_update            # callback(lines, explanation) -> messages ponctuels (skip/erreur/fin de partie)
-        self.on_depth_update = on_depth_update  # callback(depth, entry) -> ancien mode (profondeur brute), conservé pour compatibilité
-        self.on_profile_update = on_profile_update  # callback(profile_id, entry) -> nouveau mode (coach "humain")
+        self.on_profile_update = on_profile_update  # callback(profile_id, entry) -> coach "humain"
         # self.lock protège UNIQUEMENT les petites variables d'état
         # ci-dessous (jamais tenu pendant le calcul Stockfish ou l'écriture
         # réseau, contrairement à avant).
@@ -98,6 +98,15 @@ class BridgeState:
         # vérifications de péremption (staleness), où on veut justement la
         # position la plus récente vue par N'IMPORTE QUEL gestionnaire.
         self._last_profile_fen = None
+        # Historique des coups joués depuis le début de la partie actuelle
+        # (SAN), déduit position par position par comparaison de FEN
+        # successifs -- le script JS n'envoie jamais le coup joué
+        # explicitement, seulement le FEN brut (voir chess_coach_bridge.
+        # user.js). Utilisé par opening_identity.py pour identifier
+        # l'ouverture en cours. Reset dès qu'on détecte un retour à la
+        # position de départ (voir _update_move_history ci-dessous).
+        self._move_history = []
+        self._move_history_board = None  # dernière position connue de l'historique (chess.Board)
         self.my_side = "w"
         # Niveau Elo actif (voir human_profile.ELO_TIERS). Change le style
         # de jeu proposé par les 4 profils, PAS juste la profondeur -- voir
@@ -128,25 +137,10 @@ class BridgeState:
         # les 4 profils partagent alors le même coup pour cette position
         # précise, plutôt que de rester bloqués sans rien afficher.
         self._main_engine_degraded = set()
-        # Référence vers l'analyse Stockfish actuellement en cours (objet
-        # chess.engine.AnalysisResult), pour pouvoir l'interrompre depuis un
-        # autre thread si une position plus récente arrive.
-        self.active_analysis = None
-        # Incrémenté à chaque nouvelle position prise en charge. Permet à un
-        # générateur "en retard" (dont l'analyse a été annulée mais qui n'a
-        # pas encore eu l'occasion de s'arrêter -- ex: en train d'écrire un
-        # dernier résultat au moment de l'annulation) de se rendre compte
-        # qu'il est obsolète et de s'arrêter immédiatement, SANS appeler
-        # on_depth_update ni continuer à écrire sur la connexion HTTP. Sans
-        # ça, des résultats d'une position déjà dépassée pouvaient encore
-        # arriver et écraser/mélanger l'affichage avec la position actuelle
-        # (c'était la cause du bug "seule la ligne depth 20 s'affiche").
-        self.generation = 0
 
         # --- Coaching : mémoire d'éval avant/après (voir theme_detector.py) ---
         # Compteur incrémenté à CHAQUE nouvelle position (mon tour OU celui
-        # de l'adversaire, contrairement à self.generation ci-dessus qui
-        # n'est utilisé que par l'ancien mode streaming). Sert de garde-fou
+        # de l'adversaire). Sert de garde-fou
         # anti-péremption pour _opponent_turn_eval ci-dessous : le calcul
         # léger tourne en tâche de fond (voir _track_opponent_eval) et peut
         # prendre du temps si le moteur est occupé sur une analyse lourde
@@ -311,28 +305,6 @@ class BridgeState:
         with self.lock:
             self.elo_tier_id = tier_id
 
-    def _register_active_analysis(self, analysis):
-        with self.lock:
-            self.active_analysis = analysis
-
-    def _clear_active_analysis(self):
-        with self.lock:
-            self.active_analysis = None
-
-    def _cancel_current_analysis_if_any(self):
-        """
-        Demande à Stockfish d'arrêter la recherche en cours, si une analyse
-        tourne déjà (elle est de toute façon obsolète : une position plus
-        récente vient d'arriver). Ne bloque pas : c'est juste une demande.
-        """
-        with self.lock:
-            analysis = self.active_analysis
-        if analysis is not None:
-            try:
-                analysis.stop()
-            except Exception:
-                pass  # déjà arrêtée / moteur mort -> pas grave
-
     def _restart_engine(self, reason=""):
         """
         Redémarre Stockfish après un crash (processus tué, plantage interne,
@@ -340,7 +312,7 @@ class BridgeState:
         inutilisable jusqu'au redémarrage complet du programme.
 
         IMPORTANT (perf) : cette méthode est appelée DEPUIS L'INTÉRIEUR de
-        engine_lock (voir _progressive_with_auto_restart). Fermer proprement
+        engine_lock (voir handle_single_profile). Fermer proprement
         l'ancien moteur (self.engine.close()) peut bloquer une dizaine de
         secondes si le processus est déjà mort mais que la librairie attend
         quand même une réponse UCI avant d'abandonner -- pendant tout ce
@@ -350,7 +322,6 @@ class BridgeState:
         qu'elle prenne du temps, ça ne bloque plus rien d'autre.
         """
         print(f"⚠ Le moteur semble avoir crashé, redémarrage... ({reason})")
-        self._clear_active_analysis()
 
         old_engine = self.engine
 
@@ -366,30 +337,6 @@ class BridgeState:
             self.stockfish_path, threads=self.threads, hash_mb=self.hash_mb
         )
         print("✅ Moteur redémarré.")
-
-    def _progressive_with_auto_restart(self, fen):
-        """
-        Générateur : comme analyze_fen_progressive, mais relance Stockfish
-        UNE fois et reprend l'analyse depuis le début si le moteur meurt en
-        cours de route (EngineError). Si ça replante une 2e fois, laisse
-        l'exception remonter (pas de boucle infinie si Stockfish est
-        introuvable/cassé). Enregistre aussi l'analyse en cours pour
-        permettre son annulation externe (voir _cancel_current_analysis_if_any).
-        """
-        try:
-            yield from self.engine.analyze_fen_progressive(
-                fen, depths=self.depths, on_analysis_started=self._register_active_analysis
-            )
-        except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
-            # On garde la VRAIE raison (type + message de l'exception) dans
-            # les logs -- avant, le message était toujours générique et ne
-            # permettait pas de savoir POURQUOI Stockfish était mort.
-            self._restart_engine(reason=f"{type(e).__name__}: {e}")
-            yield from self.engine.analyze_fen_progressive(
-                fen, depths=self.depths, on_analysis_started=self._register_active_analysis
-            )
-        finally:
-            self._clear_active_analysis()
 
     def handle_quick_take(self, fen):
         """
@@ -420,7 +367,6 @@ class BridgeState:
             if self._quick_cache_key == fen:
                 candidates = self._quick_cache_value
             else:
-                self._register_active_analysis(None)
                 # Réutilise la même liste que l'analyse principale (voir
                 # handle_single_profile) : si cette position est déjà
                 # connue pour faire planter le mode natif, on passe direct
@@ -442,8 +388,6 @@ class BridgeState:
                         result = _run_quick(1, True)  # repli direct sur le mode sûr après un crash
                     except Exception as e2:
                         return {"quick": True, "error": f"Moteur Stockfish indisponible : {e2}"}
-                finally:
-                    self._clear_active_analysis()
 
                 if result.get("game_over"):
                     return {"quick": True, "game_over": True, "result": result["result"]}
@@ -465,13 +409,61 @@ class BridgeState:
                 }
         return {"quick": True, "profiles": profiles_out}
 
+    def _update_move_history(self, fen, board):
+        """
+        Déduit le coup joué entre la dernière position CONNUE de
+        l'historique et `fen` (nouvelle position, déjà confirmée stable
+        côté JS), en essayant chaque coup légal depuis cette ancienne
+        position jusqu'à retrouver exactement le même plateau de pièces.
+        Fiable tant qu'un seul coup a été joué entre 2 lectures (garanti
+        par la détection de stabilité du script JS). Best-effort : ne doit
+        jamais bloquer l'affichage des flèches si la déduction échoue pour
+        une raison quelconque (ex: 1er coup de la partie, désynchronisation
+        ponctuelle).
+        """
+        try:
+            board_part_new = fen.split(" ", 1)[0]
+
+            # Retour à la position de départ = nouvelle partie -> on repart
+            # d'un historique vierge (même logique que resetTrackingState
+            # côté JS, mais le serveur Python n'a aucun autre moyen de le
+            # savoir).
+            if board_part_new == chess.STARTING_BOARD_FEN:
+                if self._move_history:
+                    self._move_history = []
+                self._move_history_board = None
+                return
+
+            if self._move_history_board is None:
+                # Rien à comparer (tout premier coup vu depuis le
+                # démarrage du serveur, ou après un reset) -- on initialise
+                # juste le point de départ, sans coup à déduire encore.
+                self._move_history_board = board.copy()
+                return
+
+            old_board = self._move_history_board
+            for legal_move in old_board.legal_moves:
+                test_board = old_board.copy()
+                test_board.push(legal_move)
+                if test_board.board_fen() == board_part_new:
+                    self._move_history.append(old_board.san(legal_move))
+                    self._move_history_board = test_board
+                    return
+
+            # Aucun coup légal ne mène à cette position -- désynchronisation
+            # (ex: 2 coups joués très vite entre 2 lectures). On
+            # resynchronise silencieusement sur la position actuelle plutôt
+            # que de laisser l'historique corrompu ou de planter.
+            self._move_history_board = board.copy()
+        except Exception:
+            pass  # cosmétique (identification d'ouverture) -- jamais bloquant
+
     def handle_single_profile(self, fen, profile_id):
         """
         Analyse la position pour UN SEUL profil de jeu ("popular",
         "creative", "classical" -- voir human_profile.py) au niveau Elo
-        actuellement sélectionné, et retourne directement un dict (même
-        pattern que handle_single_depth : une requête HTTP par flèche, pas
-        de streaming).
+        actuellement sélectionné, et retourne directement un dict : une
+        requête HTTP par flèche, pas de streaming.
         """
         try:
             board = chess.Board(fen)
@@ -489,7 +481,7 @@ class BridgeState:
             current_seq = self._position_seq
 
         if is_new_position:
-            self._cancel_current_analysis_if_any()
+            self._update_move_history(fen, board)
 
         side_to_move = "w" if board.turn else "b"
         if side_to_move != my_side:
@@ -548,7 +540,6 @@ class BridgeState:
                         return result
 
                 # 2. Hors théorie (ou pas de livre) -> Stockfish comme avant.
-                self._register_active_analysis(None)  # pas d'objet analysis() streamé ici, rien à annuler en cours de route
                 is_degraded = fen in self._main_engine_degraded
                 try:
                     result, brd = self.engine.analyze_candidates(
@@ -584,8 +575,6 @@ class BridgeState:
                     result = _run_candidates()
                 except Exception as e2:
                     return {"error": f"Moteur Stockfish indisponible : {e2}", "profile": profile_id}
-            finally:
-                self._clear_active_analysis()
 
         with self.lock:
             stale = fen != self.last_fen
@@ -620,9 +609,16 @@ class BridgeState:
                 else theme_detector.detect_theme(board, result["candidates"])
             )
             why_motif, why_detail = why_detector.detect_why(board, chosen)
-            entry["narration"] = narration.generate_narration(
-                theme_result, profile_id, chosen, why_motif, why_detail, board,
-            )
+            # engine_lock requis ici : narration.generate_narration() peut
+            # interroger le moteur pour la trajectoire d'éval du scénario
+            # (voir variation_narrator.py) -- le moteur ne supporte qu'une
+            # recherche à la fois, jamais d'appel moteur hors de ce verrou.
+            with self.engine_lock:
+                entry["narration"] = narration.generate_narration(
+                    theme_result, profile_id, chosen, why_motif, why_detail, board,
+                    move_history=list(self._move_history), opening_book=self.opening_identity,
+                    engine=self.engine,
+                )
         except Exception as e:
             print(f"⚠ Narration indisponible pour ce coup ({profile_id}) : {e}")
 
@@ -630,226 +626,6 @@ class BridgeState:
             self.on_profile_update(profile_id, dict(entry))
 
         return entry
-
-    def handle_single_depth(self, fen, depth):
-        """
-        Analyse la position pour UN SEUL palier de profondeur, et retourne
-        directement un dict (pas un générateur/stream). Le navigateur envoie
-        maintenant une requête HTTP séparée par palier (10, puis 15, puis
-        20) plutôt qu'une seule requête "streamée" : certains navigateurs/
-        gestionnaires d'extensions ne délivrent PAS les données au fil de
-        l'eau (onprogress) malgré un vrai streaming NDJSON côté serveur --
-        ils attendent la fin complète de la connexion avant de tout donner
-        d'un coup. En séparant en plusieurs requêtes HTTP indépendantes, on
-        s'appuie sur une garantie beaucoup plus fiable : chaque requête se
-        termine (et déclenche son propre callback JS) dès qu'ELLE est prête,
-        indépendamment des autres -- ce n'est plus qu'un détail d'implé-
-        mentation fragile d'un navigateur particulier.
-        """
-        try:
-            board = chess.Board(fen)
-        except ValueError as e:
-            return {"error": f"FEN invalide reçu du navigateur : {e}", "depth": depth}
-
-        with self.lock:
-            is_new_position = fen != self.last_fen
-            self.last_fen = fen
-            my_side = self.my_side
-
-        if is_new_position:
-            # Une position DIFFÉRENTE de la précédente vient d'arriver :
-            # toute recherche encore active pour l'ancienne position est
-            # désormais inutile, on lui demande de s'arrêter. On ne fait PAS
-            # ça pour les requêtes soeurs (10/15/20) d'une même position,
-            # qui doivent au contraire se succéder tranquillement derrière
-            # engine_lock.
-            self._cancel_current_analysis_if_any()
-
-        side_to_move = "w" if board.turn else "b"
-        if side_to_move != my_side:
-            if is_new_position and self.on_update:
-                camp = "Blancs" if my_side == "w" else "Noirs"
-                self.on_update(None, f"Au tour de l'adversaire (tu joues les {camp}).")
-            return {"skip": True, "depth": depth}
-
-        if board.is_game_over():
-            if is_new_position and self.on_update:
-                self.on_update(None, f"Partie terminée : {board.result()}")
-            return {"game_over": True, "result": board.result(), "depth": depth}
-
-        def _run_once():
-            gen = self.engine.analyze_fen_progressive(
-                fen, depths=(depth,), on_analysis_started=self._register_active_analysis
-            )
-            try:
-                return next(gen, None)
-            finally:
-                gen.close()
-
-        with self.engine_lock:
-            with self.lock:
-                if fen != self.last_fen:
-                    return {"stale": True, "depth": depth}  # position dépassée entre-temps, pas la peine
-
-            try:
-                entry = _run_once()
-            except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
-                self._restart_engine(reason=f"{type(e).__name__}: {e}")
-                try:
-                    entry = _run_once()
-                except Exception as e2:
-                    return {"error": f"Moteur Stockfish indisponible : {e2}", "depth": depth}
-            finally:
-                self._clear_active_analysis()
-
-        with self.lock:
-            stale = fen != self.last_fen
-        if stale or entry is None:
-            return {"stale": True, "depth": depth}
-        if entry.get("game_over"):
-            return entry
-
-        # Explication en langage clair uniquement pour le palier le plus
-        # profond demandé (pas la peine de la recalculer 3x).
-        if depth == max(self.depths):
-            move_obj = chess.Move.from_uci(entry["move_uci"])
-            if self.explain_mode == "api":
-                explanation = explain_move_via_api(
-                    fen, entry["move_san"], entry["pv_san"], entry["score"]
-                )
-            else:
-                explanation = explain_move_local(board, move_obj, entry["pv_san"])
-            entry = dict(entry)
-            entry["explanation"] = explanation
-
-        if self.on_depth_update:
-            self.on_depth_update(entry["depth"], dict(entry))
-
-        return entry
-
-    def handle_fen_stream(self, fen):
-        """
-        Générateur consommé par le serveur HTTP pour écrire la réponse au
-        fil de l'eau (NDJSON, une ligne JSON par item produit) :
-        - soit un seul message {"error": ...}
-        - soit un seul message {"game_over": True, "result": ...}
-        - soit un seul message {"skip": True} (pas le tour du camp choisi)
-        - soit une série de messages {"depth": 10/15/20, "move_uci": ...,
-          "move_san": ..., "score": ..., "pv_san": [...]}
-        """
-        try:
-            board = chess.Board(fen)
-        except ValueError as e:
-            yield {"error": f"FEN invalide reçu du navigateur : {e}"}
-            return
-
-        with self.lock:
-            self.last_fen = fen
-            my_side = self.my_side
-            self.generation += 1
-            my_gen = self.generation
-
-        side_to_move = "w" if board.turn else "b"
-        if side_to_move != my_side:
-            # Pas mon tour : on ne calcule/n'affiche rien pour le camp
-            # adverse. last_fen reste stocké pour le bouton "Rafraîchir".
-            if self.on_update:
-                camp = "Blancs" if my_side == "w" else "Noirs"
-                self.on_update(None, f"Au tour de l'adversaire (tu joues les {camp}).")
-            yield {"skip": True}
-            return
-
-        if board.is_game_over():
-            if self.on_update:
-                self.on_update(None, f"Partie terminée : {board.result()}")
-            yield {"game_over": True, "result": board.result()}
-            return
-
-        # Une position plus récente vient d'arriver : si une ancienne
-        # analyse tourne encore, on lui demande de s'arrêter tout de suite
-        # au lieu d'attendre passivement derrière elle.
-        self._cancel_current_analysis_if_any()
-
-        with self.engine_lock:
-            # Une position ENCORE plus récente est peut-être arrivée pendant
-            # qu'on attendait le verrou moteur (plusieurs coups très rapides)
-            # -> on abandonne avant même de commencer, inutile de calculer
-            # pour une position déjà dépassée.
-            with self.lock:
-                if my_gen != self.generation:
-                    return
-
-            # IMPORTANT : générateur géré explicitement (pas juste "for entry
-            # in self._progressive_with_auto_restart(fen)") pour pouvoir
-            # appeler .close() nous-mêmes de façon garantie sur CHAQUE
-            # chemin de sortie (via le "finally" plus bas), y compris un
-            # `return` anticipé pour position obsolète. Sans ça, un `return`
-            # en plein milieu de la boucle laisse la fermeture au ramasse-
-            # miettes -- généralement rapide sur CPython, mais pas garanti,
-            # et surtout pas synchrone avec la libération d'engine_lock :
-            # Stockfish pouvait recevoir un nouveau "go" pour la position
-            # suivante avant que le "stop" de l'ancienne recherche soit
-            # vraiment traité, ce qui est une violation du protocole UCI et
-            # une cause plausible des plantages observés.
-            gen = self._progressive_with_auto_restart(fen)
-            try:
-                deepest_seen = None
-                for entry in gen:
-                    # Vérifié À CHAQUE palier, pas juste au début : une
-                    # analyse déjà "annulée" (analysis.stop() appelé) peut
-                    # continuer à produire 1-2 résultats de transition avant
-                    # de s'arrêter vraiment. Sans ce contrôle, ces résultats
-                    # obsolètes pouvaient s'afficher/se mélanger avec ceux de
-                    # la position actuelle -> c'était la cause du bug où
-                    # certaines lignes de profondeur ne s'affichaient jamais.
-                    with self.lock:
-                        if my_gen != self.generation:
-                            return
-                    deepest_seen = entry
-                    if self.on_depth_update:
-                        self.on_depth_update(entry["depth"], dict(entry))
-                    yield entry
-            except Exception as e:
-                yield {"error": f"Moteur Stockfish indisponible : {e}"}
-                return
-            finally:
-                gen.close()
-
-            # Une fois le palier le plus profond atteint, on calcule
-            # l'explication en langage clair une seule fois (pas à chaque
-            # palier) et on la transmet accolée à l'entrée la plus profonde.
-            with self.lock:
-                stale = my_gen != self.generation
-            if deepest_seen is not None and not stale:
-                move_obj = chess.Move.from_uci(deepest_seen["move_uci"])
-                if self.explain_mode == "api":
-                    explanation = explain_move_via_api(
-                        fen, deepest_seen["move_san"], deepest_seen["pv_san"], deepest_seen["score"]
-                    )
-                else:
-                    explanation = explain_move_local(board, move_obj, deepest_seen["pv_san"])
-
-                if self.on_depth_update:
-                    final_entry = dict(deepest_seen)
-                    final_entry["explanation"] = explanation
-                    self.on_depth_update(deepest_seen["depth"], final_entry)
-
-    def refresh_last(self):
-        """
-        LEGACY (ancien mode profondeur brute). Conservé seulement pour
-        compatibilité --depth CLI. Le bouton "Rafraîchir" de l'UI utilise
-        maintenant refresh_last_profiles() ci-dessous, PAS cette méthode :
-        celle-ci ignore le niveau Elo et retombe toujours sur
-        analyze_fen_progressive (profondeur fixe), ce qui la rend lente et
-        incohérente avec le slider -- c'était justement la cause du bug où
-        "Rafraîchir" semblait ignorer le niveau Elo choisi.
-        """
-        if self.last_fen is None:
-            if self.on_update:
-                self.on_update(None, "Aucune position reçue pour l'instant depuis ton site.")
-            return
-        for _ in self.handle_fen_stream(self.last_fen):
-            pass
 
     def refresh_last_profiles(self):
         """
@@ -907,8 +683,7 @@ def _make_handler(state: BridgeState):
             try:
                 data = json.loads(body)
                 fen = data["fen"]
-                depth = data.get("depth")      # ancien mode : un seul palier de profondeur
-                profile = data.get("profile")  # nouveau mode : un seul profil "humain"
+                profile = data.get("profile")  # un seul profil "humain"
                 quick = data.get("quick", False)  # aperçu rapide (depth 12) des 4 profils d'un coup
             except Exception:
                 self._send_single(400, {"error": "JSON invalide, champ \"fen\" attendu"})
@@ -920,31 +695,20 @@ def _make_handler(state: BridgeState):
             elif profile is not None:
                 result = state.handle_single_profile(fen, profile)
                 self._send_single(200, result)
-            elif depth is not None:
-                # Mode "un seul palier de profondeur", conservé pour
-                # compatibilité (plus utilisé par défaut par le .user.js,
-                # mais toujours fonctionnel si besoin).
-                result = state.handle_single_depth(fen, int(depth))
-                self._send_single(200, result)
             else:
-                # Requête "brute" (ni profile, ni depth) : ne devrait plus
-                # jamais arriver avec le .user.js à jour. On NE relance
-                # PLUS silencieusement l'ancien mode streaming ici -- c'est
-                # justement ce chemin (multipv=1, profondeur fixe) qui
-                # provoquait des crashs répétés en tournant EN PARALLÈLE du
-                # nouveau système de profils sur le même moteur partagé
-                # (típicamente : 2 scripts actifs en même temps sur la
-                # page, l'ancien chess_coach_bridge.js ET le nouveau
-                # chess_coach_bridge.user.js). On log un avertissement
-                # explicite pour le repérer facilement plutôt que de
-                # laisser planter le moteur en silence.
+                # Requête "brute" (sans 'profile' ni 'quick') : ne devrait
+                # plus jamais arriver avec le .user.js à jour. Typiquement le
+                # signe qu'un ancien script (chess_coach_bridge.js) est encore
+                # chargé sur la page en plus du .user.js Tampermonkey. On log
+                # un avertissement explicite pour le repérer facilement plutôt
+                # que de traiter la requête.
                 print(
-                    "⚠ Requête /fen reçue SANS champ 'profile' ni 'depth' -- "
+                    "⚠ Requête /fen reçue SANS champ 'profile' ni 'quick' -- "
                     "vérifie qu'un ancien script (chess_coach_bridge.js) n'est "
                     "pas encore chargé sur la page en plus du .user.js Tampermonkey."
                 )
                 self._send_single(409, {
-                    "error": "Requête sans 'profile' ni 'depth' -- ancien mode désactivé "
+                    "error": "Requête sans 'profile' ni 'quick' -- mode non reconnu "
                              "(voir la console Python pour plus de détails)."
                 })
 
@@ -959,44 +723,14 @@ def _make_handler(state: BridgeState):
             except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
                 pass
 
-        def _stream(self, generator):
-            """
-            Écrit chaque item du générateur comme une ligne JSON (NDJSON),
-            au fil de l'eau. Pas de Content-Length (on ne connaît pas la
-            taille finale à l'avance) : on ferme la connexion à la fin pour
-            signaler la fin des données au navigateur.
-            """
-            try:
-                self.send_response(200)
-                self._cors_headers()
-                self.send_header("Content-Type", "application/x-ndjson")
-                self.close_connection = True
-                self.end_headers()
-            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-                generator.close()
-                return
-
-            for payload in generator:
-                try:
-                    self.wfile.write((json.dumps(payload) + "\n").encode("utf-8"))
-                    self.wfile.flush()
-                except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-                    # Le navigateur a fermé la connexion en cours de route
-                    # (ex: nouveau coup joué avant la fin de l'analyse, ou
-                    # timeout côté client) -> on arrête le générateur, ce qui
-                    # interrompt Stockfish en cours plutôt que de continuer à
-                    # calculer pour rien.
-                    generator.close()
-                    return
-
         def log_message(self, format, *args):
             pass  # silence les logs HTTP dans la console
 
     return Handler
 
 
-def start_bridge_server(stockfish_path, explain_mode="local", on_update=None, on_depth_update=None,
-                         on_profile_update=None, port=DEFAULT_PORT, threads=None, hash_mb=1024, depth=None):
+def start_bridge_server(stockfish_path, explain_mode="local", on_update=None,
+                         on_profile_update=None, port=DEFAULT_PORT, threads=None, hash_mb=1024):
     """
     Démarre le serveur en tâche de fond (thread daemon) et retourne
     (server, state). Appelle state.close() pour bien fermer Stockfish
@@ -1004,8 +738,8 @@ def start_bridge_server(stockfish_path, explain_mode="local", on_update=None, on
     """
     state = BridgeState(
         stockfish_path, explain_mode=explain_mode, on_update=on_update,
-        on_depth_update=on_depth_update, on_profile_update=on_profile_update,
-        threads=threads, hash_mb=hash_mb, depth=depth,
+        on_profile_update=on_profile_update,
+        threads=threads, hash_mb=hash_mb,
     )
     handler_cls = _make_handler(state)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)

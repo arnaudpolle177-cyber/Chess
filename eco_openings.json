@@ -1,0 +1,236 @@
+[
+  {
+    "eco": "C50",
+    "name": "Italian Game",
+    "pgn": "1. e4 e5 2. Nf3 Nc6 3. Bc4",
+    "pros_cons": "Développement rapide des pièces mineures et pression immédiate sur le point f7. Le centre reste souple (pas encore fixé par d4), ce qui laisse plusieurs plans possibles selon la réponse adverse. Faiblesse potentielle : le fou en c4 peut devenir une cible (...Na5 ou ...b5) si Blanc traîne à le soutenir."
+  },
+  {
+    "eco": "C53",
+    "name": "Italian Game: Classical Variation",
+    "pgn": "1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. c3",
+    "pros_cons": "Prépare d4 pour prendre un centre large. Bonne base classique, facile à comprendre pour un joueur qui débute en ouvertures. Faiblesse : si d4 est joué trop tôt sans préparation suffisante, Noir peut obtenir un jeu confortable en frappant immédiatement le centre."
+  },
+  {
+    "eco": "C60",
+    "name": "Ruy Lopez",
+    "pgn": "1. e4 e5 2. Nf3 Nc6 3. Bb5",
+    "pros_cons": "L'une des ouvertures les plus solides et les plus étudiées de l'histoire : met une pression durable sur le cavalier en c6, donc indirectement sur le pion e5. Riche en plans à long terme (attaque à l'aile, jeu au centre). Faiblesse : demande de bonnes connaissances théoriques pour ne pas perdre de temps, le fou en b5 peut lui-même être visé par ...a6."
+  },
+  {
+    "eco": "C65",
+    "name": "Ruy Lopez: Berlin Defense",
+    "pgn": "1. e4 e5 2. Nf3 Nc6 3. Bb5 Nf6",
+    "pros_cons": "Défense extrêmement solide, réputée pour mener à des finales équilibrées même après l'échange des dames. Peu de risques pour Noir. Faiblesse pour Noir : les possibilités de jouer pour le gain sont limitées, la position peut devenir sèche et technique."
+  },
+  {
+    "eco": "C68",
+    "name": "Ruy Lopez: Exchange Variation",
+    "pgn": "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Bxc6 dxc6",
+    "pros_cons": "Blanc abandonne la paire de fous pour infliger des pions doublés à Noir -- plan simple, orienté vers une finale favorable si les dames sont échangées. Faiblesse : Noir garde la paire de fous et un jeu dynamique au milieu de partie si les pièces restent sur l'échiquier."
+  },
+  {
+    "eco": "C42",
+    "name": "Russian Game (Petrov's Defense)",
+    "pgn": "1. e4 e5 2. Nf3 Nf6",
+    "pros_cons": "Réponse symétrique et très solide, réputée pour son faible risque objectif -- souvent choisie pour forcer la nullité contre un adversaire plus fort. Faiblesse : les chances de gain pour Noir sont limitées dans les lignes les plus calmes, la position peut vite se simplifier."
+  },
+  {
+    "eco": "C44",
+    "name": "Scotch Game",
+    "pgn": "1. e4 e5 2. Nf3 Nc6 3. d4",
+    "pros_cons": "Ouvre le centre immédiatement, mène à des positions plus dynamiques et moins théoriques que la Ruy Lopez. Bon choix pour éviter une préparation adverse lourde. Faiblesse : le centre s'ouvre vite, ce qui peut se retourner contre Blanc si le développement prend du retard."
+  },
+  {
+    "eco": "C25",
+    "name": "Vienna Game",
+    "pgn": "1. e4 e5 2. Nc3",
+    "pros_cons": "Ouverture flexible qui garde plusieurs options (f4 façon gambit, ou un jeu plus classique). Peu jouée au haut niveau, donc utile pour sortir un adversaire de sa préparation. Faiblesse : moins de pression directe sur le centre qu'avec 2.Nf3, laisse à Noir plus de facilité pour égaliser."
+  },
+  {
+    "eco": "C30",
+    "name": "King's Gambit",
+    "pgn": "1. e4 e5 2. f4",
+    "pros_cons": "Ouverture agressive qui sacrifie un pion pour un développement rapide et une ouverture de la colonne f contre le roi adverse. Très dangereux si Noir ne connaît pas la théorie. Faiblesse : affaiblit durablement la position du roi blanc, risqué si l'attaque ne se concrétise pas vite."
+  },
+  {
+    "eco": "B00",
+    "name": "King's Pawn Opening",
+    "pgn": "1. e4",
+    "pros_cons": "Ouvre immédiatement des lignes pour la dame et le fou, permet un développement rapide. Mène à des positions très variées selon la réponse de Noir. Faiblesse : le pion e4 peut devenir une cible si Noir choisit une défense semi-ouverte bien préparée (Sicilienne, Caro-Kann)."
+  },
+  {
+    "eco": "B20",
+    "name": "Sicilian Defense",
+    "pgn": "1. e4 c5",
+    "pros_cons": "La défense la plus jouée contre 1.e4 au haut niveau : Noir lutte pour l'initiative dès le 1er coup plutôt que de simplement égaliser. Mène à des positions déséquilibrées et riches en chances de gain pour les deux camps. Faiblesse : demande une bonne préparation théorique, les lignes tranchantes peuvent punir sévèrement une imprécision."
+  },
+  {
+    "eco": "B22",
+    "name": "Sicilian Defense: Alapin Variation",
+    "pgn": "1. e4 c5 2. c3",
+    "pros_cons": "Blanc évite le volume théorique énorme de la Sicilienne principale en préparant d4 avec un centre solide. Bon choix pour un jeu plus calme et positionnel. Faiblesse : moins ambitieux que les lignes principales, laisse à Noir des chemins connus pour égaliser confortablement."
+  },
+  {
+    "eco": "B27",
+    "name": "Sicilian Defense: Najdorf Variation",
+    "pgn": "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6",
+    "pros_cons": "Variante la plus prestigieuse de la Sicilienne : ...a6 prépare ...e5 ou ...b5 sans donner de prise immédiate au cavalier blanc. Extrêmement flexible pour Noir. Faiblesse : très théorique, une préparation insuffisante peut être punie rapidement dans les lignes tranchantes (attaque anglaise notamment)."
+  },
+  {
+    "eco": "B90",
+    "name": "Sicilian Defense: Najdorf Variation, English Attack",
+    "pgn": "1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 a6 6. Be3",
+    "pros_cons": "Plan agressif pour Blanc : Be3, f3, Qd2 et un roque long suivi d'une attaque de pions à l'aile dame. Course aux attaques typique. Faiblesse pour Blanc : le roque long expose le roi si l'attaque n'arrive pas assez vite ; pour Noir, un mauvais timing peut laisser Blanc gagner la course."
+  },
+  {
+    "eco": "B01",
+    "name": "Scandinavian Defense",
+    "pgn": "1. e4 d5",
+    "pros_cons": "Défense directe qui remet en question e4 dès le 1er coup et mène à un jeu simple à comprendre pour Noir. Facile à apprendre, peu de théorie lourde. Faiblesse : la dame noire sort tôt (après 2.exd5 Qxd5) et perd du temps face aux attaques de tempo de Blanc (3.Nc3)."
+  },
+  {
+    "eco": "B12",
+    "name": "Caro-Kann Defense",
+    "pgn": "1. e4 c6",
+    "pros_cons": "Défense très solide : Noir soutient d5 sans enfermer son fou dame (contrairement à la Française). Structure de pions saine, peu de faiblesses durables. Faiblesse : le jeu peut manquer de dynamisme si Noir ne trouve pas de plan actif, position parfois passive dans certaines lignes."
+  },
+  {
+    "eco": "B18",
+    "name": "Caro-Kann Defense: Classical Variation",
+    "pgn": "1. e4 c6 2. d4 d5 3. Nc3 dxe4 4. Nxe4 Bf5",
+    "pros_cons": "Noir sort son fou dame avant de jouer ...e6, réglant le problème classique de cette pièce. Position solide et éprouvée. Faiblesse : légèrement passive, Noir doit jouer avec précision pour ne pas rester en retard de développement."
+  },
+  {
+    "eco": "C00",
+    "name": "French Defense",
+    "pgn": "1. e4 e6",
+    "pros_cons": "Structure de pions solide (chaîne e6-d5) qui résiste bien à la pression centrale de Blanc. Bon contre-jeu à l'aile dame dans beaucoup de lignes. Faiblesse classique : le fou dame reste enfermé derrière la chaîne de pions pendant une bonne partie de la partie, ce qui peut donner à Noir un jeu un peu étriqué."
+  },
+  {
+    "eco": "C02",
+    "name": "French Defense: Advance Variation",
+    "pgn": "1. e4 e6 2. d4 d5 3. e5",
+    "pros_cons": "Blanc gagne de l'espace immédiatement et fixe la structure. Bon contrôle spatial si Blanc joue avec précision. Faiblesse : le pion e5 peut devenir une cible pour Noir (...c5, ...Nc6, ...Qb6), et Blanc doit défendre cette avance de pion tout en développant."
+  },
+  {
+    "eco": "C15",
+    "name": "French Defense: Winawer Variation",
+    "pgn": "1. e4 e6 2. d4 d5 3. Nc3 Bb4",
+    "pros_cons": "Noir cède la paire de fous mais obtient souvent des pions doublés adverses en échange, avec un contre-jeu actif à l'aile dame. Position déséquilibrée et riche en chances pour les deux camps. Faiblesse : très tranchant, demande une bonne compréhension des plans typiques des deux côtés."
+  },
+  {
+    "eco": "A00",
+    "name": "Uncommon Opening",
+    "pgn": "1. Nf3",
+    "pros_cons": "Coup flexible qui retarde l'engagement central et peut transposer vers de nombreuses ouvertures différentes (Anglaise, Réti, ou même un retour vers 1.e4/1.d4). Utile pour éviter une préparation adverse ciblée. Faiblesse : moins de pression immédiate sur le centre qu'un coup de pion central direct."
+  },
+  {
+    "eco": "A04",
+    "name": "Reti Opening",
+    "pgn": "1. Nf3 d5 2. c4",
+    "pros_cons": "Approche hypermoderne : Blanc laisse Noir occuper le centre pour mieux le frapper plus tard depuis les flancs. Très flexible, transpositions multiples possibles. Faiblesse : demande une bonne compréhension positionnelle, moins intuitive pour un joueur qui préfère les plans directs."
+  },
+  {
+    "eco": "A10",
+    "name": "English Opening",
+    "pgn": "1. c4",
+    "pros_cons": "Ouverture flexible qui contrôle d5 depuis le flanc sans engager immédiatement les pions centraux. Peut transposer vers de nombreuses structures (type Sicilienne inversée, Catalane, etc.). Faiblesse : le développement peut être plus lent qu'avec 1.e4/1.d4, laisse parfois à Noir plus de facilité pour prendre le centre."
+  },
+  {
+    "eco": "A13",
+    "name": "English Opening: Agincourt Defense",
+    "pgn": "1. c4 e6",
+    "pros_cons": "Approche souple pour Noir, garde plusieurs structures possibles (Catalane, Nimzo-Indienne inversée). Bon choix pour éviter d'entrer trop tôt dans une ligne théorique fixe. Faiblesse : demande de bien connaître les transpositions possibles pour ne pas se retrouver dans une structure mal maîtrisée."
+  },
+  {
+    "eco": "D06",
+    "name": "Queen's Gambit",
+    "pgn": "1. d4 d5 2. c4",
+    "pros_cons": "Une des ouvertures les plus classiques et solides : Blanc propose un pion pour obtenir un centre plus fort et un meilleur développement. Riche en plans stratégiques éprouvés. Faiblesse : si Noir défend correctement (Refusé), la lutte est équilibrée et demande une bonne compréhension positionnelle des deux côtés."
+  },
+  {
+    "eco": "D30",
+    "name": "Queen's Gambit Declined",
+    "pgn": "1. d4 d5 2. c4 e6",
+    "pros_cons": "Défense solide et classique, structure de pions saine pour Noir. Beaucoup de plans bien connus et testés au plus haut niveau. Faiblesse : comme en Française, le fou dame de Noir peut rester à l'étroit derrière la chaîne de pions e6-d5 si Noir ne trouve pas le bon moment pour le développer."
+  },
+  {
+    "eco": "D20",
+    "name": "Queen's Gambit Accepted",
+    "pgn": "1. d4 d5 2. c4 dxc4",
+    "pros_cons": "Noir prend le pion mais laisse Blanc reprendre le centre avec e4 ou e3 -- Noir mise sur un développement rapide pour compenser. Position claire à comprendre. Faiblesse : Noir doit jouer précisément pour ne pas rester en retard de développement une fois le centre repris par Blanc."
+  },
+  {
+    "eco": "E00",
+    "name": "Catalan Opening",
+    "pgn": "1. d4 Nf6 2. c4 e6 3. g3",
+    "pros_cons": "Combine les idées du Gambit Dame avec un fianchetto du fou roi : pression durable sur la diagonale a1-h8 et sur le centre. Très apprécié au haut niveau pour sa solidité. Faiblesse : demande de bonnes connaissances théoriques, position parfois longue à convertir même en cas d'avantage."
+  },
+  {
+    "eco": "E20",
+    "name": "Nimzo-Indian Defense",
+    "pgn": "1. d4 Nf6 2. c4 e6 3. Nc3 Bb4",
+    "pros_cons": "Une des défenses les plus respectées contre 1.d4 : le clouage immédiat du cavalier en c3 perturbe la structure de Blanc et peut lui infliger des pions doublés. Très flexible pour Noir. Faiblesse : Noir cède parfois la paire de fous, et doit bien gérer le contre-jeu au centre pour ne pas rester passif."
+  },
+  {
+    "eco": "E60",
+    "name": "King's Indian Defense",
+    "pgn": "1. d4 Nf6 2. c4 g6",
+    "pros_cons": "Noir laisse Blanc prendre un grand centre pour mieux l'attaquer plus tard, avec un roi fianchetto solide et un plan d'attaque clair à l'aile roi (...f5). Très riche en dynamisme. Faiblesse : si le contre-jeu de Noir tarde à venir, le centre spatial de Blanc peut devenir écrasant."
+  },
+  {
+    "eco": "A56",
+    "name": "Benoni Defense",
+    "pgn": "1. d4 Nf6 2. c4 c5",
+    "pros_cons": "Structure déséquilibrée qui donne à Noir une majorité de pions à l'aile dame contre une majorité blanche au centre -- position riche en chances de gain pour les deux camps. Faiblesse : le pion d6 (ou la structure qui en découle) peut être une cible durable, position parfois délicate à tenir pour Noir sans précision."
+  },
+  {
+    "eco": "A80",
+    "name": "Dutch Defense",
+    "pgn": "1. d4 f5",
+    "pros_cons": "Noir prend de l'espace à l'aile roi dès le 1er coup et prépare un plan agressif contre le roi blanc s'il roque du même côté. Bon choix pour jouer activement contre 1.d4. Faiblesse : affaiblit la case e6 et la diagonale a2-g8, ce qui peut devenir dangereux si Blanc ouvre le centre au bon moment."
+  },
+  {
+    "eco": "A45",
+    "name": "Indian Defense",
+    "pgn": "1. d4 Nf6",
+    "pros_cons": "Coup flexible qui retarde l'engagement du pion d, laissant à Noir de nombreuses structures possibles (Indienne du Roi, Nimzo, Est-Indienne, Grünfeld). Très adaptable. Faiblesse : ne fixe rien immédiatement, demande de bien connaître les transpositions pour choisir la bonne structure selon la réponse de Blanc."
+  },
+  {
+    "eco": "D80",
+    "name": "Grünfeld Defense",
+    "pgn": "1. d4 Nf6 2. c4 g6 3. Nc3 d5",
+    "pros_cons": "Noir laisse Blanc construire un centre de pions massif pour le prendre ensuite pour cible avec les pièces, notamment depuis le fianchetto. Ouverture dynamique et à contre-jeu clair. Faiblesse : demande une bonne précision, le centre blanc peut devenir écrasant si le contre-jeu de Noir n'est pas assez rapide."
+  },
+  {
+    "eco": "B06",
+    "name": "Modern Defense",
+    "pgn": "1. e4 g6",
+    "pros_cons": "Approche hypermoderne : Noir laisse Blanc occuper le centre pour le contester ensuite depuis le fianchetto du fou roi. Flexible et peu théorique. Faiblesse : Blanc peut prendre un centre très large (souvent avec f4) qui devient difficile à contrer si Noir ne réagit pas assez vite."
+  },
+  {
+    "eco": "B07",
+    "name": "Pirc Defense",
+    "pgn": "1. e4 d6 2. d4 Nf6 3. Nc3 g6",
+    "pros_cons": "Cousine de la Moderne, plus structurée : Noir développe rapidement le cavalier roi avant le fianchetto. Bon contre-jeu possible contre un centre blanc trop étendu. Faiblesse : même vulnérabilité générale face à un grand centre blanc bien soutenu (attaque autrichienne notamment)."
+  },
+  {
+    "eco": "A07",
+    "name": "King's Indian Attack",
+    "pgn": "1. Nf3 d5 2. g3",
+    "pros_cons": "Système flexible pour Blanc (fianchetto + e4 différé) qui peut être joué contre presque toutes les réponses de Noir sans mémoriser beaucoup de théorie. Bon plan d'attaque à l'aile roi. Faiblesse : moins de pression centrale immédiate, la position peut rester équilibrée si Noir joue solidement."
+  },
+  {
+    "eco": "C20",
+    "name": "King's Pawn Game",
+    "pgn": "1. e4 e5",
+    "pros_cons": "Ouverture symétrique classique : les deux camps luttent directement pour le centre et développent rapidement. Excellente pour apprendre les principes fondamentaux (développement, sécurité du roi, contrôle du centre). Faiblesse : sans plan précis, peut mener à des positions génériques faciles à égaliser pour l'adversaire."
+  },
+  {
+    "eco": "D00",
+    "name": "Queen's Pawn Game",
+    "pgn": "1. d4 d5",
+    "pros_cons": "Ouverture solide et symétrique, structure de pions saine des deux côtés. Base classique pour apprendre le jeu positionnel. Faiblesse : sans plan actif (comme c4 ou un fianchetto), le jeu peut devenir statique et manquer de tranchant."
+  }
+]
