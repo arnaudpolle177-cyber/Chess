@@ -17,10 +17,10 @@ a = Analysis(
         'chess',
         'chess.engine',
         'chess.polyglot',
-        'mss',
-        'cv2',
-        'numpy',
-        'tkinter',
+        'webview',
+        'webview.platforms.edgechromium',  # backend WebView2 (Edge) -- celui utilisé sous Windows
+        'clr',
+        'clr_loader',
     ],
     hookspath=[],
     hooksconfig={},
@@ -48,7 +48,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,       # laisse une console visible: utile pour --calibrate / --learn
+    console=True,       # laisse une console visible : le menu interactif (double-clic) s'affiche dedans avant d'ouvrir la fenêtre du coach
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

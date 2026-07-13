@@ -1,4 +1,4 @@
-# ♟ Coach d'échecs — Installation (2 minutes, aucun code requis)
+# ♟ Coach d'échecs — Installation
 
 ## 1. Télécharger
 Récupère le fichier `CoachEchecs-windows.zip` depuis la page **Releases** du
@@ -6,41 +6,27 @@ dépôt GitHub, puis décompresse-le n'importe où (ex: sur le Bureau).
 
 Le dossier contient :
 - `CoachEchecs.exe` — le programme
-- `stockfish.exe` — le moteur d'échecs (déjà inclus, rien à installer)
+- `stockfish.exe` — le moteur d'échecs (en réalité Berserk, déjà inclus, rien à installer)
+- `opening_book.bin` — livre d'ouvertures (optionnel, si présent)
 
-## 2. Premier lancement — Calibration
-Ouvre ton échiquier en ligne (ta partie doit être visible à l'écran), puis
-double-clique sur `CoachEchecs.exe` et tape dans la fenêtre qui s'ouvre :
+## 2. Activer le script sur ton site
+Installe l'extension **Tampermonkey** dans ton navigateur (Chrome, Edge,
+Firefox...), puis colle le contenu de `chess_coach_bridge.user.js` dans un
+nouveau script Tampermonkey. Ce script lit directement le plateau affiché
+sur ta page — pas de capture d'écran, pas de calibration.
 
-```
-CoachEchecs.exe --calibrate
-```
+## 3. Lancer le coach
+Double-clique sur `CoachEchecs.exe` → choisis **1. Lancer le coach** dans
+le menu. Une fenêtre s'ouvre avec 3 profils de jeu (Pragmatique, Tactique,
+Textbook), chacun proposant son propre coup — visible directement sous
+forme de flèche sur ton échiquier en ligne.
 
-Un voile apparaît sur l'écran : clique-glisse un rectangle exactement autour
-des 8x8 cases de l'échiquier, puis relâche.
-
-## 3. Apprentissage des pièces (une seule fois)
-Remets l'échiquier en position de départ, puis :
-
-```
-CoachEchecs.exe --learn
-```
-
-## 4. Lancer le coach
-```
-CoachEchecs.exe
-```
-
-La fenêtre "Coach d'échecs" apparaît en haut à gauche et te montre le
-meilleur coup pour le camp actif. Utilise le bouton **⇄ Changer de camp**
-pour voir le conseil de l'autre côté — le coach est le même pour les deux
-joueurs, à vous de décider ensemble comment vous l'utilisez pendant vos
-parties (pendant le coup, après le coup, etc.).
+- Le **slider** en haut de la fenêtre règle le niveau (1800-2200 /
+  2300-2700 / 2800-3200 Elo).
+- Le bouton **⇄** change le camp pour lequel le coach donne des conseils
+  (les deux joueurs peuvent utiliser le même coach, chacun de son côté).
 
 ## Astuce
 Si Windows affiche un avertissement "éditeur inconnu" (normal pour un exe
 non signé numériquement), clique sur "Informations complémentaires" puis
 "Exécuter quand même".
-
-## Si le plateau change de thème ou de taille
-Relance simplement les étapes 2 et 3.
