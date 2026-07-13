@@ -111,5 +111,6 @@ def candidates_from_book_entries(board, entries, max_candidates=4):
             "to_square_central": chess.square_file(move.to_square) in (3, 4)
                                   and chess.square_rank(move.to_square) in (3, 4),
             "pv_san": [board.san(move)],  # pas de ligne calculée en mode livre, juste le coup lui-même
+            "pv_uci": [move.uci()],
         })
     return candidates

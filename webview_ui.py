@@ -168,10 +168,10 @@ _HTML = r"""
   .card .card-tag { font-size: 11.5px; color: var(--text-dim); line-height: 1.4; margin: 0; }
   .card[data-active="true"] { transform: translateY(-2px); }
   .card[data-profile="popular"] .card-head svg { color: var(--accent-popular); }
-  .card[data-profile="tactical"] .card-head svg { color: var(--accent-tactical); }
+  .card[data-profile="creative"] .card-head svg { color: var(--accent-tactical); }
   .card[data-profile="classical"] .card-head svg { color: var(--accent-classical); }
   .card[data-profile="popular"][data-active="true"] { border-color: var(--accent-popular); }
-  .card[data-profile="tactical"][data-active="true"] { border-color: var(--accent-tactical); }
+  .card[data-profile="creative"][data-active="true"] { border-color: var(--accent-tactical); }
   .card[data-profile="classical"][data-active="true"] { border-color: var(--accent-classical); }
 
   /* --- panneau de détail --- */
@@ -185,6 +185,8 @@ _HTML = r"""
   #detail-lines { display: flex; flex-direction: column; gap: 6px; }
   #detail-lines p { margin: 0; font-size: 14.5px; line-height: 1.55; }
   #detail-lines p.secondary { color: var(--text-dim); }
+  #detail-lines .block-label { font-weight: 600; color: var(--text); }
+  #detail-lines p.secondary .block-label { color: var(--text-dim); }
   #status-line { font-size: 12.5px; color: var(--text-faint); margin: 0; }
 </style>
 </head>
@@ -210,7 +212,7 @@ _HTML = r"""
       </div>
       <p class="card-tag">Le résultat le plus sûr, sans détour.</p>
     </div>
-    <div class="card" data-profile="tactical" data-active="false" onclick="selectProfile('tactical')">
+    <div class="card" data-profile="creative" data-active="false" onclick="selectProfile('creative')">
       <div class="card-head">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/></svg>
         <span class="card-name">Tactique</span>
@@ -263,21 +265,39 @@ _HTML = r"""
 
   function renderDetail() {
     const entry = PROFILE_DATA[activeProfile];
+    const themeEl = document.getElementById("detail-theme");
+    const themeLabel = document.getElementById("detail-theme-label");
     const lines = document.getElementById("detail-lines");
-    if (!entry) {
-      lines.innerHTML = '<p id="status-line">En attente du prochain coup...</p>';
+
+    if (!entry || !entry.narration) {
+      themeEl.querySelector("svg").innerHTML = THEME_ICON_PATHS["info"];
+      themeLabel.textContent = "En attente";
+      lines.innerHTML = '<p id="status-line">' +
+        (entry ? "Analyse en cours..." : "En attente du prochain coup...") + '</p>';
       return;
     }
-    // Provisoire : pas encore de vraie narration par thème (arrive avec
-    // la couche de coaching) -- affiche juste ce qu'on a de disponible.
-    const parts = [];
-    if (entry.explanation) {
-      parts.push('<p>' + escapeHtml(entry.explanation) + '</p>');
-    } else {
-      parts.push('<p class="secondary">Analyse en cours...</p>');
-    }
-    lines.innerHTML = parts.join("");
+
+    const n = entry.narration;
+    themeEl.querySelector("svg").innerHTML = THEME_ICON_PATHS[n.theme_icon] || THEME_ICON_PATHS["info"];
+    themeLabel.textContent = n.theme_label || "";
+
+    lines.innerHTML =
+      '<p><span class="block-label">' + escapeHtml(n.label1 || "") + ' — </span>' + escapeHtml(n.text1 || "") + '</p>' +
+      '<p class="secondary"><span class="block-label">' + escapeHtml(n.label2 || "") + ' — </span>' + escapeHtml(n.text2 || "") + '</p>';
   }
+
+  const THEME_ICON_PATHS = {
+    alert: '<path d="M12 9v4M12 17h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>',
+    bolt: '<path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/>',
+    sword: '<path d="M12 2c1 3-3 4-3 8a3 3 0 0 0 6 0c0-1-1-2-1-3 2 1 3 3 3 5a5 5 0 0 1-10 0c0-5 4-6 5-10z"/>',
+    shield: '<path d="M12 2 4 5v6c0 5 3.5 9 8 11 4.5-2 8-6 8-11V5z"/>',
+    rewind: '<path d="M9 14 4 9l5-5M4 9h10a6 6 0 0 1 0 12h-2"/>',
+    flag: '<path d="M4 22V4M4 4h14l-3 4 3 4H4"/>',
+    book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
+    trend: '<path d="M3 17 9 11l4 4 8-8M21 7h-6M21 7v6"/>',
+    scale: '<path d="M12 3v18M3 7l4-2 4 2M3 7l-1 5a3 3 0 0 0 6 0zM15 7l4-2 4 2M15 7l-1 5a3 3 0 0 0 6 0zM7 21h10"/>',
+    info: '<path d="M12 16v-4M12 8h.01"/><circle cx="12" cy="12" r="9"/>',
+  };
 
   function escapeHtml(s) {
     const d = document.createElement("div");
@@ -291,6 +311,8 @@ _HTML = r"""
     if (profileId === activeProfile) renderDetail();
   };
   window.showStatus = function(message) {
+    document.getElementById("detail-theme").querySelector("svg").innerHTML = THEME_ICON_PATHS["info"];
+    document.getElementById("detail-theme-label").textContent = "En attente";
     document.getElementById("detail-lines").innerHTML =
       '<p id="status-line">' + escapeHtml(message) + '</p>';
   };

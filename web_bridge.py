@@ -39,6 +39,9 @@ from explain import explain_move_local, explain_move_via_api
 import human_profile
 import opening_book
 import app_paths
+import theme_detector
+import why_detector
+import narration
 
 DEFAULT_PORT = 8765
 # Aperçu rapide (depth 12, quasi instantané) : calculé UNE fois pour les 4
@@ -81,6 +84,20 @@ class BridgeState:
         # fois (le moteur ne supporte qu'une recherche à la fois).
         self.engine_lock = threading.Lock()
         self.last_fen = None
+        # Séparé de self.last_fen : dernière position vue par
+        # handle_single_profile SPÉCIFIQUEMENT (pas mise à jour par
+        # handle_quick_take). BUG RÉEL corrigé ici : handle_quick_take met
+        # self.last_fen à jour AVANT que les vraies requêtes de profil
+        # n'arrivent (l'aperçu rapide part toujours en premier, par
+        # design -- voir chess_coach_bridge.user.js). Si is_new_position
+        # dans handle_single_profile comparait à self.last_fen, il ne
+        # voyait alors quasiment plus JAMAIS une position comme "nouvelle"
+        # (déjà marquée par l'aperçu rapide entre-temps) -- cassant en
+        # silence le message "au tour de l'adversaire" ET le suivi d'éval
+        # pour le coaching. self.last_fen reste utilisé tel quel pour les
+        # vérifications de péremption (staleness), où on veut justement la
+        # position la plus récente vue par N'IMPORTE QUEL gestionnaire.
+        self._last_profile_fen = None
         self.my_side = "w"
         # Niveau Elo actif (voir human_profile.ELO_TIERS). Change le style
         # de jeu proposé par les 4 profils, PAS juste la profondeur -- voir
@@ -125,6 +142,136 @@ class BridgeState:
         # arriver et écraser/mélanger l'affichage avec la position actuelle
         # (c'était la cause du bug "seule la ligne depth 20 s'affiche").
         self.generation = 0
+
+        # --- Coaching : mémoire d'éval avant/après (voir theme_detector.py) ---
+        # Compteur incrémenté à CHAQUE nouvelle position (mon tour OU celui
+        # de l'adversaire, contrairement à self.generation ci-dessus qui
+        # n'est utilisé que par l'ancien mode streaming). Sert de garde-fou
+        # anti-péremption pour _opponent_turn_eval ci-dessous : le calcul
+        # léger tourne en tâche de fond (voir _track_opponent_eval) et peut
+        # prendre du temps si le moteur est occupé sur une analyse lourde
+        # -- sans ce compteur, un résultat arrivé en retard pourrait se
+        # retrouver associé à la MAUVAISE transition de position (faussant
+        # silencieusement la détection de blunder) si l'adversaire a joué
+        # très vite ou si 2 coups se sont enchaînés entre-temps.
+        self._position_seq = 0
+        # Éval objective (candidates[0]["cp"], point de vue de mon camp) la
+        # DERNIÈRE fois que c'était mon tour, AVANT que je ne rejoue --
+        # sert à mesurer si MON dernier coup a perdu du terrain
+        # (MISSED_OPPORTUNITY). Mis à jour à la fin de chaque analyse
+        # complète pour mon tour.
+        self._prev_my_eval_cp = None
+        # Éval légère (une seule ligne, profondeur modeste) prise pendant
+        # le tour de l'ADVERSAIRE (voir _track_opponent_eval) -- sert à
+        # mesurer l'ampleur d'un éventuel blunder adverse une fois que
+        # c'est de nouveau mon tour. Point de vue : camp adverse (celui au
+        # trait au moment de la mesure). Stocké avec le numéro de séquence
+        # de la position mesurée (voir _position_seq) -- jamais utilisé
+        # seul, uniquement via self._opponent_turn_eval (tuple).
+        self._opponent_turn_eval = None  # (position_seq, cp) | None
+        # Thème détecté pour la DERNIÈRE position -- calculé UNE SEULE fois
+        # par position (voir theme_detector.py : "même thème, 3
+        # philosophies différentes", pas 3 détections indépendantes) et
+        # réutilisé par les 3 requêtes de profil qui arrivent pour cette
+        # même position.
+        self._theme_cache_key = None    # fen
+        self._theme_cache_value = None  # theme_detector.ThemeResult
+
+    def _track_opponent_eval(self, fen, board, position_seq):
+        """
+        Appelé quand c'est le tour de l'ADVERSAIRE (voir handle_single_profile,
+        branche "skip") : une évaluation LÉGÈRE (1 seule ligne, profondeur
+        modeste -- pas les 4-5 candidats complets, pas la peine ici) pour
+        pouvoir mesurer, une fois que c'est de nouveau mon tour, si son
+        coup a changé l'éval de façon significative (BLUNDER, voir
+        theme_detector.py). Best-effort : une erreur ici ne doit jamais
+        bloquer l'affichage du message "au tour de l'adversaire".
+
+        `position_seq` : capturé au moment de l'appel (voir _position_seq),
+        pour que le consommateur (_update_eval_tracking_and_theme) puisse
+        vérifier que ce résultat correspond bien à la position IMMÉDIATEMENT
+        précédente, et pas à une mesure arrivée en retard sur une position
+        déjà dépassée -- voir le commentaire sur _opponent_turn_eval dans
+        __init__.
+        """
+        try:
+            with self.engine_lock:
+                result, _ = self.engine.analyze_candidates(fen, multipv=1, depth=12)
+            if result.get("candidates"):
+                self._opponent_turn_eval = (position_seq, result["candidates"][0]["cp"])
+        except Exception:
+            pass  # cosmétique (juste pour la narration) -- jamais bloquant
+
+    def _update_eval_tracking_and_theme(self, fen, board, candidates, current_seq):
+        """
+        Appelé UNE SEULE fois par nouvelle position où c'est mon tour (sur
+        cache miss de _candidates_cache, voir _run_candidates ci-dessous) :
+        calcule le thème partagé de cette position (voir theme_detector.py
+        -- un seul thème, réutilisé par les 3 profils) à partir de la
+        mémoire d'éval, puis avance cette mémoire pour le prochain cycle.
+        Best-effort : ne doit jamais empêcher l'affichage des flèches si
+        ça échoue pour une raison quelconque.
+
+        `current_seq` : numéro de séquence de CETTE position (voir
+        _position_seq) -- sert à vérifier que _opponent_turn_eval
+        correspond bien à la position IMMÉDIATEMENT précédente (seq - 1)
+        avant de l'utiliser. Le suivi tournant en tâche de fond (voir
+        _track_opponent_eval), un résultat en retard pourrait sinon être
+        associé par erreur à la mauvaise transition de position (ex: coups
+        joués très vite, ou moteur occupé sur une analyse lourde) --
+        faussant silencieusement la détection de blunder. Si périmé, on
+        l'ignore simplement (swing_cp reste None, pas de BLUNDER détecté
+        pour ce coup-ci, plutôt qu'une détection basée sur de mauvaises
+        données).
+        """
+        try:
+            if not candidates:
+                return
+            current_eval = candidates[0]["cp"]  # point de vue de mon camp
+
+            opponent_eval_cp = None
+            stored = self._opponent_turn_eval
+            if stored is not None:
+                stored_seq, stored_cp = stored
+                if stored_seq == current_seq - 1:
+                    opponent_eval_cp = stored_cp
+                # sinon : périmé (arrivé en retard ou plusieurs coups en
+                # retard) -- on l'ignore silencieusement.
+
+            swing_cp = None
+            if opponent_eval_cp is not None:
+                # opponent_eval_cp est du point de vue de l'adversaire
+                # (c'était son tour au moment de la mesure) -> on le
+                # convertit de mon point de vue en le négant, puis on
+                # compare à l'éval actuelle.
+                swing_cp = current_eval - (-opponent_eval_cp)
+
+            my_move_quality_cp = None
+            if opponent_eval_cp is not None and self._prev_my_eval_cp is not None:
+                # Écart entre mon éval AVANT de jouer (prev_my_eval_cp) et
+                # l'éval juste après mon coup, avant que l'adversaire ne
+                # réponde (opponent_eval_cp, reconverti de mon point de
+                # vue) -- mesure la qualité de MON dernier coup réellement
+                # joué (pas forcément celui suggéré par un profil).
+                my_move_quality_cp = (-opponent_eval_cp) - self._prev_my_eval_cp
+
+            theme_result = theme_detector.detect_theme(
+                board, candidates, swing_cp=swing_cp, my_move_quality_cp=my_move_quality_cp,
+            )
+            # Valeur écrite AVANT la clé (pas l'inverse) : si un autre thread
+            # lit ce cache pile entre les 2 lignes, il verra soit l'ancienne
+            # paire clé/valeur cohérente, soit la nouvelle -- jamais une
+            # clé qui pointe déjà vers la nouvelle position alors que la
+            # valeur est encore l'ancienne (ce qui aurait pu faire utiliser
+            # le mauvais thème pour la mauvaise position).
+            self._theme_cache_value = theme_result
+            self._theme_cache_key = fen
+
+            # Avance la mémoire pour le prochain cycle (mon prochain tour).
+            self._prev_my_eval_cp = current_eval
+            self._opponent_turn_eval = None
+        except Exception as e:
+            print(f"⚠ Détection de thème indisponible pour ce coup : {e}")
 
     def set_my_side(self, side):
         """side: 'w' ou 'b'."""
@@ -306,19 +453,33 @@ class BridgeState:
             return {"error": f"FEN invalide reçu du navigateur : {e}", "profile": profile_id}
 
         with self.lock:
-            is_new_position = fen != self.last_fen
-            self.last_fen = fen
+            is_new_position = fen != self._last_profile_fen
+            self._last_profile_fen = fen
+            self.last_fen = fen  # toujours mis à jour aussi (péremption, voir plus bas)
             my_side = self.my_side
             elo_tier_id = self.elo_tier_id
+            if is_new_position:
+                self._position_seq += 1
+            current_seq = self._position_seq
 
         if is_new_position:
             self._cancel_current_analysis_if_any()
 
         side_to_move = "w" if board.turn else "b"
         if side_to_move != my_side:
-            if is_new_position and self.on_update:
-                camp = "Blancs" if my_side == "w" else "Noirs"
-                self.on_update(None, f"Au tour de l'adversaire (tu joues les {camp}).")
+            if is_new_position:
+                if self.on_update:
+                    camp = "Blancs" if my_side == "w" else "Noirs"
+                    self.on_update(None, f"Au tour de l'adversaire (tu joues les {camp}).")
+                # Suivi léger de l'éval pendant le tour adverse -- voir
+                # theme_detector.py (BLUNDER). Une seule fois par position
+                # (les 3 requêtes de profil arrivent toutes ici pour LA
+                # MÊME position adverse) -- déclenché en tâche de fond pour
+                # ne pas retarder la réponse HTTP (aucune flèche à
+                # afficher de toute façon tant que c'est son tour).
+                threading.Thread(
+                    target=self._track_opponent_eval, args=(fen, board, current_seq), daemon=True,
+                ).start()
             return {"skip": True, "profile": profile_id}
 
         if board.is_game_over():
@@ -355,8 +516,9 @@ class BridgeState:
                     )
                     if book_candidates:
                         result = {"game_over": False, "candidates": book_candidates}
+                        self._candidates_cache_value = result  # valeur avant clé, même raison que le cache de thème plus haut
                         self._candidates_cache_key = cache_key
-                        self._candidates_cache_value = result
+                        self._update_eval_tracking_and_theme(fen, board, book_candidates, current_seq)
                         return result
 
                 # 2. Hors théorie (ou pas de livre) -> Stockfish comme avant.
@@ -383,8 +545,9 @@ class BridgeState:
                     result, brd = self.engine.analyze_candidates(
                         fen, multipv=tier.multipv, depth=min(tier.random_depth(), 14), safe_mode=True,
                     )
+                self._candidates_cache_value = result  # valeur avant clé, même raison que le cache de thème plus haut
                 self._candidates_cache_key = cache_key
-                self._candidates_cache_value = result
+                self._update_eval_tracking_and_theme(fen, board, result["candidates"], current_seq)
                 return result
 
             try:
@@ -419,16 +582,23 @@ class BridgeState:
             "pv_san": chosen["pv_san"],
         }
 
-        # Explication en langage clair uniquement pour le dernier profil de
-        # la boucle (voir chess_coach_bridge.user.js, PROFILE_IDS[-1]) --
-        # pas la peine de la recalculer 4x pour la même position.
-        if profile_id == human_profile.PROFILE_IDS[-1]:
-            move_obj = chess.Move.from_uci(chosen["move_uci"])
-            if self.explain_mode == "api":
-                explanation = explain_move_via_api(fen, chosen["move_san"], chosen["pv_san"], chosen["score"])
-            else:
-                explanation = explain_move_local(board, move_obj, chosen["pv_san"])
-            entry["explanation"] = explanation
+        # Narration : thème partagé (calculé une seule fois par position,
+        # voir _update_eval_tracking_and_theme) + justification propre au
+        # coup de CE profil (voir why_detector.py) + gabarit selon la
+        # personnalité du profil (voir narration.py). Chaque profil a donc
+        # sa propre narration -- contrairement à l'ancienne "explication"
+        # calculée une seule fois pour le dernier profil de la boucle.
+        try:
+            theme_result = (
+                self._theme_cache_value if self._theme_cache_key == fen
+                else theme_detector.detect_theme(board, result["candidates"])
+            )
+            why_motif, why_detail = why_detector.detect_why(board, chosen)
+            entry["narration"] = narration.generate_narration(
+                theme_result, profile_id, chosen, why_motif, why_detail, board,
+            )
+        except Exception as e:
+            print(f"⚠ Narration indisponible pour ce coup ({profile_id}) : {e}")
 
         if self.on_profile_update:
             self.on_profile_update(profile_id, dict(entry))

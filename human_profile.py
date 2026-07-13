@@ -206,6 +206,11 @@ def _game_phase(board):
     return "endgame"
 
 
+# Alias public : utilisé aussi par theme_detector.py (détection du thème
+# principal de la position, partagée entre les 3 profils).
+game_phase = _game_phase
+
+
 def _eligible_candidates(candidates, tier: EloTier):
     """
     Coups dont la perte d'éval reste dans la tolérance du niveau. Filet de

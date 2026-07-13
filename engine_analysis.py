@@ -107,9 +107,11 @@ class ChessCoachEngine:
             tmp_board = board.copy()
             tmp_board.push(move)
             pv_san = []
+            pv_uci = []
             san_board = board.copy()
             for mv in pv[:6]:
                 pv_san.append(san_board.san(mv))
+                pv_uci.append(mv.uci())
                 san_board.push(mv)
             piece = board.piece_at(move.from_square)
             piece_type = piece.piece_type if piece else None
@@ -164,6 +166,7 @@ class ChessCoachEngine:
                 "moving_piece_value": moving_piece_value,
                 "captured_piece_value": captured_piece_value,  # None si pas une capture
                 "pv_san": pv_san,
+                "pv_uci": pv_uci,
             })
 
         return {"game_over": False, "candidates": candidates}, board
