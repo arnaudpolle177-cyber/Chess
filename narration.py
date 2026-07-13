@@ -394,24 +394,25 @@ CAUTION_TEXT_FR = {
 }
 
 
-def _scenario_phrase(chosen, profile_id, board, engine, compute_eval=True):
+def compute_scenario_facts(chosen, board, engine, compute_eval=True):
     """
-    Remplace l'ancienne _suite_phrase() (qui affichait juste la liste des
-    coups de la PV, ex: "Rc8 → Nd2 → Nxd3") : transforme la même ligne
-    calculée par le moteur en un scénario en langage humain (voir
-    variation_narrator.py -- motifs structurels + trajectoire d'éval).
+    Partie COÛTEUSE du scénario (voir variation_narrator.analyze_variation :
+    jusqu'à 1 + MAX_PLY évaluations moteur légères) -- volontairement
+    séparée du rendu texte : ces faits ne dépendent QUE du coup joué et de
+    sa PV, jamais du profil qui parle. On peut donc les calculer une seule
+    fois et les partager entre 2 profils qui choisissent le même coup sur la
+    même position (voir web_bridge.py, _scenario_cache) au lieu de refaire
+    les évals 3 fois.
 
-    board : position AVANT le coup choisi (chosen) -- même `board` que
-    reçu par generate_narration. On joue `chosen` sur une copie pour
-    obtenir la position de départ de la ligne à analyser (pv_uci[0] EST
-    déjà chosen, on l'exclut : déjà visible via la flèche affichée, pas
-    la peine de le rejouer une 2e fois dans le texte).
+    board : position AVANT le coup choisi (chosen) -- même `board` que reçu
+    par generate_narration. On joue `chosen` sur une copie pour obtenir la
+    position de départ de la ligne à analyser (pv_uci[0] EST déjà chosen, on
+    l'exclut : déjà visible via la flèche affichée).
     engine : instance ChessCoachEngine, nécessaire pour la trajectoire
-    d'éval (voir variation_narrator.EVAL_DEPTH) -- si None, motifs
-    structurels seuls (aucun appel moteur).
+    d'éval -- si None, motifs structurels seuls (aucun appel moteur).
 
-    None si la ligne est trop courte pour dire quoi que ce soit d'utile
-    (ex: coup de livre, pas de PV calculée au-delà du coup lui-même).
+    Retourne un VariationFacts, ou None si la ligne est trop courte pour en
+    tirer quoi que ce soit (ex: coup de livre sans PV calculée au-delà).
     """
     pv_uci = chosen.get("pv_uci") or []
     follow_up_uci = pv_uci[1:]
@@ -427,10 +428,32 @@ def _scenario_phrase(chosen, profile_id, board, engine, compute_eval=True):
         board_after_chosen.push(chosen_move)
     except AssertionError:
         return None  # coup illégal sur cette position (désync improbable mais possible) -- pas de scénario plutôt qu'un crash
-    facts = variation_narrator.analyze_variation(
+    return variation_narrator.analyze_variation(
         engine, board_after_chosen, follow_up_moves, compute_eval=compute_eval and engine is not None,
     )
+
+
+def render_scenario(facts, profile_id):
+    """
+    Partie CHEAP du scénario : choisit la formulation selon le profil qui
+    parle (voir variation_narrator.narrate_variation) -- aucun appel moteur,
+    juste un lookup de gabarit. None si aucun fait de scénario (voir
+    compute_scenario_facts).
+    """
+    if facts is None:
+        return None
     return variation_narrator.narrate_variation(facts, profile_id)
+
+
+def _scenario_phrase(chosen, profile_id, board, engine, compute_eval=True):
+    """
+    Scénario complet (faits coûteux + rendu texte) en un appel -- conservé
+    pour l'usage inline de generate_narration (include_scenario=True). Le
+    chemin décomposé (compute_scenario_facts + render_scenario) est préféré
+    par web_bridge.py pour pouvoir mutualiser/décorréler le coût moteur.
+    """
+    facts = compute_scenario_facts(chosen, board, engine, compute_eval)
+    return render_scenario(facts, profile_id)
 
 
 def _opening_identity_body(opening_match):
@@ -458,7 +481,8 @@ def _opening_identity_body(opening_match):
 
 
 def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, board,
-                        move_history=None, opening_book=None, engine=None, compute_scenario_eval=True):
+                        move_history=None, opening_book=None, engine=None, compute_scenario_eval=True,
+                        include_scenario=True):
     """
     Retourne un dict prêt à afficher :
     {"theme_label", "theme_icon", "label1", "text1", "label2", "text2",
@@ -485,6 +509,12 @@ def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, 
     compute_scenario_eval : coupe-circuit pour désactiver l'éval de la
     ligne sans toucher au reste (ex: test de performance) -- True par
     défaut.
+    include_scenario : si False, ne calcule PAS le "suite" ici (chemin
+    rapide) -- la partie coûteuse du scénario (jusqu'à 1 + MAX_PLY évals
+    moteur) est alors laissée à l'appelant, qui peut la mutualiser entre
+    profils et/ou la différer pour afficher la flèche sans attendre (voir
+    web_bridge.py, compute_scenario_facts / _scenario_cache). True par
+    défaut pour ne rien changer aux appels existants (tests, autres modes).
 
     Tous ces paramètres sont optionnels (défaut None/True) pour ne rien
     casser des autres appels existants (thèmes autres que OPENING, tests).
@@ -499,9 +529,10 @@ def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, 
                 "theme_icon": THEME_ICONS.get(theme, "info"),
                 **_opening_identity_body(opening_match),
             }
-            suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval)
-            if suite:
-                result["suite"] = suite
+            if include_scenario:
+                suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval)
+                if suite:
+                    result["suite"] = suite
             if theme_result.caution:
                 caution_text = CAUTION_TEXT_FR.get(theme_result.caution)
                 if caution_text:
@@ -517,9 +548,10 @@ def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, 
         "theme_icon": THEME_ICONS.get(theme, "info"),
         **body,
     }
-    suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval)
-    if suite:
-        result["suite"] = suite
+    if include_scenario:
+        suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval)
+        if suite:
+            result["suite"] = suite
     if theme_result.caution:
         caution_text = CAUTION_TEXT_FR.get(theme_result.caution)
         if caution_text:
