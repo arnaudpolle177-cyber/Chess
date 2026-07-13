@@ -29,7 +29,8 @@ import variation_narrator
 
 from theme_detector import (
     BLUNDER, TACTICAL, ATTACK, DEFENSE, MISSED_OPPORTUNITY,
-    ENDGAME, OPENING, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE, PIECE_ACTIVITY_GAP, EQUAL_POSITION,
+    ENDGAME, OPENING, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE, PIECE_ACTIVITY_GAP,
+    KING_SAFETY_WARNING, EQUAL_POSITION,
 )
 
 PIECE_NAMES_FR = {
@@ -49,6 +50,7 @@ THEME_ICONS = {
     STRATEGIC_ADVANTAGE: "trend",
     PAWN_STRUCTURE: "target",
     PIECE_ACTIVITY_GAP: "move",
+    KING_SAFETY_WARNING: "shield",
     EQUAL_POSITION: "scale",
 }
 
@@ -63,6 +65,7 @@ THEME_LABELS_FR = {
     STRATEGIC_ADVANTAGE: "Avantage stratégique",
     PAWN_STRUCTURE: "Faiblesse à cibler",
     PIECE_ACTIVITY_GAP: "Avantage de mobilité",
+    KING_SAFETY_WARNING: "Sécurité du roi",
     EQUAL_POSITION: "Position équilibrée",
 }
 
@@ -388,6 +391,33 @@ def _piece_activity_classical_1(t, c, wm, wd, board):
             "label2": "Plan", "text2": "Continue d'améliorer la coordination -- l'avantage de mobilité précède souvent l'avantage matériel."}
 
 
+def _king_safety_warning_popular_1(t, c, wm, wd, board):
+    sq = _sq(t.king_safety_warning_square)
+    if t.king_safety_warning_is_mine:
+        return {"label1": "Prudence", "text1": f"Ton roi en {sq} commence à manquer de protection -- ce n'est pas encore dangereux, mais ça mérite attention.",
+                "label2": "Plan", "text2": "Pense à mettre ton roi en sécurité avant que l'adversaire puisse vraiment en profiter."}
+    return {"label1": "Occasion qui se prépare", "text1": f"Le roi adverse en {sq} commence à manquer de protection.",
+            "label2": "Plan", "text2": "Pas encore critique, mais garde cette faiblesse en tête pour plus tard."}
+
+
+def _king_safety_warning_tactical_1(t, c, wm, wd, board):
+    sq = _sq(t.king_safety_warning_square)
+    if t.king_safety_warning_is_mine:
+        return {"label1": "Signal d'alerte", "text1": f"Ton roi en {sq} reste exposé -- de quoi devenir un vrai problème si l'adversaire s'organise.",
+                "label2": "Suite", "text2": "Trouve un moyen de sécuriser ton roi avant de continuer tes plans offensifs."}
+    return {"label1": "Cible en préparation", "text1": f"Le roi adverse en {sq} n'est pas encore attaqué, mais la porte commence à s'ouvrir.",
+            "label2": "Suite", "text2": "Prépare tes pièces pour être prêt à frapper dès que l'occasion se précise."}
+
+
+def _king_safety_warning_classical_1(t, c, wm, wd, board):
+    sq = _sq(t.king_safety_warning_square)
+    if t.king_safety_warning_is_mine:
+        return {"label1": "Principe", "text1": f"La sécurité du roi passe avant tout le reste -- ton roi en {sq} n'est pas encore roqué et le centre s'ouvre.",
+                "label2": "Plan", "text2": "Termine ta mise en sécurité avant de te lancer dans un plan plus ambitieux."}
+    return {"label1": "Principe", "text1": f"Le roi adverse en {sq} tarde à se mettre en sécurité, dans un centre qui s'ouvre.",
+            "label2": "Plan", "text2": "Continue ton développement -- cette faiblesse risque de compter plus tard dans la partie."}
+
+
 def _equal_popular_1(t, c, wm, wd, board):
     return {"label1": "Position équilibrée", "text1": "Rien ne se dégage clairement pour l'instant, la partie reste ouverte.",
             "label2": "Approche", "text2": "Choisis le plan le plus simple à exécuter, pas le plus ambitieux."}
@@ -453,6 +483,11 @@ TEMPLATES = {
         "popular": [_piece_activity_popular_1],
         "creative": [_piece_activity_tactical_1],
         "classical": [_piece_activity_classical_1],
+    },
+    KING_SAFETY_WARNING: {
+        "popular": [_king_safety_warning_popular_1],
+        "creative": [_king_safety_warning_tactical_1],
+        "classical": [_king_safety_warning_classical_1],
     },
     EQUAL_POSITION: {
         "popular": [_equal_popular_1, _equal_popular_2],

@@ -34,11 +34,13 @@ OPENING = "OPENING"
 STRATEGIC_ADVANTAGE = "STRATEGIC_ADVANTAGE"
 PAWN_STRUCTURE = "PAWN_STRUCTURE"
 PIECE_ACTIVITY_GAP = "PIECE_ACTIVITY_GAP"
+KING_SAFETY_WARNING = "KING_SAFETY_WARNING"
 EQUAL_POSITION = "EQUAL_POSITION"
 
 PRIORITY_ORDER = (
     BLUNDER, TACTICAL, ATTACK, DEFENSE, MISSED_OPPORTUNITY,
-    ENDGAME, OPENING, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE, PIECE_ACTIVITY_GAP, EQUAL_POSITION,
+    ENDGAME, OPENING, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE, PIECE_ACTIVITY_GAP,
+    KING_SAFETY_WARNING, EQUAL_POSITION,
 )
 
 # Seuils (centipawns), ajustables si l'usage réel montre qu'ils déclenchent
@@ -62,6 +64,15 @@ EQUAL_EVAL_CP = 50               # position jugée équilibrée en dessous de ce
 # conversation) entre la mobilité pondérée des 2 camps, pour déclencher
 # même sans avantage matériel/tactique.
 ACTIVITY_GAP_RATIO = 1.4  # le camp actif contrôle au moins 40% de cases pondérées en plus que l'adversaire
+# KING_SAFETY_WARNING : signal PRÉVENTIF, testé seulement si ATTACK/DEFENSE
+# n'a pas matché (sinon redondance directe, voir la conversation) --
+# combine 2 conditions pour éviter de recréer un simple ATTACK/DEFENSE
+# affaibli : le roi doit être structurellement pas encore mis en sécurité
+# (voir _king_not_castled_yet) ET son king_safety_score doit déjà montrer
+# un léger déséquilibre (entre 0 et le seuil ATTACK_DEFENSE_EVAL_CP actuel,
+# jamais au-dessus -- sinon ce serait déjà ATTACK/DEFENSE).
+KING_SAFETY_WARNING_MIN_ATTACKED_DELTA = 1  # au moins 1 case de plus attaquée que défendue autour du roi
+KING_SAFETY_WARNING_MAX_MOVE_NUMBER = 15    # au-delà, le roque manqué n'est plus un signal fiable (partie déjà engagée dans un plan différent)
 
 
 @dataclass
@@ -74,7 +85,6 @@ class ThemeResult:
     king_square: Optional[int] = None    # roi concerné (ATTACK -> roi adverse, DEFENSE -> mon roi)
     phase: str = "middlegame"
     passed_pawn_square: Optional[int] = None  # un vrai pion passé de mon camp, si un existe (voir ENDGAME)
-    has_bishop_pair: bool = False              # j'ai mes 2 fous ET l'adversaire non (voir STRATEGIC_ADVANTAGE)
     opponent_better_move_san: Optional[str] = None  # ce que l'adversaire aurait pu jouer de plus incisif (voir MISSED_OPPORTUNITY)
     pawn_weakness_square: Optional[int] = None  # pion adverse doublé/isolé à cibler (voir PAWN_STRUCTURE)
     pawn_weakness_kind: Optional[str] = None    # "doubled" ou "isolated" (voir PAWN_STRUCTURE)
@@ -87,6 +97,8 @@ class ThemeResult:
     # "knights_closed" / "rook_vs_minors" / None (pas de déséquilibre notable).
     material_imbalance_kind: Optional[str] = None
     activity_ratio: Optional[float] = None  # mobilité pondérée (mien / adverse), voir PIECE_ACTIVITY_GAP
+    king_safety_warning_square: Optional[int] = None  # roi concerné par l'avertissement préventif (voir KING_SAFETY_WARNING)
+    king_safety_warning_is_mine: bool = True  # True = mon roi (à protéger), False = roi adverse (à cibler bientôt)
     caution: Optional[str] = None  # avertissement transversal (ex: "stalemate_risk"), indépendant du thème principal
 
 
@@ -325,6 +337,78 @@ def _find_pawn_weakness(board, color):
     return None, None
 
 
+def _king_not_castled_yet(board, color):
+    """
+    Vrai si le roi de `color` est encore sur sa case de départ (e1/e8) --
+    signal simple et bon marché de "n'a pas encore roqué", pas une preuve
+    absolue de danger en soi (un roi qui reste au centre volontairement,
+    dans un centre fermé, n'est pas en danger -- voir _is_center_open
+    ci-dessous, combiné dans _king_safety_warning).
+    """
+    start_square = chess.E1 if color == chess.WHITE else chess.E8
+    king_sq = board.king(color)
+    return king_sq == start_square
+
+
+def _is_center_open(board):
+    """
+    Signal simple de centre ouvert/semi-ouvert : au moins une des colonnes
+    centrales (d, e) n'a plus de pion d'un des deux camps -- pas une vraie
+    analyse de chaînes de pions, juste suffisant pour distinguer "un roi
+    non roqué au centre ouvert est en danger" de "un roi non roqué dans un
+    centre totalement verrouillé ne l'est pas" (voir la conversation).
+    """
+    for file in (chess.square_file(chess.D1), chess.square_file(chess.E1)):
+        white_pawn = any(
+            chess.square_file(sq) == file for sq in board.pieces(chess.PAWN, chess.WHITE)
+        )
+        black_pawn = any(
+            chess.square_file(sq) == file for sq in board.pieces(chess.PAWN, chess.BLACK)
+        )
+        if not white_pawn or not black_pawn:
+            return True
+    return False
+
+
+def _king_safety_warning(board, color, eval_cp_for_color, phase):
+    """
+    Signal PRÉVENTIF pour `color` (voir la conversation, KING_SAFETY_WARNING)
+    -- combine 4 conditions, toutes nécessaires, pour rester spécifique et
+    éviter les faux positifs (roi volontairement resté au centre dans une
+    position fermée, ou milieu de partie déjà avancé où le roque n'est
+    plus le sujet) :
+    1. Le roi n'a pas encore roqué (toujours sur sa case de départ).
+    2. On est encore en ouverture/tout début de milieu de partie (phase
+       != "endgame", et nombre de coups joués sous un plafond -- voir
+       KING_SAFETY_WARNING_MAX_MOVE_NUMBER).
+    3. Le centre est au moins partiellement ouvert (sinon le roi non
+       roqué n'est en réalité pas en danger).
+    4. Un léger déséquilibre de king_safety_score existe déjà ET l'éval
+       reste dans une bande MODÉRÉE (0 à ATTACK_DEFENSE_EVAL_CP, jamais
+       au-dessus -- sinon ATTACK/DEFENSE aurait déjà matché avant ce point
+       de la priorité ; en dessous de 0 dans le mauvais sens, ce n'est pas
+       non plus le sujet -- voir eval_cp_for_color).
+
+    eval_cp_for_color : eval_cp DÉJÀ orienté du point de vue de `color`
+    (positif = favorable à `color`) -- l'appelant doit passer eval_cp pour
+    my_side et -eval_cp pour l'adversaire (voir detect_theme).
+
+    Retourne True si l'avertissement doit se déclencher pour `color`.
+    """
+    if phase == "endgame":
+        return False
+    if board.fullmove_number > KING_SAFETY_WARNING_MAX_MOVE_NUMBER:
+        return False
+    if not (0 <= eval_cp_for_color < ATTACK_DEFENSE_EVAL_CP):
+        return False
+    if not _king_not_castled_yet(board, color):
+        return False
+    if not _is_center_open(board):
+        return False
+    attacked, defended = _king_safety_score(board, color)
+    return (attacked - defended) >= KING_SAFETY_WARNING_MIN_ATTACKED_DELTA
+
+
 def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None):
     """
     board : position ACTUELLE (chess.Board), au trait de "mon" camp (my_side).
@@ -438,6 +522,26 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
         all_candidates.append(ThemeCandidate(PIECE_ACTIVITY_GAP, ratio, {"activity_ratio": ratio}))
         return ThemeResult(PIECE_ACTIVITY_GAP, eval_cp, phase=phase, activity_ratio=ratio, caution=caution)
 
-    # 9. Filet de sécurité : position jugée équilibrée.
+    # 9. KING_SAFETY_WARNING -- signal PRÉVENTIF, testé seulement ici (donc
+    #    APRÈS ATTACK/DEFENSE au point 3, qui a priorité si la situation
+    #    est déjà critique -- voir la conversation, évite la redondance).
+    #    Mon roi d'abord (plus directement actionnable par l'utilisateur),
+    #    puis le roi adverse (occasion à repérer, moins urgent).
+    if _king_safety_warning(board, my_side, eval_cp, phase):
+        my_king_sq = board.king(my_side)
+        all_candidates.append(ThemeCandidate(KING_SAFETY_WARNING, 1.0, {
+            "king_safety_warning_square": my_king_sq, "king_safety_warning_is_mine": True,
+        }))
+        return ThemeResult(KING_SAFETY_WARNING, eval_cp, phase=phase,
+                            king_safety_warning_square=my_king_sq, king_safety_warning_is_mine=True, caution=caution)
+    if _king_safety_warning(board, not my_side, -eval_cp, phase):
+        opp_king_sq = board.king(not my_side)
+        all_candidates.append(ThemeCandidate(KING_SAFETY_WARNING, 1.0, {
+            "king_safety_warning_square": opp_king_sq, "king_safety_warning_is_mine": False,
+        }))
+        return ThemeResult(KING_SAFETY_WARNING, eval_cp, phase=phase,
+                            king_safety_warning_square=opp_king_sq, king_safety_warning_is_mine=False, caution=caution)
+
+    # 10. Filet de sécurité : position jugée équilibrée.
     all_candidates.append(ThemeCandidate(EQUAL_POSITION, 0.0, {}))
     return ThemeResult(EQUAL_POSITION, eval_cp, phase=phase, caution=caution)
