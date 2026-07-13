@@ -435,18 +435,25 @@ def _scenario_phrase(chosen, profile_id, board, engine, compute_eval=True):
 
 def _opening_identity_body(opening_match):
     """
-    Construit le corps {"label1", "text1", "label2", "text2"} à partir d'un
-    match de la base ECO locale (voir opening_identity.py) -- remplace
-    ENTIÈREMENT les gabarits génériques _opening_xxx_1 pour cette position,
-    quel que soit le profil qui parle (le nom + les points forts/faibles
-    d'une ouverture sont des faits, pas une question de style). Le texte
-    pros_cons est rédigé à la main (voir eco_openings.json), jamais généré.
+    Construit le corps {"label1", "text1"} à partir d'un match de la base
+    ECO locale (voir opening_identity.py) -- remplace ENTIÈREMENT les
+    gabarits génériques _opening_xxx_1 pour cette position, quel que soit
+    le profil qui parle (le nom + les points forts/faibles d'une ouverture
+    sont des faits, pas une question de style). Le texte pros_cons est
+    rédigé à la main (voir eco_openings.json), jamais généré.
+
+    PAS de label2/text2 ici (contrairement aux autres gabarits) : le champ
+    "suite" (scénario, voir _scenario_phrase/variation_narrator.py) couvre
+    déjà "que faire ensuite" pour ce coup précis -- un label2 générique du
+    style "Suite logique" ferait doublon avec lui dans l'UI (voir
+    webview_ui.py, renderDetail) chaque fois qu'un scénario est disponible.
+    Si aucun scénario n'est disponible pour ce coup (ex: coup de livre sans
+    ligne calculée au-delà), le bloc affiche alors juste le nom + pros_cons,
+    sans texte de remplissage creux à la place.
     """
     return {
         "label1": f"{opening_match['name']} ({opening_match['eco']})",
         "text1": opening_match["pros_cons"],
-        "label2": "Suite logique",
-        "text2": "Continue de suivre les principes de cette ouverture tant que rien de forcé n'apparaît.",
     }
 
 
