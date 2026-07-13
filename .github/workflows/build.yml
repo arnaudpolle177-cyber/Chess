@@ -33,50 +33,21 @@ jobs:
       - name: Compiler CoachEchecs.exe
         run: pyinstaller coach.spec
 
-      - name: Télécharger Berserk (dernière version Windows)
+      - name: Télécharger Stockfish (dernière version Windows)
         shell: bash
         run: |
           set -e
-          # Berserk plutôt que Stockfish : téléchargé automatiquement à
-          # chaque build (comme on le faisait avant pour Stockfish), pour
-          # éviter d'avoir à committer un gros .exe dans le dépôt (GitHub
-          # bloque l'upload web au-delà de 25 Mo).
-          api_url="https://api.github.com/repos/jhonnold/berserk/releases/latest"
-          api_response=$(curl -s "$api_url")
-
-          echo "--- Fichiers .exe trouvés dans la dernière release Berserk ---"
-          echo "$api_response" | grep -o '"browser_download_url": *"[^"]*\.exe"' || echo "(aucun trouvé -- voir la réponse brute ci-dessous)"
-          echo "----------------------------------------------------------"
-
-          # Paliers de repli, du plus rapide (avx2, CPU 2013+) au plus
-          # compatible (baseline, tout CPU 64-bit) -- au cas où le nom
-          # exact des fichiers change d'une release à l'autre. S'arrête au
-          # premier qui matche.
-          asset_url=""
-          for pattern in "avx2.*\.exe" "ssse3.*\.exe" "x86-64.*\.exe" "\.exe\"$"; do
-            asset_url=$(echo "$api_response" \
-              | grep "browser_download_url.*${pattern}" \
-              | grep -v "pext" \
-              | head -n1 \
-              | grep -o 'https://[^"]*\.exe')
-            if [ -n "$asset_url" ]; then
-              echo "Variante retenue (motif '$pattern') : $asset_url"
-              break
-            fi
-          done
-
-          if [ -z "$asset_url" ]; then
-            echo "❌ Impossible de trouver un binaire .exe dans la dernière release Berserk."
-            echo "   Réponse brute de l'API (pour diagnostiquer) :"
-            echo "$api_response" | head -c 2000
-            echo ""
-            echo "   Vérifie manuellement : https://github.com/jhonnold/berserk/releases"
-            exit 1
-          fi
-
+          api_url="https://api.github.com/repos/official-stockfish/Stockfish/releases/latest"
+          asset_url=$(curl -s "$api_url" \
+            | grep "browser_download_url.*windows-x86-64-avx2.zip" \
+            | head -n1 \
+            | cut -d '"' -f4)
           echo "Téléchargement: $asset_url"
-          curl -L -o dist/stockfish.exe "$asset_url"
-          echo "✅ Berserk téléchargé ($(du -h dist/stockfish.exe | cut -f1))"
+          curl -L -o stockfish.zip "$asset_url"
+          mkdir stockfish_extracted
+          unzip -q stockfish.zip -d stockfish_extracted
+          # Le zip officiel contient un dossier stockfish/ avec l'exe dedans
+          find stockfish_extracted -iname "stockfish*.exe" -exec cp {} dist/stockfish.exe \;
 
       - name: Préparer le package final
         shell: bash
@@ -94,6 +65,16 @@ jobs:
             echo "Livre d'ouvertures inclus dans le package."
           else
             echo "Pas de opening_book.bin trouvé à la racine du dépôt -- package sans livre d'ouvertures."
+          fi
+          # Base ECO locale (nom d'ouverture + points forts/faibles, voir
+          # opening_identity.py) : même principe que opening_book.bin
+          # ci-dessus -- optionnelle, embarquée si présente à la racine du
+          # dépôt, sinon le coach retombe sur les gabarits génériques.
+          if [ -f eco_openings.json ]; then
+            cp eco_openings.json package/CoachEchecs/
+            echo "Base d'ouvertures (ECO) incluse dans le package."
+          else
+            echo "Pas de eco_openings.json trouvé à la racine du dépôt -- package sans identification d'ouverture par nom."
           fi
           cd package
           7z a -r CoachEchecs-windows.zip CoachEchecs
