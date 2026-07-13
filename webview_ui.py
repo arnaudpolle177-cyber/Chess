@@ -305,6 +305,7 @@ _HTML = r"""
     book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
     trend: '<path d="M3 17 9 11l4 4 8-8M21 7h-6M21 7v6"/>',
     scale: '<path d="M12 3v18M3 7l4-2 4 2M3 7l-1 5a3 3 0 0 0 6 0zM15 7l4-2 4 2M15 7l-1 5a3 3 0 0 0 6 0zM7 21h10"/>',
+    target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
     info: '<path d="M12 16v-4M12 8h.01"/><circle cx="12" cy="12" r="9"/>',
   };
 

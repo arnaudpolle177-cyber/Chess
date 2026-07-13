@@ -29,7 +29,7 @@ import variation_narrator
 
 from theme_detector import (
     BLUNDER, TACTICAL, ATTACK, DEFENSE, MISSED_OPPORTUNITY,
-    ENDGAME, OPENING, STRATEGIC_ADVANTAGE, EQUAL_POSITION,
+    ENDGAME, OPENING, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE, EQUAL_POSITION,
 )
 
 PIECE_NAMES_FR = {
@@ -47,6 +47,7 @@ THEME_ICONS = {
     ENDGAME: "flag",
     OPENING: "book",
     STRATEGIC_ADVANTAGE: "trend",
+    PAWN_STRUCTURE: "target",
     EQUAL_POSITION: "scale",
 }
 
@@ -59,6 +60,7 @@ THEME_LABELS_FR = {
     ENDGAME: "Finale",
     OPENING: "Ouverture",
     STRATEGIC_ADVANTAGE: "Avantage stratégique",
+    PAWN_STRUCTURE: "Faiblesse à cibler",
     EQUAL_POSITION: "Position équilibrée",
 }
 
@@ -325,6 +327,30 @@ def _strategic_classical_1(t, c, wm, wd, board):
             "label2": "Plan", "text2": "Continue à améliorer la coordination avant de chercher à forcer quoi que ce soit."}
 
 
+_PAWN_WEAKNESS_LABEL_FR = {"doubled": "pion doublé", "isolated": "pion isolé"}
+
+
+def _pawn_structure_popular_1(t, c, wm, wd, board):
+    kind = _PAWN_WEAKNESS_LABEL_FR.get(t.pawn_weakness_kind, "faiblesse de pion")
+    sq = _sq(t.pawn_weakness_square)
+    return {"label1": "Cible", "text1": f"L'adversaire a un {kind} en {sq} -- une faiblesse qui ne va pas disparaître toute seule.",
+            "label2": "Plan", "text2": "Pas besoin de te précipiter dessus : garde-le en tête et fais peser la pression au bon moment."}
+
+
+def _pawn_structure_tactical_1(t, c, wm, wd, board):
+    kind = _PAWN_WEAKNESS_LABEL_FR.get(t.pawn_weakness_kind, "faiblesse de pion")
+    sq = _sq(t.pawn_weakness_square)
+    return {"label1": "Point faible repéré", "text1": f"Ce {kind} en {sq} est une porte d'entrée pour construire une attaque.",
+            "label2": "Suite", "text2": "Amène tes pièces vers cette case, la pression finira par payer."}
+
+
+def _pawn_structure_classical_1(t, c, wm, wd, board):
+    kind = _PAWN_WEAKNESS_LABEL_FR.get(t.pawn_weakness_kind, "faiblesse de pion")
+    sq = _sq(t.pawn_weakness_square)
+    return {"label1": "Faiblesse structurelle", "text1": f"Le {kind} adverse en {sq} est un objectif à long terme, typique du jeu positionnel.",
+            "label2": "Plan", "text2": "Améliore tes pièces en gardant cette case en ligne de mire, sans rien précipiter."}
+
+
 def _equal_popular_1(t, c, wm, wd, board):
     return {"label1": "Position équilibrée", "text1": "Rien ne se dégage clairement pour l'instant, la partie reste ouverte.",
             "label2": "Approche", "text2": "Choisis le plan le plus simple à exécuter, pas le plus ambitieux."}
@@ -380,6 +406,11 @@ TEMPLATES = {
         "popular": [_strategic_popular_1, _strategic_popular_2],
         "creative": [_strategic_tactical_1, _strategic_tactical_2],
         "classical": [_strategic_classical_1],
+    },
+    PAWN_STRUCTURE: {
+        "popular": [_pawn_structure_popular_1],
+        "creative": [_pawn_structure_tactical_1],
+        "classical": [_pawn_structure_classical_1],
     },
     EQUAL_POSITION: {
         "popular": [_equal_popular_1, _equal_popular_2],

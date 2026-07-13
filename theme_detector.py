@@ -32,11 +32,12 @@ MISSED_OPPORTUNITY = "MISSED_OPPORTUNITY"
 ENDGAME = "ENDGAME"
 OPENING = "OPENING"
 STRATEGIC_ADVANTAGE = "STRATEGIC_ADVANTAGE"
+PAWN_STRUCTURE = "PAWN_STRUCTURE"
 EQUAL_POSITION = "EQUAL_POSITION"
 
 PRIORITY_ORDER = (
     BLUNDER, TACTICAL, ATTACK, DEFENSE, MISSED_OPPORTUNITY,
-    ENDGAME, OPENING, STRATEGIC_ADVANTAGE, EQUAL_POSITION,
+    ENDGAME, OPENING, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE, EQUAL_POSITION,
 )
 
 # Seuils (centipawns), ajustables si l'usage réel montre qu'ils déclenchent
@@ -69,6 +70,8 @@ class ThemeResult:
     passed_pawn_square: Optional[int] = None  # un vrai pion passé de mon camp, si un existe (voir ENDGAME)
     has_bishop_pair: bool = False              # j'ai mes 2 fous ET l'adversaire non (voir STRATEGIC_ADVANTAGE)
     opponent_better_move_san: Optional[str] = None  # ce que l'adversaire aurait pu jouer de plus incisif (voir MISSED_OPPORTUNITY)
+    pawn_weakness_square: Optional[int] = None  # pion adverse doublé/isolé à cibler (voir PAWN_STRUCTURE)
+    pawn_weakness_kind: Optional[str] = None    # "doubled" ou "isolated" (voir PAWN_STRUCTURE)
     caution: Optional[str] = None  # avertissement transversal (ex: "stalemate_risk"), indépendant du thème principal
 
 
@@ -164,6 +167,45 @@ def _stalemate_caution(board, my_side, eval_cp, phase):
     return None
 
 
+def _find_pawn_weakness(board, color):
+    """
+    Cherche une faiblesse de structure de pions DÉJÀ PRÉSENTE chez `color`
+    sur la position actuelle -- peu importe qui l'a créée ni quand (voir
+    la conversation : détection volontairement limitée au board actuel,
+    pas au coup choisi par chaque profil, pour rester compatible avec le
+    partage de thème entre les 3 profils, voir web_bridge.py
+    _update_eval_tracking_and_theme).
+
+    2 défauts détectés, par ordre de priorité (le premier trouvé gagne,
+    parcours des colonnes de a à h pour un résultat déterministe) :
+    - "doubled"  : 2+ pions de `color` sur la même colonne.
+    - "isolated" : un pion de `color` sans AUCUN pion allié sur les
+      colonnes adjacentes, pour le soutenir durablement.
+
+    Retourne (square, kind) du pion concerné, ou (None, None) si aucune
+    des deux faiblesses n'est présente. Un calcul réel via python-chess
+    (colonnes comptées via chess.square_file), jamais une estimation.
+    """
+    pawns_by_file = {}
+    for sq in board.pieces(chess.PAWN, color):
+        pawns_by_file.setdefault(chess.square_file(sq), []).append(sq)
+
+    for file in range(8):
+        squares = pawns_by_file.get(file)
+        if squares and len(squares) >= 2:
+            return squares[0], "doubled"
+
+    for file in range(8):
+        squares = pawns_by_file.get(file)
+        if not squares:
+            continue
+        has_neighbor = any(pawns_by_file.get(f) for f in (file - 1, file + 1) if 0 <= f <= 7)
+        if not has_neighbor:
+            return squares[0], "isolated"
+
+    return None, None
+
+
 def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None):
     """
     board : position ACTUELLE (chess.Board), au trait de "mon" camp (my_side).
@@ -235,5 +277,15 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
         return ThemeResult(STRATEGIC_ADVANTAGE, eval_cp, phase=phase,
                             has_bishop_pair=_has_bishop_pair_advantage(board, my_side), caution=caution)
 
-    # 7. Filet de sécurité : position jugée équilibrée.
+    # 7. PAWN_STRUCTURE -- faiblesse de structure ADVERSE à cibler (jamais
+    #    les miennes, voir la conversation : ton offensif, "voici ce que tu
+    #    peux viser", pas "attention à ta propre structure"). Position par
+    #    ailleurs équilibrée (aucun des thèmes plus prioritaires n'a
+    #    matché) -- un plan positionnel durable plutôt qu'une urgence.
+    weakness_sq, weakness_kind = _find_pawn_weakness(board, not my_side)
+    if weakness_sq is not None:
+        return ThemeResult(PAWN_STRUCTURE, eval_cp, phase=phase,
+                            pawn_weakness_square=weakness_sq, pawn_weakness_kind=weakness_kind, caution=caution)
+
+    # 8. Filet de sécurité : position jugée équilibrée.
     return ThemeResult(EQUAL_POSITION, eval_cp, phase=phase, caution=caution)
