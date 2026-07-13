@@ -28,6 +28,7 @@ Annulation des analyses obsolètes (important) :
 import json
 import os
 import threading
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import chess
@@ -107,6 +108,17 @@ class BridgeState:
         # position de départ (voir _update_move_history ci-dessous).
         self._move_history = []
         self._move_history_board = None  # dernière position connue de l'historique (chess.Board)
+        # Historique GLISSANT des évals "à mon tour" (voir theme_detector.py,
+        # INITIATIVE_SHIFT) -- toujours du point de vue de my_side, jamais
+        # remis à zéro par position_seq (contrairement à _opponent_turn_eval,
+        # qui ne regarde qu'UN coup adverse) : cette liste couvre plusieurs
+        # de mes propres tours pour détecter une TENDANCE, pas un instantané.
+        # maxlen borne la mémoire automatiquement (deque) -- pas besoin de
+        # trim manuel. Remise à zéro sur nouvelle partie (voir
+        # _update_move_history) ET sur changement de camp (voir
+        # set_my_side) -- une éval "de mon point de vue" n'a plus de sens
+        # cohérent si le camp change en cours de route.
+        self._initiative_history = deque(maxlen=theme_detector.INITIATIVE_WINDOW)
         self.my_side = "w"
         # Niveau Elo actif (voir human_profile.ELO_TIERS). Change le style
         # de jeu proposé par les 4 profils, PAS juste la profondeur -- voir
@@ -171,25 +183,6 @@ class BridgeState:
         # même position.
         self._theme_cache_key = None    # fen
         self._theme_cache_value = None  # theme_detector.ThemeResult
-        # Cache du SCÉNARIO de suite (voir narration.compute_scenario_facts
-        # / variation_narrator.py) : un dict move_uci -> VariationFacts,
-        # valable pour UNE position (self._scenario_cache_fen), remis à zéro
-        # dès qu'on change de position. Contrairement aux caches ci-dessus
-        # (mono-slot, keyés sur la seule position qui suffit car les 3
-        # profils la partagent), le scénario dépend AUSSI du coup joué -- et
-        # les 3 profils peuvent choisir 2-3 coups distincts pour la même
-        # position. Un mono-slot (fen, move_uci) se ferait alors "thrasher"
-        # entre ces coups et perdrait la dédup ; le dict garantit que chaque
-        # coup distinct n'est calculé qu'UNE fois puis réutilisé par tout
-        # profil qui joue le même coup. C'est le calcul le plus cher de la
-        # narration (jusqu'à 1 + MAX_PLY évals moteur légères par coup, voir
-        # variation_narrator.EVAL_DEPTH) -- sans ce partage il tournait 3x
-        # pour rien dès que les profils convergent (fréquent, surtout en
-        # position forcée resserrée par compute_tightening_factor). Accès
-        # sérialisé par engine_lock (comme les autres caches). Valeur écrite
-        # avant la clé du dict via un dict local puis réassignation.
-        self._scenario_cache_fen = None    # fen pour laquelle le dict est valable
-        self._scenario_cache = {}          # move_uci -> VariationFacts | None
 
     def _track_opponent_eval(self, fen, board, position_seq):
         """
@@ -246,7 +239,11 @@ class BridgeState:
             current_eval = candidates[0]["cp"]  # point de vue de mon camp
             if current_eval is None:
                 # Coup de livre (voir opening_book.py) -- pas de vraie éval
-                # ici, donc pas de swing_cp fiable à calculer non plus.
+                # ici, donc pas de swing_cp fiable à calculer non plus. On
+                # n'ajoute PAS ce point à _initiative_history non plus
+                # (donnée non fiable, fausserait la tendance) -- la fenêtre
+                # glissante saute simplement ce point, comme un trou dans
+                # la série plutôt qu'une valeur inventée.
                 # Repli sur le thème "neutre" (eval_cp=0 par défaut dans
                 # theme_detector.detect_theme) plutôt que de laisser une
                 # comparaison numérique planter sur None (voir le
@@ -260,6 +257,9 @@ class BridgeState:
                 self._theme_cache_key = fen
                 self._opponent_turn_eval = None
                 return
+
+            self._initiative_history.append(current_eval)
+            initiative_trend = theme_detector.compute_initiative_trend(list(self._initiative_history))
 
             opponent_eval_cp = None
             opponent_better_move_san = None
@@ -283,6 +283,7 @@ class BridgeState:
             try:
                 theme_result = theme_detector.detect_theme(
                     board, candidates, swing_cp=swing_cp, opponent_better_move_san=opponent_better_move_san,
+                    initiative_trend=initiative_trend,
                 )
             except Exception as e:
                 # Filet de sécurité : MÊME en cas d'erreur imprévue ici (pas
@@ -316,6 +317,11 @@ class BridgeState:
         """side: 'w' ou 'b'."""
         with self.lock:
             self.my_side = side
+            # Une éval "de mon point de vue" dans _initiative_history n'a
+            # plus de sens cohérent si le camp change en cours de route --
+            # sans ce reset, un changement de camp mi-partie ferait passer
+            # une pente calculée pour Blancs comme si elle décrivait Noirs.
+            self._initiative_history.clear()
 
     def set_elo_tier(self, tier_id):
         """tier_id : 1, 2 ou 3 (voir human_profile.ELO_TIERS)."""
@@ -451,6 +457,7 @@ class BridgeState:
                 if self._move_history:
                     self._move_history = []
                 self._move_history_board = None
+                self._initiative_history.clear()
                 return
 
             if self._move_history_board is None:
@@ -622,100 +629,43 @@ class BridgeState:
         # personnalité du profil (voir narration.py). Chaque profil a donc
         # sa propre narration -- contrairement à l'ancienne "explication"
         # calculée une seule fois pour le dernier profil de la boucle.
-        #
-        # On calcule ici la partie CHEAP (include_scenario=False : aucun
-        # appel moteur -- ni detect_theme, en cache, ni why_detector, qui
-        # n'utilise que python-chess) et on pousse la flèche + le thème tout
-        # de suite. Le SCÉNARIO de suite (coûteux : jusqu'à 1 + MAX_PLY évals
-        # moteur de la PV) est calculé juste après en tâche de fond puis
-        # re-poussé enrichi (voir _attach_scenario_async) -- sans ça, la
-        # flèche attendait ces évals avant même de s'afficher.
         try:
             theme_result = (
                 self._theme_cache_value if self._theme_cache_key == fen
+                # Filet de repli RARE (cache miss inattendu, ex: requêtes
+                # concurrentes arrivant avant que _theme_cache_key soit
+                # posé) -- LIMITATION CONNUE : n'a accès ni à swing_cp ni à
+                # initiative_trend ici (contrairement au chemin normal, voir
+                # _update_eval_tracking_and_theme), donc BLUNDER/
+                # MISSED_OPPORTUNITY/INITIATIVE_SHIFT ne peuvent pas se
+                # déclencher via ce chemin pour CETTE position précise --
+                # dégradation ponctuelle et sans risque (retombe proprement
+                # sur les thèmes suivants dans PRIORITY_ORDER), pas une
+                # narration fausse. Volontairement pas corrigé : dupliquer
+                # ici l'alimentation de _initiative_history risquerait un
+                # double-ajout si ce chemin s'exécute en concurrence avec
+                # le chemin normal, ce qui fausserait la pente calculée --
+                # pire qu'une fonctionnalité simplement absente une fois.
                 else theme_detector.detect_theme(board, result["candidates"])
             )
             why_motif, why_detail = why_detector.detect_why(board, chosen)
-            entry["narration"] = narration.generate_narration(
-                theme_result, profile_id, chosen, why_motif, why_detail, board,
-                move_history=list(self._move_history), opening_book=self.opening_identity,
-                engine=self.engine, include_scenario=False,
-            )
+            # engine_lock requis ici : narration.generate_narration() peut
+            # interroger le moteur pour la trajectoire d'éval du scénario
+            # (voir variation_narrator.py) -- le moteur ne supporte qu'une
+            # recherche à la fois, jamais d'appel moteur hors de ce verrou.
+            with self.engine_lock:
+                entry["narration"] = narration.generate_narration(
+                    theme_result, profile_id, chosen, why_motif, why_detail, board,
+                    move_history=list(self._move_history), opening_book=self.opening_identity,
+                    engine=self.engine,
+                )
         except Exception as e:
             print(f"⚠ Narration indisponible pour ce coup ({profile_id}) : {e}")
 
         if self.on_profile_update:
             self.on_profile_update(profile_id, dict(entry))
 
-        # Scénario de suite en tâche de fond : ré-analyse la PV au moteur
-        # (léger) puis re-pousse l'entrée enrichie du champ narration["suite"]
-        # une fois prêt. Mutualisé entre profils + anti-péremption -- voir
-        # _attach_scenario_async.
-        threading.Thread(
-            target=self._attach_scenario_async,
-            args=(fen, board, chosen, profile_id, dict(entry), current_seq),
-            daemon=True,
-        ).start()
-
         return entry
-
-    def _attach_scenario_async(self, fen, board, chosen, profile_id, base_entry, position_seq):
-        """
-        Calcule le SCÉNARIO de suite (partie coûteuse, voir
-        narration.compute_scenario_facts / variation_narrator.py : jusqu'à
-        1 + MAX_PLY évals moteur légères) en tâche de fond, puis re-pousse
-        l'entrée enrichie du champ narration["suite"] via on_profile_update
-        -- pour que la flèche + le thème s'affichent SANS attendre ces
-        évals (voir handle_single_profile).
-
-        Deux garanties :
-        - Mutualisation entre profils (point 1) : self._scenario_cache est un
-          dict move_uci -> VariationFacts valable pour la position courante ;
-          2 profils qui choisissent le même coup ne déclenchent qu'UN calcul.
-        - Anti-péremption (point 2) : `position_seq` est le numéro de la
-          position au moment de la requête (voir _position_seq). Si une
-          position plus récente est arrivée entre-temps (l'utilisateur a
-          joué avant la fin des évals), on abandonne sans rien pousser
-          plutôt que d'enrichir une carte qui ne correspond plus à ce qui
-          est affiché. Vérifié 2 fois : après avoir obtenu engine_lock, et
-          juste avant de pousser.
-
-        Best-effort : une erreur ici ne fait que priver ce coup de son champ
-        "suite" (la flèche + le thème restent affichés), jamais un crash.
-        """
-        try:
-            move_uci = chosen["move_uci"]
-            with self.engine_lock:
-                with self.lock:
-                    if position_seq != self._position_seq:
-                        return  # position dépassée pendant l'attente du verrou moteur
-                # Cache scénario valable pour UNE position : reset au
-                # changement de position (voir __init__).
-                if self._scenario_cache_fen != fen:
-                    self._scenario_cache = {}
-                    self._scenario_cache_fen = fen
-                if move_uci in self._scenario_cache:
-                    facts = self._scenario_cache[move_uci]  # déjà calculé par un autre profil pour ce même coup
-                else:
-                    facts = narration.compute_scenario_facts(chosen, board, self.engine)
-                    self._scenario_cache[move_uci] = facts
-
-            suite = narration.render_scenario(facts, profile_id)  # cheap (lookup de gabarit), hors verrou
-            if not suite:
-                return  # ligne trop courte pour un scénario (ex: coup de livre) -- rien à enrichir
-
-            with self.lock:
-                if position_seq != self._position_seq:
-                    return  # position dépassée pendant le calcul du scénario
-
-            enriched = dict(base_entry)
-            narr = dict(enriched.get("narration") or {})
-            narr["suite"] = suite
-            enriched["narration"] = narr
-            if self.on_profile_update:
-                self.on_profile_update(profile_id, enriched)
-        except Exception as e:
-            print(f"⚠ Scénario indisponible pour ce coup ({profile_id}) : {e}")
 
     def refresh_last_profiles(self):
         """

@@ -31,6 +31,7 @@ DEFENSE = "DEFENSE"
 MISSED_OPPORTUNITY = "MISSED_OPPORTUNITY"
 ENDGAME = "ENDGAME"
 OPENING = "OPENING"
+INITIATIVE_SHIFT = "INITIATIVE_SHIFT"
 STRATEGIC_ADVANTAGE = "STRATEGIC_ADVANTAGE"
 PAWN_STRUCTURE = "PAWN_STRUCTURE"
 PIECE_ACTIVITY_GAP = "PIECE_ACTIVITY_GAP"
@@ -39,8 +40,8 @@ EQUAL_POSITION = "EQUAL_POSITION"
 
 PRIORITY_ORDER = (
     BLUNDER, TACTICAL, ATTACK, DEFENSE, MISSED_OPPORTUNITY,
-    ENDGAME, OPENING, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE, PIECE_ACTIVITY_GAP,
-    KING_SAFETY_WARNING, EQUAL_POSITION,
+    ENDGAME, OPENING, INITIATIVE_SHIFT, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE,
+    PIECE_ACTIVITY_GAP, KING_SAFETY_WARNING, EQUAL_POSITION,
 )
 
 # Seuils (centipawns), ajustables si l'usage réel montre qu'ils déclenchent
@@ -73,6 +74,19 @@ ACTIVITY_GAP_RATIO = 1.4  # le camp actif contrôle au moins 40% de cases pondé
 # jamais au-dessus -- sinon ce serait déjà ATTACK/DEFENSE).
 KING_SAFETY_WARNING_MIN_ATTACKED_DELTA = 1  # au moins 1 case de plus attaquée que défendue autour du roi
 KING_SAFETY_WARNING_MAX_MOVE_NUMBER = 15    # au-delà, le roque manqué n'est plus un signal fiable (partie déjà engagée dans un plan différent)
+# INITIATIVE_SHIFT : fenêtre glissante des dernières évals "à mon tour"
+# (voir web_bridge.py, BridgeState._initiative_history) -- détecte une
+# TENDANCE sur plusieurs coups, pas un instantané. 4 points plutôt que 3 :
+# filtre mieux le bruit normal d'éval (une seule variation isolée d'un
+# tour à l'autre ne suffit pas à faire basculer la pente) sans rendre le
+# thème trop lent à réagir.
+INITIATIVE_WINDOW = 4
+INITIATIVE_SLOPE_CP = 25  # pente minimale (cp par coup, régression linéaire) pour parler de tendance, pas de bruit
+# Bande d'éval où la tendance devient intéressante à signaler : pas déjà
+# extrême (ATTACK/DEFENSE aurait pris le dessus avant, voir l'ordre de
+# priorité) et pas totalement neutre (sous ce seuil, "je perds l'avantage"
+# n'a pas vraiment de sens -- il n'y avait pas d'avantage à perdre).
+INITIATIVE_EVAL_MIN_ABS_CP = 20
 
 
 @dataclass
@@ -99,6 +113,7 @@ class ThemeResult:
     activity_ratio: Optional[float] = None  # mobilité pondérée (mien / adverse), voir PIECE_ACTIVITY_GAP
     king_safety_warning_square: Optional[int] = None  # roi concerné par l'avertissement préventif (voir KING_SAFETY_WARNING)
     king_safety_warning_is_mine: bool = True  # True = mon roi (à protéger), False = roi adverse (à cibler bientôt)
+    initiative_slope_cp: Optional[float] = None  # pente cp/coup sur la fenêtre glissante (voir INITIATIVE_SHIFT) -- positif = je prends l'initiative, négatif = je la perds
     caution: Optional[str] = None  # avertissement transversal (ex: "stalemate_risk"), indépendant du thème principal
 
 
@@ -409,7 +424,35 @@ def _king_safety_warning(board, color, eval_cp_for_color, phase):
     return (attacked - defended) >= KING_SAFETY_WARNING_MIN_ATTACKED_DELTA
 
 
-def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None):
+def compute_initiative_trend(eval_history):
+    """
+    Régression linéaire simple (pente cp/coup) sur `eval_history` -- liste
+    de cp DÉJÀ du point de vue de my_side (voir web_bridge.py,
+    BridgeState._initiative_history), ordonnée du plus ancien au plus
+    récent. Aucune dépendance externe (pas de numpy) : formule directe des
+    moindres carrés sur un indice 0..n-1.
+
+    Retourne la pente (float, positif = tendance à la hausse pour moi,
+    négatif = tendance à la baisse), ou None si l'historique est trop
+    court pour qu'une pente ait un sens (voir INITIATIVE_WINDOW -- il faut
+    au moins 2 points, mais en pratique on attend surtout d'avoir la
+    fenêtre pleine pour un signal fiable, filtré par INITIATIVE_SLOPE_CP
+    dans detect_theme).
+    """
+    n = len(eval_history)
+    if n < 2:
+        return None
+    xs = list(range(n))
+    mean_x = sum(xs) / n
+    mean_y = sum(eval_history) / n
+    numerator = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, eval_history))
+    denominator = sum((x - mean_x) ** 2 for x in xs)
+    if denominator == 0:
+        return None
+    return numerator / denominator
+
+
+def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None, initiative_trend=None):
     """
     board : position ACTUELLE (chess.Board), au trait de "mon" camp (my_side).
     candidates : liste triée meilleur -> moins bon (voir engine_analysis.analyze_candidates).
@@ -420,6 +463,10 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
         à son tour précédent (avis du moteur à ce moment-là, voir
         web_bridge.py) -- utilisé pour MISSED_OPPORTUNITY, quand son coup
         réel était en dessous de ça sans être un franc blunder.
+    initiative_trend : pente cp/coup de la fenêtre glissante des dernières
+        évals "à mon tour" (voir web_bridge.py, compute_initiative_trend /
+        _initiative_history) -- None si pas encore assez d'historique.
+        Utilisé pour INITIATIVE_SHIFT.
 
     Retourne un ThemeResult -- toujours un thème (EQUAL_POSITION au pire),
     jamais None.
@@ -489,7 +536,25 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
         all_candidates.append(ThemeCandidate(OPENING, 1.0, {}))
         return ThemeResult(OPENING, eval_cp, phase=phase, caution=caution)
 
-    # 6. STRATEGIC_ADVANTAGE -- avantage net mais sans motif tactique
+    # 6. INITIATIVE_SHIFT -- tendance sur plusieurs coups (voir
+    #    compute_initiative_trend / web_bridge.py, _initiative_history),
+    #    PAS un instantané. Se déclenche dans les 2 sens : je perds
+    #    l'initiative (pente négative alors que j'étais/suis en avantage)
+    #    OU je la reprends (pente positive alors que j'étais/suis en
+    #    désavantage). Bande d'éval modérée (voir INITIATIVE_EVAL_MIN_ABS_CP)
+    #    : pas déjà extrême (ATTACK/DEFENSE aurait pris le dessus avant) et
+    #    pas totalement neutre (rien à perdre/gagner si l'éval est ~0).
+    if initiative_trend is not None and abs(eval_cp) >= INITIATIVE_EVAL_MIN_ABS_CP:
+        losing_initiative = eval_cp > 0 and initiative_trend <= -INITIATIVE_SLOPE_CP
+        gaining_initiative = eval_cp < 0 and initiative_trend >= INITIATIVE_SLOPE_CP
+        if losing_initiative or gaining_initiative:
+            all_candidates.append(ThemeCandidate(INITIATIVE_SHIFT, abs(initiative_trend), {
+                "initiative_slope_cp": initiative_trend,
+            }))
+            return ThemeResult(INITIATIVE_SHIFT, eval_cp, phase=phase,
+                                initiative_slope_cp=initiative_trend, caution=caution)
+
+    # 7. STRATEGIC_ADVANTAGE -- avantage net mais sans motif tactique
     #    immédiat. Inclut désormais le déséquilibre matériel qualitatif
     #    généralisé (voir _material_imbalance_kind -- fusionne l'ancien
     #    thème MATERIAL_IMBALANCE envisagé séparément, évite la redondance
@@ -500,7 +565,7 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
         return ThemeResult(STRATEGIC_ADVANTAGE, eval_cp, phase=phase,
                             material_imbalance_kind=imbalance, caution=caution)
 
-    # 7. PAWN_STRUCTURE -- faiblesse de structure ADVERSE à cibler (jamais
+    # 8. PAWN_STRUCTURE -- faiblesse de structure ADVERSE à cibler (jamais
     #    les miennes, voir la conversation : ton offensif, "voici ce que tu
     #    peux viser", pas "attention à ta propre structure"). Position par
     #    ailleurs équilibrée (aucun des thèmes plus prioritaires n'a
@@ -513,7 +578,7 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
         return ThemeResult(PAWN_STRUCTURE, eval_cp, phase=phase,
                             pawn_weakness_square=weakness_sq, pawn_weakness_kind=weakness_kind, caution=caution)
 
-    # 8. PIECE_ACTIVITY_GAP -- avantage de mobilité marqué, MÊME sans
+    # 9. PIECE_ACTIVITY_GAP -- avantage de mobilité marqué, MÊME sans
     #    avantage matériel/tactique (voir la conversation) -- position par
     #    ailleurs équilibrée en éval, mais un camp contrôle nettement plus
     #    de cases utiles que l'autre.
@@ -522,7 +587,7 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
         all_candidates.append(ThemeCandidate(PIECE_ACTIVITY_GAP, ratio, {"activity_ratio": ratio}))
         return ThemeResult(PIECE_ACTIVITY_GAP, eval_cp, phase=phase, activity_ratio=ratio, caution=caution)
 
-    # 9. KING_SAFETY_WARNING -- signal PRÉVENTIF, testé seulement ici (donc
+    # 10. KING_SAFETY_WARNING -- signal PRÉVENTIF, testé seulement ici (donc
     #    APRÈS ATTACK/DEFENSE au point 3, qui a priorité si la situation
     #    est déjà critique -- voir la conversation, évite la redondance).
     #    Mon roi d'abord (plus directement actionnable par l'utilisateur),
@@ -542,6 +607,6 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
         return ThemeResult(KING_SAFETY_WARNING, eval_cp, phase=phase,
                             king_safety_warning_square=opp_king_sq, king_safety_warning_is_mine=False, caution=caution)
 
-    # 10. Filet de sécurité : position jugée équilibrée.
+    # 11. Filet de sécurité : position jugée équilibrée.
     all_candidates.append(ThemeCandidate(EQUAL_POSITION, 0.0, {}))
     return ThemeResult(EQUAL_POSITION, eval_cp, phase=phase, caution=caution)

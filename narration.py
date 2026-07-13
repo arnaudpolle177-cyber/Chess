@@ -29,8 +29,8 @@ import variation_narrator
 
 from theme_detector import (
     BLUNDER, TACTICAL, ATTACK, DEFENSE, MISSED_OPPORTUNITY,
-    ENDGAME, OPENING, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE, PIECE_ACTIVITY_GAP,
-    KING_SAFETY_WARNING, EQUAL_POSITION,
+    ENDGAME, OPENING, INITIATIVE_SHIFT, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE,
+    PIECE_ACTIVITY_GAP, KING_SAFETY_WARNING, EQUAL_POSITION,
 )
 
 PIECE_NAMES_FR = {
@@ -47,6 +47,7 @@ THEME_ICONS = {
     MISSED_OPPORTUNITY: "rewind",
     ENDGAME: "flag",
     OPENING: "book",
+    INITIATIVE_SHIFT: "pulse",
     STRATEGIC_ADVANTAGE: "trend",
     PAWN_STRUCTURE: "target",
     PIECE_ACTIVITY_GAP: "move",
@@ -62,6 +63,7 @@ THEME_LABELS_FR = {
     MISSED_OPPORTUNITY: "Occasion à saisir",
     ENDGAME: "Finale",
     OPENING: "Ouverture",
+    INITIATIVE_SHIFT: "Dynamique de la partie",
     STRATEGIC_ADVANTAGE: "Avantage stratégique",
     PAWN_STRUCTURE: "Faiblesse à cibler",
     PIECE_ACTIVITY_GAP: "Avantage de mobilité",
@@ -418,6 +420,30 @@ def _king_safety_warning_classical_1(t, c, wm, wd, board):
             "label2": "Plan", "text2": "Continue ton développement -- cette faiblesse risque de compter plus tard dans la partie."}
 
 
+def _initiative_popular_1(t, c, wm, wd, board):
+    if t.eval_cp > 0:
+        return {"label1": "Ça ralentit", "text1": "Tu gardes l'avantage, mais l'élan des derniers coups faiblit.",
+                "label2": "Réaction", "text2": "Crée rapidement une nouvelle menace avant que l'adversaire ne reprenne la main."}
+    return {"label1": "Ça revient", "text1": "La position reste difficile, mais tu regagnes du terrain coup après coup.",
+            "label2": "Suite", "text2": "Continue sur cette lancée -- l'adversaire commence à perdre son avance."}
+
+
+def _initiative_tactical_1(t, c, wm, wd, board):
+    if t.eval_cp > 0:
+        return {"label1": "Fenêtre qui se referme", "text1": "L'initiative que tu avais construite commence à s'effriter.",
+                "label2": "Fonce", "text2": "C'est le moment de forcer les choses, pas de temporiser."}
+    return {"label1": "Contre-attaque en marche", "text1": "Tu étais sous pression, mais l'initiative commence à changer de camp.",
+            "label2": "Suite", "text2": "Pousse cette dynamique -- l'adversaire n'a peut-être pas encore réalisé le changement."}
+
+
+def _initiative_classical_1(t, c, wm, wd, board):
+    if t.eval_cp > 0:
+        return {"label1": "Principe", "text1": "Un avantage qui n'est pas entretenu a tendance à s'estomper -- c'est ce qui commence à se produire ici.",
+                "label2": "Plan", "text2": "Trouve un plan actif plutôt que de laisser la position se stabiliser d'elle-même."}
+    return {"label1": "Principe", "text1": "La dynamique de la partie est en train de basculer progressivement en ta faveur.",
+            "label2": "Plan", "text2": "Continue sur cette voie avec des coups actifs, sans revenir à la prudence trop tôt."}
+
+
 def _equal_popular_1(t, c, wm, wd, board):
     return {"label1": "Position équilibrée", "text1": "Rien ne se dégage clairement pour l'instant, la partie reste ouverte.",
             "label2": "Approche", "text2": "Choisis le plan le plus simple à exécuter, pas le plus ambitieux."}
@@ -468,6 +494,11 @@ TEMPLATES = {
     },
     OPENING: {
         "popular": [_opening_popular_1], "creative": [_opening_tactical_1], "classical": [_opening_classical_1],
+    },
+    INITIATIVE_SHIFT: {
+        "popular": [_initiative_popular_1],
+        "creative": [_initiative_tactical_1],
+        "classical": [_initiative_classical_1],
     },
     STRATEGIC_ADVANTAGE: {
         "popular": [_strategic_popular_1, _strategic_popular_2],
