@@ -29,7 +29,7 @@ import variation_narrator
 
 from theme_detector import (
     BLUNDER, TACTICAL, ATTACK, DEFENSE, MISSED_OPPORTUNITY,
-    ENDGAME, OPENING, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE, EQUAL_POSITION,
+    ENDGAME, OPENING, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE, PIECE_ACTIVITY_GAP, EQUAL_POSITION,
 )
 
 PIECE_NAMES_FR = {
@@ -48,6 +48,7 @@ THEME_ICONS = {
     OPENING: "book",
     STRATEGIC_ADVANTAGE: "trend",
     PAWN_STRUCTURE: "target",
+    PIECE_ACTIVITY_GAP: "move",
     EQUAL_POSITION: "scale",
 }
 
@@ -61,6 +62,7 @@ THEME_LABELS_FR = {
     OPENING: "Ouverture",
     STRATEGIC_ADVANTAGE: "Avantage stratégique",
     PAWN_STRUCTURE: "Faiblesse à cibler",
+    PIECE_ACTIVITY_GAP: "Avantage de mobilité",
     EQUAL_POSITION: "Position équilibrée",
 }
 
@@ -319,10 +321,30 @@ def _strategic_tactical_2(t, c, wm, wd, board):
             "label2": "Suite", "text2": "Prépare le terrain plutôt que de forcer un coup qui n'est pas encore prêt."}
 
 
+_MATERIAL_IMBALANCE_TEXT = {
+    "bishop_pair_open": (
+        "Tu as la paire de fous dans une position déjà ouverte -- l'avantage est immédiatement exploitable.",
+        "Continue d'ouvrir les lignes, ça les rend encore plus forts."
+    ),
+    "bishop_pair_closed": (
+        "Tu as la paire de fous, mais la position reste fermée pour l'instant -- l'avantage est encore latent.",
+        "Cherche à ouvrir la position progressivement, c'est là qu'ils prendront toute leur valeur."
+    ),
+    "knights_closed": (
+        "Tes cavaliers sont mieux adaptés que les fous adverses tant que la position reste fermée.",
+        "Évite d'ouvrir le jeu trop vite -- garde la structure fermée pour conserver cet avantage."
+    ),
+    "rook_vs_minors": (
+        "Tu as une tour contre des pièces mineures -- un déséquilibre qui favorise généralement la finale.",
+        "Cherche à simplifier vers une finale, la tour prend de la valeur quand le plateau se dégage."
+    ),
+}
+
+
 def _strategic_classical_1(t, c, wm, wd, board):
-    if t.has_bishop_pair:
-        return {"label1": "Nature de l'avantage", "text1": "Tu as la paire de fous -- un vrai atout à long terme, surtout si la position s'ouvre.",
-                "label2": "Plan", "text2": "Cherche à ouvrir la position plutôt qu'à la refermer, ça les rend plus forts."}
+    texts = _MATERIAL_IMBALANCE_TEXT.get(t.material_imbalance_kind)
+    if texts:
+        return {"label1": "Nature de l'avantage", "text1": texts[0], "label2": "Plan", "text2": texts[1]}
     return {"label1": "Nature de l'avantage", "text1": "L'avantage tient à la position des pièces, pas à un gain de matériel.",
             "label2": "Plan", "text2": "Continue à améliorer la coordination avant de chercher à forcer quoi que ce soit."}
 
@@ -349,6 +371,21 @@ def _pawn_structure_classical_1(t, c, wm, wd, board):
     sq = _sq(t.pawn_weakness_square)
     return {"label1": "Faiblesse structurelle", "text1": f"Le {kind} adverse en {sq} est un objectif à long terme, typique du jeu positionnel.",
             "label2": "Plan", "text2": "Améliore tes pièces en gardant cette case en ligne de mire, sans rien précipiter."}
+
+
+def _piece_activity_popular_1(t, c, wm, wd, board):
+    return {"label1": "Activité", "text1": "Tes pièces contrôlent davantage de cases importantes que celles de l'adversaire, sans avantage matériel pour autant.",
+            "label2": "Plan", "text2": "Cette activité peut créer des menaces avant même que le matériel ne bouge -- profite de cette avance."}
+
+
+def _piece_activity_tactical_1(t, c, wm, wd, board):
+    return {"label1": "Pièces en mouvement", "text1": "Tes pièces sont nettement plus mobiles que celles de l'adversaire, même si l'éval reste serrée.",
+            "label2": "Suite", "text2": "Cherche à transformer cette avance de mobilité en vraie menace concrète."}
+
+
+def _piece_activity_classical_1(t, c, wm, wd, board):
+    return {"label1": "Avantage de mobilité", "text1": "Sans gain de matériel, tes pièces occupent déjà de meilleures cases que celles de l'adversaire.",
+            "label2": "Plan", "text2": "Continue d'améliorer la coordination -- l'avantage de mobilité précède souvent l'avantage matériel."}
 
 
 def _equal_popular_1(t, c, wm, wd, board):
@@ -411,6 +448,11 @@ TEMPLATES = {
         "popular": [_pawn_structure_popular_1],
         "creative": [_pawn_structure_tactical_1],
         "classical": [_pawn_structure_classical_1],
+    },
+    PIECE_ACTIVITY_GAP: {
+        "popular": [_piece_activity_popular_1],
+        "creative": [_piece_activity_tactical_1],
+        "classical": [_piece_activity_classical_1],
     },
     EQUAL_POSITION: {
         "popular": [_equal_popular_1, _equal_popular_2],

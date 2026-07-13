@@ -306,6 +306,7 @@ _HTML = r"""
     trend: '<path d="M3 17 9 11l4 4 8-8M21 7h-6M21 7v6"/>',
     scale: '<path d="M12 3v18M3 7l4-2 4 2M3 7l-1 5a3 3 0 0 0 6 0zM15 7l4-2 4 2M15 7l-1 5a3 3 0 0 0 6 0zM7 21h10"/>',
     target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+    move: '<path d="M12 2v20M2 12h20M5 5l3 3M19 5l-3 3M5 19l3-3M19 19l-3-3"/>',
     info: '<path d="M12 16v-4M12 8h.01"/><circle cx="12" cy="12" r="9"/>',
   };
 
