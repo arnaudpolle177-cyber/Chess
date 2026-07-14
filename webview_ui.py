@@ -283,9 +283,18 @@ _HTML = r"""
     themeEl.querySelector("svg").innerHTML = THEME_ICON_PATHS[n.theme_icon] || THEME_ICON_PATHS["info"];
     themeLabel.textContent = n.theme_label || "";
 
-    let html =
-      '<p><span class="block-label">' + escapeHtml(n.label1 || "") + ' — </span>' + escapeHtml(n.text1 || "") + '</p>' +
-      '<p class="secondary"><span class="block-label">' + escapeHtml(n.label2 || "") + ' — </span>' + escapeHtml(n.text2 || "") + '</p>';
+    // Narration v2 (voir narration_v2.py) : si un paragraphe tissé est fourni,
+    // on l'affiche comme UNE seule pensée (2-4 phrases). Sinon, repli sur
+    // l'affichage historique à 2 blocs (label1/text1 + label2/text2) -- les
+    // deux chemins coexistent pendant la transition.
+    let html;
+    if (n.paragraph) {
+      html = '<p>' + escapeHtml(n.paragraph) + '</p>';
+    } else {
+      html =
+        '<p><span class="block-label">' + escapeHtml(n.label1 || "") + ' — </span>' + escapeHtml(n.text1 || "") + '</p>' +
+        '<p class="secondary"><span class="block-label">' + escapeHtml(n.label2 || "") + ' — </span>' + escapeHtml(n.text2 || "") + '</p>';
+    }
     if (n.suite) {
       html += '<p class="suite"><span class="block-label">Suite envisagée — </span>' + escapeHtml(n.suite) + '</p>';
     }

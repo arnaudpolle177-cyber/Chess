@@ -42,6 +42,7 @@ import app_paths
 import theme_detector
 import why_detector
 import narration
+import narration_v2
 import opening_identity
 
 DEFAULT_PORT = 8765
@@ -194,6 +195,14 @@ class BridgeState:
         # même position.
         self._theme_cache_key = None    # fen
         self._theme_cache_value = None  # theme_detector.ThemeResult
+        # Narration v2 (voir narration_v2.py / NARRATION_V2_PLAN.txt) : cache
+        # de la SÉLECTION (1 principal + 0..2 secondaires), profil-indépendante,
+        # calculée une fois par position au même endroit que _theme_cache
+        # ci-dessus et partagée par les 3 profils -- seul le tissage (render)
+        # varie par profil. Coexiste avec _theme_cache pendant la transition :
+        # generate_narration (façade v1) reste disponible en repli si la
+        # sélection v2 manque (cache miss concurrent, cf. handle_single_profile).
+        self._selection_cache = narration_v2.SelectionCache()
 
     def _track_opponent_eval(self, fen, board, position_seq):
         """
@@ -266,6 +275,12 @@ class BridgeState:
                     theme_result = theme_detector.ThemeResult(theme_detector.EQUAL_POSITION, 0)
                 self._theme_cache_value = theme_result
                 self._theme_cache_key = fen
+                # Narration v2 : sélection sans signaux d'éval (coup de livre),
+                # comme le thème v1 juste au-dessus. Best-effort.
+                try:
+                    self._selection_cache.set(fen, narration_v2.build_selection(board, candidates))
+                except Exception as e:
+                    print(f"⚠ Sélection narration v2 indisponible (coup de livre) : {e}")
                 self._opponent_turn_eval = None
                 return
 
@@ -324,6 +339,21 @@ class BridgeState:
             # le mauvais thème pour la mauvaise position).
             self._theme_cache_value = theme_result
             self._theme_cache_key = fen
+
+            # Narration v2 : même position, mêmes signaux -> on calcule aussi
+            # la SÉLECTION (principal + secondaires) et on la cache. Purement
+            # additif : aucun appel moteur (collect_theme_bricks est du pur
+            # python-chess), calcul best-effort qui ne doit jamais empêcher la
+            # mise à jour du thème v1 ci-dessus si quelque chose casse ici.
+            try:
+                selection = narration_v2.build_selection(
+                    board, candidates, swing_cp=swing_cp,
+                    opponent_better_move_san=opponent_better_move_san,
+                    initiative_trend=initiative_trend,
+                )
+                self._selection_cache.set(fen, selection)
+            except Exception as e:
+                print(f"⚠ Sélection narration v2 indisponible pour ce coup : {e}")
 
             # Avance la mémoire pour le prochain cycle.
             self._opponent_turn_eval = None
@@ -682,6 +712,39 @@ class BridgeState:
                     move_history=list(self._move_history), opening_book=self.opening_identity,
                     engine=self.engine,
                 )
+
+            # Narration v2 (transition) : ajoute le PARAGRAPHE tissé (une seule
+            # pensée de 2-4 phrases, principal + secondaires) au dict
+            # d'affichage. Le front (webview_ui.py, renderDetail) l'utilise EN
+            # PRIORITÉ s'il est présent, et retombe sinon sur
+            # label1/text1/label2/text2 (façade v1 ci-dessus) -- transition
+            # douce, réversible. Aucun appel moteur ici (build_selection/render
+            # sont purs python-chess) -> volontairement HORS engine_lock.
+            # Best-effort : si ça casse, la narration v1 reste affichée.
+            try:
+                selection = self._selection_cache.get(fen)
+                if selection is None:
+                    # Repli RARE (même cas de cache miss que le thème v1
+                    # ci-dessus) : sans signaux swing/initiative, comme la façade.
+                    selection = narration_v2.build_selection(board, result["candidates"])
+                woven = narration_v2.render(
+                    selection, profile_id, chosen=chosen,
+                    why_motif=why_motif, why_detail=why_detail, board=board,
+                )
+                if woven.get("text"):
+                    entry["narration"]["paragraph"] = woven["text"]
+                    # Aligne l'en-tête (icône + libellé) sur le thème PRINCIPAL
+                    # du paragraphe, pour que le titre colle à ce qui est écrit
+                    # (le principal v2 = plus haut score, pas toujours identique
+                    # au 1er thème de PRIORITY_ORDER retourné par detect_theme).
+                    lead = woven.get("lead")
+                    if lead:
+                        entry["narration"]["theme_label"] = narration.THEME_LABELS_FR.get(
+                            lead, entry["narration"].get("theme_label"))
+                        entry["narration"]["theme_icon"] = narration.THEME_ICONS.get(
+                            lead, entry["narration"].get("theme_icon"))
+            except Exception as e:
+                print(f"⚠ Paragraphe narration v2 indisponible ({profile_id}) : {e}")
         except Exception as e:
             print(f"⚠ Narration indisponible pour ce coup ({profile_id}) : {e}")
 

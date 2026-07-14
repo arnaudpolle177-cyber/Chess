@@ -44,6 +44,93 @@ PRIORITY_ORDER = (
     PIECE_ACTIVITY_GAP, KING_SAFETY_WARNING, EQUAL_POSITION,
 )
 
+# =====================================================================
+# NARRATION v2 -- MÉTADONNÉES DES BRIQUES (voir NARRATION_V2_PLAN.txt)
+# =====================================================================
+# Tables PUREMENT ADDITIVES : elles ne sont PAS utilisées par detect_theme
+# (comportement d'affichage actuel strictement inchangé). Elles servent au
+# futur pipeline multi-thèmes -- collect_theme_bricks() en bas de ce fichier
+# -> scoring (theme_scoring.py, à venir) -> sélection -> weaver. Tant que ce
+# pipeline n'est pas branché dans web_bridge.py, rien de tout ceci n'a
+# d'effet sur le coach en fonctionnement.
+
+# --- Tiers de priorité -------------------------------------------------
+# Le poids de base d'un tier DOMINE l'intensité brute (voir la roadmap :
+# scoring = poids_tier + intensité_normalisée) : un thème "très forte
+# priorité" passe donc toujours devant un thème d'enrichissement, quel que
+# soit son signal. La normalisation de l'intensité (0..99) est le travail
+# de l'étape 2 (scoring), PAS d'ici -- collect_theme_bricks se contente de
+# préserver le signal brut dans ThemeCandidate.strength (comme aujourd'hui).
+TIER_STRONG = "strong"
+TIER_MEDIUM = "medium"
+TIER_ENRICHMENT = "enrichment"
+
+TIER_WEIGHT = {TIER_STRONG: 1000, TIER_MEDIUM: 500, TIER_ENRICHMENT: 100}
+
+THEME_TIER = {
+    BLUNDER: TIER_STRONG,
+    TACTICAL: TIER_STRONG,
+    ATTACK: TIER_STRONG,
+    DEFENSE: TIER_STRONG,
+    STRATEGIC_ADVANTAGE: TIER_MEDIUM,
+    ENDGAME: TIER_MEDIUM,
+    OPENING: TIER_MEDIUM,
+    MISSED_OPPORTUNITY: TIER_MEDIUM,
+    PAWN_STRUCTURE: TIER_ENRICHMENT,
+    PIECE_ACTIVITY_GAP: TIER_ENRICHMENT,
+    KING_SAFETY_WARNING: TIER_ENRICHMENT,
+    INITIATIVE_SHIFT: TIER_ENRICHMENT,
+    EQUAL_POSITION: TIER_ENRICHMENT,  # filet neutre : présent seulement si rien d'autre, intensité 0
+}
+
+# --- Familles sémantiques ---------------------------------------------
+# Deux briques de la MÊME famille racontent au fond la même idée et ne
+# doivent pas coexister dans le commentaire final (anti-redondance, gérée
+# à l'étape de sélection). Ex. attendu par la roadmap : PAWN_STRUCTURE et
+# STRATEGIC_ADVANTAGE ne doivent pas "expliquer deux fois que la structure
+# est meilleure".
+#
+# ⚠ TAXONOMIE PROVISOIRE -- à affiner ensemble à l'étape 2/3 (sélection).
+# Placée ici pour que le collecteur soit déjà exploitable, mais les
+# regroupements exacts (ex: faut-il fusionner "advantage" et "structure" ?)
+# sont un choix de design à valider, pas une vérité figée.
+FAMILY_OPPONENT_MOVE = "opponent_move"  # qualité du dernier coup adverse
+FAMILY_TACTICS = "tactics"              # coup concret / calcul forcé
+FAMILY_KING = "king"                    # sécurité d'un roi (le mien ou l'adverse)
+FAMILY_ADVANTAGE = "advantage"          # avantage d'évaluation général
+FAMILY_STRUCTURE = "structure"          # structure de pions
+FAMILY_ACTIVITY = "activity"            # activité / mobilité des pièces
+FAMILY_DYNAMICS = "dynamics"            # tendance dans le temps (initiative)
+FAMILY_PHASE = "phase"                  # ambiance de phase (ouverture / finale)
+FAMILY_NEUTRAL = "neutral"              # rien ne se dégage
+
+THEME_FAMILY = {
+    BLUNDER: FAMILY_OPPONENT_MOVE,
+    MISSED_OPPORTUNITY: FAMILY_OPPONENT_MOVE,
+    TACTICAL: FAMILY_TACTICS,
+    ATTACK: FAMILY_KING,
+    DEFENSE: FAMILY_KING,
+    KING_SAFETY_WARNING: FAMILY_KING,
+    STRATEGIC_ADVANTAGE: FAMILY_ADVANTAGE,
+    PAWN_STRUCTURE: FAMILY_STRUCTURE,
+    PIECE_ACTIVITY_GAP: FAMILY_ACTIVITY,
+    INITIATIVE_SHIFT: FAMILY_DYNAMICS,
+    ENDGAME: FAMILY_PHASE,
+    OPENING: FAMILY_PHASE,
+    EQUAL_POSITION: FAMILY_NEUTRAL,
+}
+
+
+def theme_tier(theme):
+    """Tier de priorité d'un thème (voir THEME_TIER) -- défaut enrichissement si inconnu."""
+    return THEME_TIER.get(theme, TIER_ENRICHMENT)
+
+
+def theme_family(theme):
+    """Famille sémantique d'un thème (voir THEME_FAMILY) -- défaut : sa propre valeur (famille singleton) si inconnu."""
+    return THEME_FAMILY.get(theme, theme)
+
+
 # Seuils (centipawns), ajustables si l'usage réel montre qu'ils déclenchent
 # trop souvent/pas assez.
 BLUNDER_THRESHOLD_CP = 150       # l'adversaire vient de perdre au moins 1.5 pion d'éval -- erreur nette
@@ -650,3 +737,147 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
     # 11. Filet de sécurité : position jugée équilibrée.
     all_candidates.append(ThemeCandidate(EQUAL_POSITION, 0.0, {}))
     return ThemeResult(EQUAL_POSITION, eval_cp, phase=phase, caution=caution)
+
+
+# =====================================================================
+# NARRATION v2 -- COLLECTEUR DE BRIQUES (étape 1, voir NARRATION_V2_PLAN.txt)
+# =====================================================================
+def collect_theme_bricks(board, candidates, swing_cp=None,
+                          opponent_better_move_san=None, initiative_trend=None):
+    """
+    Version "briques" de detect_theme : teste TOUTES les conditions de
+    thème et retourne la LISTE de toutes celles qui matchent (chacune un
+    ThemeCandidate enrichi de son tier + sa famille), au lieu de s'arrêter
+    au premier match selon PRIORITY_ORDER.
+
+    C'est la première étape du pipeline narration v2 (détecter tous les
+    thèmes -> scorer -> sélectionner 1 principal + 0..2 secondaires ->
+    narrer). Cette fonction ne fait QUE la détection : ni scoring global,
+    ni sélection, ni texte -- ces étapes viennent après (theme_scoring.py,
+    weaver), et rien n'appelle encore collect_theme_bricks en production.
+
+    ⚠ ADDITIF ET NON BRANCHÉ : detect_theme() reste la source de vérité de
+    l'affichage actuel et n'est pas modifiée. Les conditions ci-dessous
+    sont un MIROIR EXACT de celles de detect_theme (mêmes seuils, mêmes
+    helpers, même sémantique de champs) -- à ceci près qu'il n'y a aucun
+    `return` anticipé : on empile toutes les briques valides.
+
+    Points de divergence VOLONTAIRES avec detect_theme, tous dus au fait
+    qu'on ne s'arrête plus au premier match :
+    - BLUNDER et MISSED_OPPORTUNITY sont mutuellement exclusifs par
+      construction (bandes de swing_cp disjointes), donc au plus un des
+      deux matche -- pas de risque de doublon "opponent_move".
+    - ENDGAME/OPENING (bande de phase) et STRATEGIC/PAWN/ACTIVITY/KING
+      peuvent désormais matcher SIMULTANÉMENT (detect_theme les rendait
+      exclusifs via l'early-return). C'est justement le but : plusieurs
+      observations coexistent, la sélection tranchera ensuite lesquelles
+      garder. La cohabitation OPENING/ENDGAME entre elles reste impossible
+      (phase unique).
+    - ATTACK/DEFENSE et KING_SAFETY_WARNING peuvent tous coexister ici
+      (même famille FAMILY_KING) : l'anti-redondance par famille, à
+      l'étape de sélection, se chargera de n'en garder qu'un.
+
+    Retourne une liste de ThemeCandidate (jamais vide : EQUAL_POSITION est
+    ajouté en dernier ressort si rien d'autre ne matche, comme le filet de
+    detect_theme). L'ordre de la liste suit PRIORITY_ORDER (ordre d'ajout),
+    mais n'a AUCUNE valeur décisionnelle ici -- c'est le scoring de l'étape
+    2 qui ordonnera vraiment.
+    """
+    my_side = board.turn
+    top_cp = candidates[0]["cp"] if candidates else None
+    eval_cp = top_cp if top_cp is not None else 0  # cp=None sur coup de livre -> neutre (voir detect_theme)
+    phase = _game_phase(board)
+
+    bricks = []
+
+    def _add(theme, strength, fields):
+        # Enrichit chaque brique de son tier + sa famille dès la collecte,
+        # pour que les étapes suivantes (scoring/sélection) n'aient pas à
+        # re-consulter les tables. On stocke ça dans `fields` (dict libre,
+        # voir ThemeCandidate) sous des clés préfixées `_` pour les
+        # distinguer des vrais champs de ThemeResult qui, eux, seront
+        # fusionnés dans le résultat final.
+        enriched = dict(fields)
+        enriched["_tier"] = theme_tier(theme)
+        enriched["_family"] = theme_family(theme)
+        bricks.append(ThemeCandidate(theme, strength, enriched))
+
+    # 1. BLUNDER
+    if swing_cp is not None and swing_cp >= BLUNDER_THRESHOLD_CP:
+        _add(BLUNDER, swing_cp, {"swing_cp": swing_cp})
+
+    # 2. TACTICAL
+    if len(candidates) >= 2:
+        gap = candidates[1]["eval_loss"]
+        top = candidates[0]
+        if gap >= TACTICAL_GAP_CP and (top["is_check"] or top["is_capture"]):
+            _add(TACTICAL, gap, {})
+
+    # 3. ATTACK / DEFENSE
+    opp_attacked, opp_defended = _king_safety_score(board, not my_side)
+    if eval_cp >= ATTACK_DEFENSE_EVAL_CP and opp_attacked > opp_defended:
+        _add(ATTACK, eval_cp, {"king_square": board.king(not my_side)})
+    my_attacked, my_defended = _king_safety_score(board, my_side)
+    if eval_cp <= -ATTACK_DEFENSE_EVAL_CP and my_attacked > my_defended:
+        _add(DEFENSE, -eval_cp, {"king_square": board.king(my_side)})
+
+    # 4. MISSED_OPPORTUNITY
+    if swing_cp is not None and MISSED_OPPORTUNITY_MIN_CP <= swing_cp < BLUNDER_THRESHOLD_CP:
+        _add(MISSED_OPPORTUNITY, swing_cp, {
+            "swing_cp": swing_cp, "opponent_better_move_san": opponent_better_move_san,
+        })
+
+    # 5. ENDGAME / OPENING (phase -- exclusives entre elles, pas des autres)
+    if phase == "endgame":
+        _add(ENDGAME, 1.0, {"passed_pawn_square": _find_passed_pawn(board, my_side)})
+    elif phase == "opening":
+        _add(OPENING, 1.0, {})
+
+    # 6. INITIATIVE_SHIFT
+    if initiative_trend is not None and abs(eval_cp) >= INITIATIVE_EVAL_MIN_ABS_CP:
+        losing_initiative = eval_cp > 0 and initiative_trend <= -INITIATIVE_SLOPE_CP
+        gaining_initiative = eval_cp < 0 and initiative_trend >= INITIATIVE_SLOPE_CP
+        if losing_initiative or gaining_initiative:
+            _add(INITIATIVE_SHIFT, abs(initiative_trend), {"initiative_slope_cp": initiative_trend})
+
+    # 7. STRATEGIC_ADVANTAGE (+ material_imbalance_kind + simplification_advice)
+    if abs(eval_cp) >= STRATEGIC_EVAL_CP:
+        _add(STRATEGIC_ADVANTAGE, abs(eval_cp), {
+            "material_imbalance_kind": _material_imbalance_kind(board, my_side),
+            "simplification_advice": _simplification_advice(initiative_trend),
+        })
+
+    # 8. PAWN_STRUCTURE (faiblesse adverse)
+    weakness_sq, weakness_kind = _find_pawn_weakness(board, not my_side)
+    if weakness_sq is not None:
+        _add(PAWN_STRUCTURE, 1.0, {
+            "pawn_weakness_square": weakness_sq, "pawn_weakness_kind": weakness_kind,
+        })
+
+    # 9. PIECE_ACTIVITY_GAP
+    ratio = _activity_ratio(board, my_side)
+    if ratio is not None and ratio >= ACTIVITY_GAP_RATIO:
+        _add(PIECE_ACTIVITY_GAP, ratio, {"activity_ratio": ratio})
+
+    # 10. KING_SAFETY_WARNING (mon roi d'abord, puis l'adverse)
+    if _king_safety_warning(board, my_side, eval_cp, phase):
+        _add(KING_SAFETY_WARNING, 1.0, {
+            "king_safety_warning_square": board.king(my_side), "king_safety_warning_is_mine": True,
+        })
+    elif _king_safety_warning(board, not my_side, -eval_cp, phase):
+        _add(KING_SAFETY_WARNING, 1.0, {
+            "king_safety_warning_square": board.king(not my_side), "king_safety_warning_is_mine": False,
+        })
+
+    # 11. Filet neutre : seulement si AUCUNE autre brique n'a matché (comme
+    #     detect_theme, EQUAL_POSITION n'a de sens qu'en dernier ressort).
+    if not bricks:
+        _add(EQUAL_POSITION, 0.0, {})
+
+    # NOTE (câblage étape 5) : `caution` (risque de pat, voir
+    # _stalemate_caution) n'est PAS porté par les briques -- c'est un
+    # avertissement TRANSVERSAL, indépendant du thème retenu. Le futur
+    # pipeline devra le calculer une seule fois à part (comme aujourd'hui
+    # dans detect_theme) et l'attacher au commentaire final, pas à une
+    # brique en particulier.
+    return bricks
