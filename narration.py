@@ -305,51 +305,80 @@ def _opening_classical_1(t, c, wm, wd, board):
             "label2": "Suite logique", "text2": "Ce coup avance l'un de ces 3 objectifs sans en sacrifier un autre."}
 
 
+_SIMPLIFICATION_ADVICE_TEXT = {
+    "simplify": "Cherche à échanger les pièces quand l'occasion se présente -- ça réduit le contre-jeu adverse et rend l'avantage plus facile à concrétiser.",
+    "keep_tension": "Évite les échanges pour l'instant -- garde les pièces sur l'échiquier tant que la dynamique actuelle joue en ta faveur.",
+}
+
+
 def _strategic_popular_1(t, c, wm, wd, board):
+    plan = _SIMPLIFICATION_ADVICE_TEXT.get(t.simplification_advice,
+        "Continue d'améliorer ta pièce la moins bien placée, l'avantage se maintient de lui-même.")
     return {"label1": "Avantage", "text1": "La position est nettement meilleure, sans qu'il y ait de coup immédiat à calculer.",
-            "label2": "Plan", "text2": "Continue d'améliorer ta pièce la moins bien placée, l'avantage se maintient de lui-même."}
+            "label2": "Plan", "text2": plan}
 
 
 def _strategic_popular_2(t, c, wm, wd, board):
     pawns = _pawns(t.eval_cp)
+    plan = _SIMPLIFICATION_ADVICE_TEXT.get(t.simplification_advice,
+        "Pas besoin de précipiter les choses -- améliore ta position coup après coup.")
     return {"label1": "Position favorable", "text1": f"L'avantage tourne autour de {pawns} pion{'s' if pawns > 1 else ''}, sans rien de forcé.",
-            "label2": "Plan", "text2": "Pas besoin de précipiter les choses -- améliore ta position coup après coup."}
+            "label2": "Plan", "text2": plan}
 
 
 def _strategic_tactical_1(t, c, wm, wd, board):
+    if t.simplification_advice == "keep_tension":
+        return {"label1": "Sous la surface", "text1": "L'avantage est réel, même sans motif tactique visible pour l'instant.",
+                "label2": "Suite", "text2": "La dynamique actuelle joue pour toi -- évite les échanges qui la calmeraient."}
     return {"label1": "Sous la surface", "text1": "L'avantage est réel, même sans motif tactique visible pour l'instant.",
             "label2": "Suite", "text2": "Cherche à créer une complication qui rendra la position plus dure à défendre."}
 
 
 def _strategic_tactical_2(t, c, wm, wd, board):
+    if t.simplification_advice == "keep_tension":
+        return {"label1": "Ça couve", "text1": "Rien d'immédiat, mais la tension va finir par se libérer quelque part.",
+                "label2": "Suite", "text2": "Garde les pièces sur l'échiquier -- ton initiative actuelle mérite d'être poussée plus loin."}
     return {"label1": "Ça couve", "text1": "Rien d'immédiat, mais la tension va finir par se libérer quelque part.",
             "label2": "Suite", "text2": "Prépare le terrain plutôt que de forcer un coup qui n'est pas encore prêt."}
 
 
 _MATERIAL_IMBALANCE_TEXT = {
-    "bishop_pair_open": (
-        "Tu as la paire de fous dans une position déjà ouverte -- l'avantage est immédiatement exploitable.",
-        "Continue d'ouvrir les lignes, ça les rend encore plus forts."
-    ),
-    "bishop_pair_closed": (
-        "Tu as la paire de fous, mais la position reste fermée pour l'instant -- l'avantage est encore latent.",
-        "Cherche à ouvrir la position progressivement, c'est là qu'ils prendront toute leur valeur."
-    ),
-    "knights_closed": (
-        "Tes cavaliers sont mieux adaptés que les fous adverses tant que la position reste fermée.",
-        "Évite d'ouvrir le jeu trop vite -- garde la structure fermée pour conserver cet avantage."
-    ),
-    "rook_vs_minors": (
-        "Tu as une tour contre des pièces mineures -- un déséquilibre qui favorise généralement la finale.",
-        "Cherche à simplifier vers une finale, la tour prend de la valeur quand le plateau se dégage."
-    ),
+    "bishop_pair_open": {
+        "text1": "Tu as la paire de fous dans une position déjà ouverte -- l'avantage est immédiatement exploitable.",
+        "simplify": "Continue d'ouvrir les lignes et cherche à échanger les pièces mineures adverses -- tes fous prendront encore plus de valeur dans un plateau dégagé.",
+        "keep_tension": "Continue d'ouvrir les lignes, mais garde les pièces sur l'échiquier pour l'instant -- la dynamique actuelle mérite d'être poussée avant de simplifier.",
+    },
+    "bishop_pair_closed": {
+        "text1": "Tu as la paire de fous, mais la position reste fermée pour l'instant -- l'avantage est encore latent.",
+        "simplify": "Cherche à ouvrir la position progressivement, c'est là qu'ils prendront toute leur valeur -- pas la peine de précipiter d'autres échanges avant ça.",
+        "keep_tension": "Cherche à ouvrir la position progressivement, mais évite les échanges pour l'instant -- ta dynamique actuelle vaut mieux qu'une simplification prématurée.",
+    },
+    "knights_closed": {
+        "text1": "Tes cavaliers sont mieux adaptés que les fous adverses tant que la position reste fermée.",
+        "simplify": "Garde la structure fermée et cherche à échanger les pièces les moins actives -- ça conserve ton avantage tout en simplifiant la conversion.",
+        "keep_tension": "Garde la structure fermée ET les pièces sur l'échiquier pour l'instant -- ta dynamique actuelle vaut mieux qu'une simplification prématurée.",
+    },
+    "rook_vs_minors": {
+        "text1": "Tu as une tour contre des pièces mineures -- un déséquilibre qui favorise généralement la finale.",
+        "simplify": "Cherche à simplifier vers une finale, la tour prend de la valeur quand le plateau se dégage.",
+        "keep_tension": "Résiste à l'envie de simplifier tout de suite -- ta dynamique actuelle vaut la peine d'être poussée avant de viser la finale.",
+    },
 }
 
 
 def _strategic_classical_1(t, c, wm, wd, board):
-    texts = _MATERIAL_IMBALANCE_TEXT.get(t.material_imbalance_kind)
-    if texts:
-        return {"label1": "Nature de l'avantage", "text1": texts[0], "label2": "Plan", "text2": texts[1]}
+    imbalance = _MATERIAL_IMBALANCE_TEXT.get(t.material_imbalance_kind)
+    if imbalance:
+        # simplification_advice vaut toujours "simplify" ou "keep_tension"
+        # dès que STRATEGIC_ADVANTAGE est actif (voir theme_detector.py,
+        # _simplification_advice -- jamais None en pratique aujourd'hui),
+        # mais le .get() avec repli reste une protection saine si ça change.
+        plan = imbalance.get(t.simplification_advice, imbalance["simplify"])
+        return {"label1": "Nature de l'avantage", "text1": imbalance["text1"], "label2": "Plan", "text2": plan}
+    simplify_text = _SIMPLIFICATION_ADVICE_TEXT.get(t.simplification_advice)
+    if simplify_text:
+        return {"label1": "Nature de l'avantage", "text1": "L'avantage tient à la position des pièces, pas à un gain de matériel.",
+                "label2": "Plan", "text2": simplify_text}
     return {"label1": "Nature de l'avantage", "text1": "L'avantage tient à la position des pièces, pas à un gain de matériel.",
             "label2": "Plan", "text2": "Continue à améliorer la coordination avant de chercher à forcer quoi que ce soit."}
 

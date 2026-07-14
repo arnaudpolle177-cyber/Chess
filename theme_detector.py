@@ -87,6 +87,15 @@ INITIATIVE_SLOPE_CP = 25  # pente minimale (cp par coup, régression linéaire) 
 # priorité) et pas totalement neutre (sous ce seuil, "je perds l'avantage"
 # n'a pas vraiment de sens -- il n'y avait pas d'avantage à perdre).
 INITIATIVE_EVAL_MIN_ABS_CP = 20
+# SIMPLIFICATION : enrichissement du texte STRATEGIC_ADVANTAGE (PAS un
+# thème séparé, voir la conversation) -- consulte initiative_trend, déjà
+# calculé à ce stade, pour trancher si l'avantage gagnerait à être
+# simplifié (position stable, rien de dynamique en cours) ou au contraire
+# mérite de garder la tension (initiative montante, mieux vaut ne pas
+# désamorcer l'élan). Même seuil que INITIATIVE_SLOPE_CP pour rester
+# cohérent avec ce qui déclencherait INITIATIVE_SHIFT si l'éval était
+# dans la bonne bande -- "keep_tension" ne se déclenche QUE si la pente
+# est déjà notable, pas sur un bruit résiduel.
 
 
 @dataclass
@@ -110,6 +119,11 @@ class ThemeResult:
     # Valeurs possibles : "bishop_pair_open" / "bishop_pair_closed" /
     # "knights_closed" / "rook_vs_minors" / None (pas de déséquilibre notable).
     material_imbalance_kind: Optional[str] = None
+    # "simplify" / "keep_tension" / None -- voir SIMPLIFICATION dans la
+    # conversation : enrichissement de STRATEGIC_ADVANTAGE, jamais un
+    # thème séparé (le "faut-il simplifier" est une CONCLUSION tirée d'un
+    # thème déjà actif, pas un fait détecté indépendamment sur le board).
+    simplification_advice: Optional[str] = None
     activity_ratio: Optional[float] = None  # mobilité pondérée (mien / adverse), voir PIECE_ACTIVITY_GAP
     king_safety_warning_square: Optional[int] = None  # roi concerné par l'avertissement préventif (voir KING_SAFETY_WARNING)
     king_safety_warning_is_mine: bool = True  # True = mon roi (à protéger), False = roi adverse (à cibler bientôt)
@@ -452,6 +466,28 @@ def compute_initiative_trend(eval_history):
     return numerator / denominator
 
 
+def _simplification_advice(initiative_trend):
+    """
+    Enrichissement de STRATEGIC_ADVANTAGE (voir la conversation) --
+    consulte initiative_trend (déjà calculé par l'appelant, aucun nouveau
+    signal moteur) pour trancher entre 2 conseils, sans prétendre à une
+    analyse plus fine que ce que ces 2 signaux permettent honnêtement :
+
+    - "keep_tension" : ma tendance d'initiative est déjà nettement
+      montante (pente >= INITIATIVE_SLOPE_CP) -- je suis en train de
+      construire quelque chose d'actif, simplifier casserait cet élan.
+    - "simplify" : pas de tendance montante marquée -- l'avantage est
+      stable, rien d'urgent en cours, la simplification est un plan
+      raisonnable par défaut.
+    - None : jamais retourné actuellement (couverture volontairement
+      binaire pour rester honnête sur ce que 2 signaux peuvent vraiment
+      trancher) -- réservé si une 3e nuance s'avère utile plus tard.
+    """
+    if initiative_trend is not None and initiative_trend >= INITIATIVE_SLOPE_CP:
+        return "keep_tension"
+    return "simplify"
+
+
 def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None, initiative_trend=None):
     """
     board : position ACTUELLE (chess.Board), au trait de "mon" camp (my_side).
@@ -558,12 +594,18 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
     #    immédiat. Inclut désormais le déséquilibre matériel qualitatif
     #    généralisé (voir _material_imbalance_kind -- fusionne l'ancien
     #    thème MATERIAL_IMBALANCE envisagé séparément, évite la redondance
-    #    avec ce thème qui décrivait déjà la même réalité).
+    #    avec ce thème qui décrivait déjà la même réalité) ET un avis de
+    #    simplification (voir _simplification_advice -- "faut-il chercher
+    #    à échanger les pièces ou garder la tension", conclusion tirée
+    #    d'initiative_trend, pas un nouveau signal détecté sur le board).
     if abs(eval_cp) >= STRATEGIC_EVAL_CP:
         imbalance = _material_imbalance_kind(board, my_side)
-        all_candidates.append(ThemeCandidate(STRATEGIC_ADVANTAGE, abs(eval_cp), {"material_imbalance_kind": imbalance}))
+        simplify_advice = _simplification_advice(initiative_trend)
+        all_candidates.append(ThemeCandidate(STRATEGIC_ADVANTAGE, abs(eval_cp), {
+            "material_imbalance_kind": imbalance, "simplification_advice": simplify_advice,
+        }))
         return ThemeResult(STRATEGIC_ADVANTAGE, eval_cp, phase=phase,
-                            material_imbalance_kind=imbalance, caution=caution)
+                            material_imbalance_kind=imbalance, simplification_advice=simplify_advice, caution=caution)
 
     # 8. PAWN_STRUCTURE -- faiblesse de structure ADVERSE à cibler (jamais
     #    les miennes, voir la conversation : ton offensif, "voici ce que tu
