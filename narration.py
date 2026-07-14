@@ -498,61 +498,362 @@ def _equal_classical_1(t, c, wm, wd, board):
             "label2": "Suite logique", "text2": "Identifie la case faible dans le camp adverse et vise-la progressivement."}
 
 
+# ---------------------------------------------------------------------
+# Variantes supplémentaires : 2 à 3 formulations par (thème x profil),
+# même IDÉE mais vocabulaire, structure de phrase et nuance différents.
+# Toujours fondées sur les mêmes données réelles que les variantes _1
+# (aucun champ inventé). _pick (dérivé de la position) répartit le choix,
+# ce qui évite que 2 positions proches retombent sur la même phrase.
+# ---------------------------------------------------------------------
+
+# --- BLUNDER ---
+def _blunder_popular_3(t, c, wm, wd, board):
+    why = _why_phrase(wm, wd, c, board)
+    text2 = "Convertis tout de suite : ici le coup le plus direct est souvent le meilleur."
+    if why:
+        text2 = f"Il y a du concret à jouer : {why}."
+    return {"label1": "Ouverture", "text1": "La porte vient de s'ouvrir dans son camp.",
+            "label2": "Concrétise", "text2": text2}
+
+
+def _blunder_tactical_3(t, c, wm, wd, board):
+    concept = _concept_name(wm)
+    text2 = "Cherche le coup qui punit le plus fort, quitte à donner du matériel."
+    if concept:
+        text2 = f"{concept[0].upper()}{concept[1:]} à exploiter -- ne te contente pas du coup tranquille."
+    return {"label1": "Faille ouverte", "text1": "Son dernier coup laisse une brèche exploitable.",
+            "label2": "Punis", "text2": text2}
+
+
+def _blunder_classical_2(t, c, wm, wd, board):
+    pawns = _pawns(t.swing_cp) if t.swing_cp else None
+    text1 = "Une imprécision adverse se convertit avec méthode, pas dans la précipitation."
+    if pawns:
+        text1 = f"L'adversaire vient de céder environ {pawns} pion{'s' if pawns > 1 else ''} -- à transformer proprement."
+    return {"label1": "Méthode", "text1": text1,
+            "label2": "Marche à suivre", "text2": "Calcule la ligne jusqu'au bout, puis exécute-la sans te retourner."}
+
+
+# --- TACTICAL ---
+def _tactical_popular_3(t, c, wm, wd, board):
+    return {"label1": "Un coup se détache", "text1": "Ici les coups ne se valent pas : il y en a un nettement au-dessus.",
+            "label2": "À faire", "text2": "Ne joue pas d'instinct -- vérifie d'abord les captures, échecs et coups forçants."}
+
+
+def _tactical_tactical_3(t, c, wm, wd, board):
+    concept = _concept_name(wm)
+    text1 = "La position réclame du calcul concret, pas un plan général."
+    if concept:
+        text1 = f"Il y a {concept} à concrétiser -- c'est le moment de calculer précisément."
+    return {"label1": "Calcul", "text1": text1,
+            "label2": "Suite", "text2": "Suis la variante forçante jusqu'au bout avant de la jouer."}
+
+
+def _tactical_classical_2(t, c, wm, wd, board):
+    return {"label1": "Type de position", "text1": "Position concrète : le calcul exact prime sur les principes généraux.",
+            "label2": "Priorité", "text2": "Contrôle les pièces non défendues et les échecs avant de te décider."}
+
+
+# --- ATTACK ---
+def _attack_popular_2(t, c, wm, wd, board):
+    where = f" (roi en {_sq(t.king_square)})" if t.king_square is not None else ""
+    return {"label1": "Cible dégagée", "text1": f"Le roi adverse est le point faible de la position{where}.",
+            "label2": "Plan", "text2": "Fais converger tes pièces vers lui, l'avantage se transformera de lui-même."}
+
+
+def _attack_tactical_2(t, c, wm, wd, board):
+    return {"label1": "À l'assaut", "text1": "Son roi est à découvert -- c'est là qu'il faut frapper.",
+            "label2": "Suite", "text2": "Ouvre une ligne vers lui, même au prix d'un pion ou d'une pièce."}
+
+
+def _attack_classical_2(t, c, wm, wd, board):
+    return {"label1": "Principe d'attaque", "text1": "Un roi affaibli s'attaque avec le maximum de pièces, pas avec une seule.",
+            "label2": "Suite logique", "text2": "Fais entrer ta pièce la moins active dans l'attaque avant de forcer."}
+
+
+# --- DEFENSE ---
+def _defense_popular_2(t, c, wm, wd, board):
+    where = f" en {_sq(t.king_square)}" if t.king_square is not None else ""
+    return {"label1": "Roi sous pression", "text1": f"Ton roi{where} est moins bien entouré que celui de l'adversaire.",
+            "label2": "Priorité", "text2": "Ramène un défenseur avant de penser à quoi que ce soit d'autre."}
+
+
+def _defense_tactical_2(t, c, wm, wd, board):
+    return {"label1": "Ça chauffe", "text1": "L'attaque adverse sur ton roi est bien réelle, pas une menace en l'air.",
+            "label2": "Réaction", "text2": "Trouve le coup qui casse l'attaque, ou qui contre-attaque plus vite qu'elle."}
+
+
+def _defense_classical_2(t, c, wm, wd, board):
+    return {"label1": "Principe", "text1": "Sous attaque, on traite d'abord le danger le plus direct avant tout projet actif.",
+            "label2": "Méthode", "text2": "Neutralise la pièce adverse la plus menaçante, puis réorganise ta défense."}
+
+
+# --- MISSED_OPPORTUNITY ---
+def _missed_popular_2(t, c, wm, wd, board):
+    text1 = "L'adversaire n'a pas exploité tout ce que sa position offrait."
+    if t.opponent_better_move_san:
+        text1 = f"{t.opponent_better_move_san} était plus fort pour lui -- il a laissé passer."
+    return {"label1": "Il t'a laissé respirer", "text1": text1,
+            "label2": "Maintenant", "text2": "Reprends la main tant que la fenêtre est ouverte."}
+
+
+def _missed_tactical_2(t, c, wm, wd, board):
+    text1 = "Il a choisi la continuation sage plutôt que la plus mordante."
+    if t.opponent_better_move_san:
+        text1 = f"{t.opponent_better_move_san} mettait bien plus de pression -- il ne l'a pas vu."
+    return {"label1": "Occasion manquée par lui", "text1": text1,
+            "label2": "Fonce", "text2": "Sois plus incisif que lui : force la position avant qu'il ne se recentre."}
+
+
+def _missed_classical_2(t, c, wm, wd, board):
+    text1 = "L'adversaire a dévié du plan le plus rigoureux."
+    if t.opponent_better_move_san:
+        text1 = f"{t.opponent_better_move_san} respectait mieux la logique de la position."
+    return {"label1": "Marge à exploiter", "text1": text1,
+            "label2": "Méthode", "text2": "Reprends un jeu solide : ton avantage doit croître naturellement."}
+
+
+# --- ENDGAME ---
+def _endgame_popular_2(t, c, wm, wd, board):
+    if t.passed_pawn_square is not None:
+        return {"label1": "Atout de finale", "text1": f"Ton pion en {_sq(t.passed_pawn_square)} a la voie libre vers la promotion.",
+                "label2": "Plan", "text2": "Fais-le avancer, mais garde une pièce pour l'escorter."}
+    return {"label1": "Le roi entre en jeu", "text1": "Sans les dames, ton roi peut enfin s'avancer sans danger.",
+            "label2": "Plan", "text2": "Dirige-le vers le centre : en finale, c'est une pièce offensive."}
+
+
+def _endgame_tactical_2(t, c, wm, wd, board):
+    return {"label1": "Précision de finale", "text1": "Il reste peu de pièces : la moindre imprécision se paie cash.",
+            "label2": "Suite", "text2": "Calcule à fond les courses de pions et l'activité du roi avant de jouer."}
+
+
+def _endgame_classical_2(t, c, wm, wd, board):
+    if t.passed_pawn_square is not None:
+        return {"label1": "Technique", "text1": f"Le pion passé en {_sq(t.passed_pawn_square)} est ta ressource principale ici.",
+                "label2": "Plan", "text2": "Soutiens-le avec le roi avant de le pousser -- ne l'avance jamais seul."}
+    return {"label1": "Technique de finale", "text1": "Sans pion passé, tout se joue sur l'activité du roi et l'opposition.",
+            "label2": "Plan", "text2": "Active ton roi et cherche à créer une faiblesse durable dans l'autre camp."}
+
+
+# --- OPENING ---
+def _opening_popular_2(t, c, wm, wd, board):
+    return {"label1": "Encore en développement", "text1": "L'important pour l'instant, c'est de faire sortir tes pièces.",
+            "label2": "Suite logique", "text2": "Développe une pièce inactive vers une bonne case, puis mets ton roi à l'abri."}
+
+
+def _opening_tactical_2(t, c, wm, wd, board):
+    return {"label1": "Patience", "text1": "L'attaque devra attendre : tes forces ne sont pas toutes entrées en jeu.",
+            "label2": "Suite", "text2": "Sors une pièce de plus vers le centre, l'occasion offensive viendra ensuite."}
+
+
+def _opening_classical_2(t, c, wm, wd, board):
+    return {"label1": "Principes d'ouverture", "text1": "Occupe le centre, développe vite, mets le roi en sécurité.",
+            "label2": "Suite logique", "text2": "Choisis le coup qui sert un de ces buts sans compromettre les deux autres."}
+
+
+# --- INITIATIVE_SHIFT ---
+def _initiative_popular_2(t, c, wm, wd, board):
+    if t.eval_cp > 0:
+        return {"label1": "L'élan retombe", "text1": "Tu es toujours mieux, mais tu poussais plus fort il y a quelques coups.",
+                "label2": "Réaction", "text2": "Relance une menace concrète pour ne pas laisser l'adversaire souffler."}
+    return {"label1": "Tu remontes", "text1": "La position reste inconfortable, mais la tendance s'inverse en ta faveur.",
+            "label2": "Suite", "text2": "Garde le rythme, l'adversaire perd du terrain coup après coup."}
+
+
+def _initiative_tactical_2(t, c, wm, wd, board):
+    if t.eval_cp > 0:
+        return {"label1": "Ne temporise pas", "text1": "Ton avance s'érode -- l'initiative se perd si on la laisse dormir.",
+                "label2": "Fonce", "text2": "Cherche le coup qui remet la pression tout de suite."}
+    return {"label1": "Le vent tourne", "text1": "Tu étais dominé, mais la dynamique bascule vers toi.",
+            "label2": "Suite", "text2": "Accentue cette bascule avant qu'il ne réalise ce qui se passe."}
+
+
+def _initiative_classical_2(t, c, wm, wd, board):
+    if t.eval_cp > 0:
+        return {"label1": "Principe", "text1": "Un avantage se cultive activement -- laissé tel quel, il tend à fondre.",
+                "label2": "Plan", "text2": "Fixe-toi un plan actif clair plutôt que d'attendre que la position parle."}
+    return {"label1": "Principe", "text1": "La partie se rééquilibre progressivement à ton profit.",
+            "label2": "Plan", "text2": "Poursuis avec des coups actifs, ne retombe pas dans la passivité trop tôt."}
+
+
+# --- STRATEGIC_ADVANTAGE ---
+def _strategic_popular_3(t, c, wm, wd, board):
+    plan = _SIMPLIFICATION_ADVICE_TEXT.get(t.simplification_advice,
+        "Améliore patiemment tes pièces, l'avantage ne s'en ira pas tout seul.")
+    return {"label1": "Tu tiens la position", "text1": "Tu es clairement mieux, sans qu'un coup précis soit à trouver dans l'immédiat.",
+            "label2": "Plan", "text2": plan}
+
+
+def _strategic_tactical_3(t, c, wm, wd, board):
+    if t.simplification_advice == "keep_tension":
+        return {"label1": "Pression qui monte", "text1": "L'avantage n'est pas qu'une affaire de matériel : ta dynamique compte autant.",
+                "label2": "Suite", "text2": "Garde les pièces sur l'échiquier et continue de resserrer l'étau."}
+    return {"label1": "Pression qui monte", "text1": "L'avantage est là, prêt à se transformer en jeu concret.",
+            "label2": "Suite", "text2": "Provoque une complication que l'adversaire aura du mal à tenir."}
+
+
+def _strategic_classical_2(t, c, wm, wd, board):
+    imbalance = _MATERIAL_IMBALANCE_TEXT.get(t.material_imbalance_kind)
+    if imbalance:
+        plan = imbalance.get(t.simplification_advice, imbalance["simplify"])
+        return {"label1": "D'où vient l'avantage", "text1": imbalance["text1"], "label2": "Plan", "text2": plan}
+    simplify_text = _SIMPLIFICATION_ADVICE_TEXT.get(t.simplification_advice)
+    if simplify_text:
+        return {"label1": "Avantage positionnel", "text1": "Ton avantage repose sur la qualité de tes pièces, pas sur le matériel.",
+                "label2": "Plan", "text2": simplify_text}
+    return {"label1": "Avantage positionnel", "text1": "L'avantage est structurel -- il tient à la position, pas au compte de matériel.",
+            "label2": "Plan", "text2": "Renforce la coordination de tes pièces avant de chercher à forcer."}
+
+
+# --- PAWN_STRUCTURE ---
+def _pawn_structure_popular_2(t, c, wm, wd, board):
+    kind = _PAWN_WEAKNESS_LABEL_FR.get(t.pawn_weakness_kind, "faiblesse de pion")
+    sq = _sq(t.pawn_weakness_square)
+    return {"label1": "Point d'appui", "text1": f"Le {kind} adverse en {sq} est une cible qui restera là un moment.",
+            "label2": "Plan", "text2": "Installe une pièce dessus ou devant, sans forcer : la pression fera le travail."}
+
+
+def _pawn_structure_tactical_2(t, c, wm, wd, board):
+    kind = _PAWN_WEAKNESS_LABEL_FR.get(t.pawn_weakness_kind, "faiblesse de pion")
+    sq = _sq(t.pawn_weakness_square)
+    return {"label1": "Brèche structurelle", "text1": f"Ce {kind} en {sq} est le genre de défaut autour duquel une attaque se construit.",
+            "label2": "Suite", "text2": "Oriente tes pièces vers cette zone et fais monter la pression."}
+
+
+def _pawn_structure_classical_2(t, c, wm, wd, board):
+    kind = _PAWN_WEAKNESS_LABEL_FR.get(t.pawn_weakness_kind, "faiblesse de pion")
+    sq = _sq(t.pawn_weakness_square)
+    return {"label1": "Cible durable", "text1": f"Le {kind} en {sq} est une faiblesse permanente -- un objectif de jeu positionnel typique.",
+            "label2": "Plan", "text2": "Empêche d'abord qu'il soit réparé, puis attaque-le avec assez de pièces."}
+
+
+# --- PIECE_ACTIVITY_GAP ---
+def _piece_activity_popular_2(t, c, wm, wd, board):
+    pct = round((t.activity_ratio - 1) * 100) if t.activity_ratio else None
+    extra = f" (près de {pct}% de cases utiles en plus)" if pct else ""
+    return {"label1": "Tes pièces respirent", "text1": f"Tes pièces sont bien plus actives que celles de l'adversaire{extra}, à matériel égal.",
+            "label2": "Plan", "text2": "Sers-toi de cette liberté pour créer des menaces avant qu'il ne se coordonne."}
+
+
+def _piece_activity_tactical_2(t, c, wm, wd, board):
+    return {"label1": "Domination d'espace", "text1": "Tes pièces occupent le terrain, les siennes sont à l'étroit.",
+            "label2": "Suite", "text2": "Transforme cette supériorité de mobilité en menace concrète avant qu'il ne se libère."}
+
+
+def _piece_activity_classical_2(t, c, wm, wd, board):
+    return {"label1": "Mobilité supérieure", "text1": "À matériel égal, tes pièces contrôlent plus de cases importantes que les siennes.",
+            "label2": "Plan", "text2": "Restreins encore ses pièces avant de convertir cette activité en avantage durable."}
+
+
+# --- KING_SAFETY_WARNING ---
+def _king_safety_warning_popular_2(t, c, wm, wd, board):
+    sq = _sq(t.king_safety_warning_square)
+    if t.king_safety_warning_is_mine:
+        return {"label1": "À surveiller", "text1": f"Ton roi en {sq} n'est pas encore à l'abri, et le centre commence à s'ouvrir.",
+                "label2": "Plan", "text2": "Mets-le en sécurité maintenant, avant que ça ne devienne un vrai souci."}
+    return {"label1": "Occasion à venir", "text1": f"Le roi adverse en {sq} tarde à se mettre à l'abri.",
+            "label2": "Plan", "text2": "Garde cette faiblesse en tête et prépare-toi à en profiter plus tard."}
+
+
+def _king_safety_warning_tactical_2(t, c, wm, wd, board):
+    sq = _sq(t.king_safety_warning_square)
+    if t.king_safety_warning_is_mine:
+        return {"label1": "Alerte", "text1": f"Ton roi en {sq} reste au centre alors que le jeu s'ouvre -- terrain glissant.",
+                "label2": "Suite", "text2": "Sécurise-le vite avant de te lancer dans quoi que ce soit d'ambitieux."}
+    return {"label1": "Proie potentielle", "text1": f"Le roi adverse en {sq} n'est pas encore attaqué, mais la cible se dessine.",
+            "label2": "Suite", "text2": "Amène tes pièces en position pour frapper dès que le centre craque."}
+
+
+def _king_safety_warning_classical_2(t, c, wm, wd, board):
+    sq = _sq(t.king_safety_warning_square)
+    if t.king_safety_warning_is_mine:
+        return {"label1": "Principe", "text1": f"La sécurité du roi prime : le tien en {sq} n'est pas encore roqué dans un centre qui s'ouvre.",
+                "label2": "Plan", "text2": "Achève ta mise à l'abri avant d'entamer un plan plus large."}
+    return {"label1": "Principe", "text1": f"Le roi adverse en {sq} néglige sa sécurité dans un centre instable.",
+            "label2": "Plan", "text2": "Poursuis ton développement : ce retard risque de lui coûter cher plus tard."}
+
+
+# --- EQUAL_POSITION ---
+def _equal_popular_3(t, c, wm, wd, board):
+    return {"label1": "À égalité", "text1": "Ni toi ni l'adversaire n'avez pris l'ascendant pour le moment.",
+            "label2": "Approche", "text2": "Améliore ta pièce la moins bien placée, sans chercher à forcer le destin."}
+
+
+def _equal_tactical_3(t, c, wm, wd, board):
+    return {"label1": "Équilibre instable", "text1": "C'est nivelé, mais la position a du potentiel de déséquilibre.",
+            "label2": "Suite", "text2": "Cherche le coup qui pose le plus de problèmes concrets à l'adversaire."}
+
+
+def _equal_classical_2(t, c, wm, wd, board):
+    return {"label1": "Partie équilibrée", "text1": "Rien ne tranche : c'est la structure de pions qui doit guider ton plan.",
+            "label2": "Suite logique", "text2": "Repère la case ou la colonne faible adverse et construis ton jeu autour."}
+
+
 TEMPLATES = {
     BLUNDER: {
-        "popular": [_blunder_popular_1, _blunder_popular_2],
-        "creative": [_blunder_tactical_1, _blunder_tactical_2],
-        "classical": [_blunder_classical_1],
+        "popular": [_blunder_popular_1, _blunder_popular_2, _blunder_popular_3],
+        "creative": [_blunder_tactical_1, _blunder_tactical_2, _blunder_tactical_3],
+        "classical": [_blunder_classical_1, _blunder_classical_2],
     },
     TACTICAL: {
-        "popular": [_tactical_popular_1, _tactical_popular_2],
-        "creative": [_tactical_tactical_1, _tactical_tactical_2],
-        "classical": [_tactical_classical_1],
+        "popular": [_tactical_popular_1, _tactical_popular_2, _tactical_popular_3],
+        "creative": [_tactical_tactical_1, _tactical_tactical_2, _tactical_tactical_3],
+        "classical": [_tactical_classical_1, _tactical_classical_2],
     },
     ATTACK: {
-        "popular": [_attack_popular_1], "creative": [_attack_tactical_1], "classical": [_attack_classical_1],
+        "popular": [_attack_popular_1, _attack_popular_2],
+        "creative": [_attack_tactical_1, _attack_tactical_2],
+        "classical": [_attack_classical_1, _attack_classical_2],
     },
     DEFENSE: {
-        "popular": [_defense_popular_1], "creative": [_defense_tactical_1], "classical": [_defense_classical_1],
+        "popular": [_defense_popular_1, _defense_popular_2],
+        "creative": [_defense_tactical_1, _defense_tactical_2],
+        "classical": [_defense_classical_1, _defense_classical_2],
     },
     MISSED_OPPORTUNITY: {
-        "popular": [_missed_popular_1], "creative": [_missed_tactical_1], "classical": [_missed_classical_1],
+        "popular": [_missed_popular_1, _missed_popular_2],
+        "creative": [_missed_tactical_1, _missed_tactical_2],
+        "classical": [_missed_classical_1, _missed_classical_2],
     },
     ENDGAME: {
-        "popular": [_endgame_popular_1], "creative": [_endgame_tactical_1], "classical": [_endgame_classical_1],
+        "popular": [_endgame_popular_1, _endgame_popular_2],
+        "creative": [_endgame_tactical_1, _endgame_tactical_2],
+        "classical": [_endgame_classical_1, _endgame_classical_2],
     },
     OPENING: {
-        "popular": [_opening_popular_1], "creative": [_opening_tactical_1], "classical": [_opening_classical_1],
+        "popular": [_opening_popular_1, _opening_popular_2],
+        "creative": [_opening_tactical_1, _opening_tactical_2],
+        "classical": [_opening_classical_1, _opening_classical_2],
     },
     INITIATIVE_SHIFT: {
-        "popular": [_initiative_popular_1],
-        "creative": [_initiative_tactical_1],
-        "classical": [_initiative_classical_1],
+        "popular": [_initiative_popular_1, _initiative_popular_2],
+        "creative": [_initiative_tactical_1, _initiative_tactical_2],
+        "classical": [_initiative_classical_1, _initiative_classical_2],
     },
     STRATEGIC_ADVANTAGE: {
-        "popular": [_strategic_popular_1, _strategic_popular_2],
-        "creative": [_strategic_tactical_1, _strategic_tactical_2],
-        "classical": [_strategic_classical_1],
+        "popular": [_strategic_popular_1, _strategic_popular_2, _strategic_popular_3],
+        "creative": [_strategic_tactical_1, _strategic_tactical_2, _strategic_tactical_3],
+        "classical": [_strategic_classical_1, _strategic_classical_2],
     },
     PAWN_STRUCTURE: {
-        "popular": [_pawn_structure_popular_1],
-        "creative": [_pawn_structure_tactical_1],
-        "classical": [_pawn_structure_classical_1],
+        "popular": [_pawn_structure_popular_1, _pawn_structure_popular_2],
+        "creative": [_pawn_structure_tactical_1, _pawn_structure_tactical_2],
+        "classical": [_pawn_structure_classical_1, _pawn_structure_classical_2],
     },
     PIECE_ACTIVITY_GAP: {
-        "popular": [_piece_activity_popular_1],
-        "creative": [_piece_activity_tactical_1],
-        "classical": [_piece_activity_classical_1],
+        "popular": [_piece_activity_popular_1, _piece_activity_popular_2],
+        "creative": [_piece_activity_tactical_1, _piece_activity_tactical_2],
+        "classical": [_piece_activity_classical_1, _piece_activity_classical_2],
     },
     KING_SAFETY_WARNING: {
-        "popular": [_king_safety_warning_popular_1],
-        "creative": [_king_safety_warning_tactical_1],
-        "classical": [_king_safety_warning_classical_1],
+        "popular": [_king_safety_warning_popular_1, _king_safety_warning_popular_2],
+        "creative": [_king_safety_warning_tactical_1, _king_safety_warning_tactical_2],
+        "classical": [_king_safety_warning_classical_1, _king_safety_warning_classical_2],
     },
     EQUAL_POSITION: {
-        "popular": [_equal_popular_1, _equal_popular_2],
-        "creative": [_equal_tactical_1, _equal_tactical_2],
-        "classical": [_equal_classical_1],
+        "popular": [_equal_popular_1, _equal_popular_2, _equal_popular_3],
+        "creative": [_equal_tactical_1, _equal_tactical_2, _equal_tactical_3],
+        "classical": [_equal_classical_1, _equal_classical_2],
     },
 }
 
