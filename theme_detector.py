@@ -484,7 +484,7 @@ def _is_center_open(board):
     return False
 
 
-def _king_safety_warning(board, color, eval_cp_for_color, phase):
+def _king_safety_warning(board, color, eval_cp_for_color, phase, ply_count=None):
     """
     Signal PRÉVENTIF pour `color` (voir la conversation, KING_SAFETY_WARNING)
     -- combine 4 conditions, toutes nécessaires, pour rester spécifique et
@@ -506,12 +506,20 @@ def _king_safety_warning(board, color, eval_cp_for_color, phase):
     eval_cp_for_color : eval_cp DÉJÀ orienté du point de vue de `color`
     (positif = favorable à `color`) -- l'appelant doit passer eval_cp pour
     my_side et -eval_cp pour l'adversaire (voir detect_theme).
+    ply_count : nombre de demi-coups réellement joués (voir detect_theme,
+        move_history) -- remplace board.fullmove_number, qui vaut TOUJOURS
+        1 dans ce projet (le FEN reconstruit côté navigateur ne porte
+        jamais le vrai numéro de coup, voir chess_coach_bridge.user.js) et
+        rendait donc ce garde-fou totalement inopérant (jamais dépassé,
+        quelle que soit la longueur réelle de la partie). None (par
+        défaut) = ancien comportement (garde-fou toujours franchi, comme
+        avant ce correctif) si l'appelant n'a pas l'historique.
 
     Retourne True si l'avertissement doit se déclencher pour `color`.
     """
     if phase == "endgame":
         return False
-    if board.fullmove_number > KING_SAFETY_WARNING_MAX_MOVE_NUMBER:
+    if ply_count is not None and ply_count > KING_SAFETY_WARNING_MAX_MOVE_NUMBER * 2:
         return False
     if not (0 <= eval_cp_for_color < ATTACK_DEFENSE_EVAL_CP):
         return False
@@ -573,7 +581,8 @@ def _simplification_advice(initiative_trend):
     return "simplify"
 
 
-def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None, initiative_trend=None):
+def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None, initiative_trend=None,
+                  move_history=None):
     """
     board : position ACTUELLE (chess.Board), au trait de "mon" camp (my_side).
     candidates : liste triée meilleur -> moins bon (voir engine_analysis.analyze_candidates).
@@ -588,6 +597,13 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
         évals "à mon tour" (voir web_bridge.py, compute_initiative_trend /
         _initiative_history) -- None si pas encore assez d'historique.
         Utilisé pour INITIATIVE_SHIFT.
+    move_history : liste des coups SAN joués depuis le début de la partie
+        (voir web_bridge.py, BridgeState._move_history) -- source FIABLE du
+        nombre de demi-coups réellement joués, contrairement au numéro de
+        coup du FEN (toujours "1", voir chess_coach_bridge.user.js). Utilisé
+        pour plafonner la phase "opening" (voir human_profile._game_phase,
+        OPENING_MAX_PLY) et le signal préventif KING_SAFETY_WARNING. None
+        (par défaut) = repli sur l'ancien comportement (matériel seul).
 
     Retourne un ThemeResult -- toujours un thème (EQUAL_POSITION au pire),
     jamais None.
@@ -598,6 +614,7 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
     PRIORITY_ORDER (comportement inchangé) -- cette collecte prépare la
     future fusion multi-thèmes sans encore la faire.
     """
+    ply_count = len(move_history) if move_history is not None else None
     my_side = board.turn
     top_cp = candidates[0]["cp"] if candidates else None
     # cp peut être None pour un coup issu du livre d'ouvertures (voir
@@ -609,7 +626,7 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
     # est absorbée mais empêche le cache de thème d'avancer). 0 = repli
     # neutre ("on ne sait pas, on suppose une position à peu près égale").
     eval_cp = top_cp if top_cp is not None else 0
-    phase = _game_phase(board)
+    phase = _game_phase(board, ply_count)
     caution = _stalemate_caution(board, my_side, eval_cp, phase)
     all_candidates = []  # voir ThemeCandidate -- réserve pour la future fusion, pas encore utilisée pour l'affichage
 
@@ -719,14 +736,14 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
     #    est déjà critique -- voir la conversation, évite la redondance).
     #    Mon roi d'abord (plus directement actionnable par l'utilisateur),
     #    puis le roi adverse (occasion à repérer, moins urgent).
-    if _king_safety_warning(board, my_side, eval_cp, phase):
+    if _king_safety_warning(board, my_side, eval_cp, phase, ply_count):
         my_king_sq = board.king(my_side)
         all_candidates.append(ThemeCandidate(KING_SAFETY_WARNING, 1.0, {
             "king_safety_warning_square": my_king_sq, "king_safety_warning_is_mine": True,
         }))
         return ThemeResult(KING_SAFETY_WARNING, eval_cp, phase=phase,
                             king_safety_warning_square=my_king_sq, king_safety_warning_is_mine=True, caution=caution)
-    if _king_safety_warning(board, not my_side, -eval_cp, phase):
+    if _king_safety_warning(board, not my_side, -eval_cp, phase, ply_count):
         opp_king_sq = board.king(not my_side)
         all_candidates.append(ThemeCandidate(KING_SAFETY_WARNING, 1.0, {
             "king_safety_warning_square": opp_king_sq, "king_safety_warning_is_mine": False,
@@ -743,7 +760,7 @@ def detect_theme(board, candidates, swing_cp=None, opponent_better_move_san=None
 # NARRATION v2 -- COLLECTEUR DE BRIQUES (étape 1, voir NARRATION_V2_PLAN.txt)
 # =====================================================================
 def collect_theme_bricks(board, candidates, swing_cp=None,
-                          opponent_better_move_san=None, initiative_trend=None):
+                          opponent_better_move_san=None, initiative_trend=None, move_history=None):
     """
     Version "briques" de detect_theme : teste TOUTES les conditions de
     thème et retourne la LISTE de toutes celles qui matchent (chacune un
@@ -786,7 +803,8 @@ def collect_theme_bricks(board, candidates, swing_cp=None,
     my_side = board.turn
     top_cp = candidates[0]["cp"] if candidates else None
     eval_cp = top_cp if top_cp is not None else 0  # cp=None sur coup de livre -> neutre (voir detect_theme)
-    phase = _game_phase(board)
+    ply_count = len(move_history) if move_history is not None else None
+    phase = _game_phase(board, ply_count)
 
     bricks = []
 
@@ -860,11 +878,11 @@ def collect_theme_bricks(board, candidates, swing_cp=None,
         _add(PIECE_ACTIVITY_GAP, ratio, {"activity_ratio": ratio})
 
     # 10. KING_SAFETY_WARNING (mon roi d'abord, puis l'adverse)
-    if _king_safety_warning(board, my_side, eval_cp, phase):
+    if _king_safety_warning(board, my_side, eval_cp, phase, ply_count):
         _add(KING_SAFETY_WARNING, 1.0, {
             "king_safety_warning_square": board.king(my_side), "king_safety_warning_is_mine": True,
         })
-    elif _king_safety_warning(board, not my_side, -eval_cp, phase):
+    elif _king_safety_warning(board, not my_side, -eval_cp, phase, ply_count):
         _add(KING_SAFETY_WARNING, 1.0, {
             "king_safety_warning_square": board.king(not my_side), "king_safety_warning_is_mine": False,
         })

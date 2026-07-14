@@ -173,6 +173,14 @@ def _tiered_for_position(tier: EloTier, board):
 
 
 
+# Au-delà de ce nombre de demi-coups RÉELLEMENT joués (voir ply_count dans
+# _game_phase), on ne considère plus qu'on est en "opening" même si le
+# matériel reste élevé -- 14 demi-coups = 7 coups pleins, seuil choisi
+# d'après l'usage réel (voir la conversation : "en vrai c'est souvent max
+# 7 coups").
+OPENING_MAX_PLY = 14
+
+
 def _material_count(board):
     """Total des points de matériel sur l'échiquier (hors rois), les 2 camps confondus."""
     total = 0
@@ -182,17 +190,32 @@ def _material_count(board):
     return total
 
 
-def _game_phase(board):
+def _game_phase(board, ply_count=None):
     """
-    "opening" / "middlegame" / "endgame", à partir du matériel restant sur
-    l'échiquier (pas du numéro de coup -- pas fiable ici, voir
-    chess_coach_bridge.user.js qui reconstruit toujours un FEN avec
-    compteurs à "0 1"). Départ = 78 points de matériel (hors rois).
+    "opening" / "middlegame" / "endgame".
+
+    Basé sur le matériel restant sur l'échiquier (pas du numéro de coup du
+    FEN -- pas fiable ici, voir chess_coach_bridge.user.js qui reconstruit
+    toujours un FEN avec compteurs à "0 1"). Départ = 78 points de matériel
+    (hors rois).
+
+    ply_count (optionnel) : nombre de demi-coups RÉELLEMENT joués depuis le
+    début de la partie, déduit côté serveur par comparaison de FEN successifs
+    (voir web_bridge.py, BridgeState._move_history) -- SOURCE FIABLE,
+    contrairement au numéro de coup du FEN lui-même. Ajoute une 2e condition
+    à la phase "opening" : au-delà de OPENING_MAX_PLY demi-coups, on ne
+    reste plus en "opening" même si le matériel est encore élevé (partie
+    calme, peu d'échanges) -- sans ça, une position du 18e coup avec juste
+    une pièce mineure échangée restait signalée "ouverture" en boucle (bug
+    observé en pratique : le coach donnait encore des conseils de
+    développement en plein milieu de partie tactique). None (par défaut) =
+    comportement au matériel seul, pour les appelants qui n'ont pas accès à
+    cet historique.
     """
     if board is None:
         return "middlegame"
     material = _material_count(board)
-    if material >= 60:
+    if material >= 60 and (ply_count is None or ply_count < OPENING_MAX_PLY):
         return "opening"
     if material >= 24:
         return "middlegame"

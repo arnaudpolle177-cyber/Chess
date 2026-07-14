@@ -269,7 +269,7 @@ class BridgeState:
                 # comparaison numérique planter sur None (voir le
                 # commentaire équivalent dans theme_detector.py).
                 try:
-                    theme_result = theme_detector.detect_theme(board, candidates)
+                    theme_result = theme_detector.detect_theme(board, candidates, move_history=list(self._move_history))
                 except Exception as e:
                     print(f"⚠ Détection de thème en erreur (coup de livre), repli neutre : {e}")
                     theme_result = theme_detector.ThemeResult(theme_detector.EQUAL_POSITION, 0)
@@ -315,7 +315,7 @@ class BridgeState:
             try:
                 theme_result = theme_detector.detect_theme(
                     board, candidates, swing_cp=swing_cp, opponent_better_move_san=opponent_better_move_san,
-                    initiative_trend=initiative_trend,
+                    initiative_trend=initiative_trend, move_history=list(self._move_history),
                 )
             except Exception as e:
                 # Filet de sécurité : MÊME en cas d'erreur imprévue ici (pas
@@ -699,7 +699,7 @@ class BridgeState:
                 # double-ajout si ce chemin s'exécute en concurrence avec
                 # le chemin normal, ce qui fausserait la pente calculée --
                 # pire qu'une fonctionnalité simplement absente une fois.
-                else theme_detector.detect_theme(board, result["candidates"])
+                else theme_detector.detect_theme(board, result["candidates"], move_history=list(self._move_history))
             )
             why_motif, why_detail = why_detector.detect_why(board, chosen)
             # engine_lock requis ici : narration.generate_narration() peut
