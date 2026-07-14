@@ -28,6 +28,7 @@ Annulation des analyses obsolètes (important) :
 import json
 import os
 import threading
+import copy
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -44,6 +45,7 @@ import why_detector
 import narration
 import narration_v2
 import opening_identity
+import variation_narrator
 
 DEFAULT_PORT = 8765
 # Aperçu rapide (depth 12, quasi instantané) : calculé UNE fois pour les 4
@@ -203,6 +205,16 @@ class BridgeState:
         # generate_narration (façade v1) reste disponible en repli si la
         # sélection v2 manque (cache miss concurrent, cf. handle_single_profile).
         self._selection_cache = narration_v2.SelectionCache()
+        # Cache des FAITS de scénario (voir narration.compute_scenario_facts)
+        # pour LA POSITION COURANTE UNIQUEMENT -- clé (fen, move_uci), vidé à
+        # chaque nouvelle position (voir handle_single_profile,
+        # is_new_position) puisqu'un fait de scénario n'a de sens que pour la
+        # position qui l'a produit. Mutualise le coût moteur entre profils qui
+        # choisissent le MÊME coup sur la même position ("positions à
+        # consensus") : compute_scenario_facts (coûteux, appel moteur)
+        # n'est alors exécuté qu'une fois, render_scenario (gratuit) ensuite
+        # par profil -- voir _attach_scenario_async.
+        self._scenario_cache = {}
 
     def _track_opponent_eval(self, fen, board, position_seq):
         """
@@ -538,6 +550,72 @@ class BridgeState:
         except Exception:
             pass  # cosmétique (identification d'ouverture) -- jamais bloquant
 
+    def _attach_scenario_async(self, fen, board, chosen, profile_id, position_seq, elo_tier_id, entry):
+        """
+        Calcule le scénario (trajectoire d'éval + motifs structurels, voir
+        narration.compute_scenario_facts) EN TÂCHE DE FOND, une fois que la
+        flèche et le thème ont DÉJÀ été poussés une 1re fois (voir
+        handle_single_profile) -- c'est la seule étape de la narration qui
+        interroge le moteur, donc la seule qui a besoin d'être différée.
+
+        2 gardes anti-péremption (même principe que _track_opponent_eval) :
+        1. Juste après avoir obtenu engine_lock, AVANT de lancer le calcul --
+           si une position plus récente est arrivée pendant l'attente du
+           verrou, inutile de dépenser du temps moteur pour un scénario
+           qui ne sera de toute façon plus affiché.
+        2. Juste avant de pousser l'entrée enrichie -- si la position a
+           changé PENDANT le calcul lui-même, on n'écrase pas l'affichage
+           actuel avec un scénario devenu obsolète.
+        Dans les 2 cas, abandon silencieux (pas d'exception à faire remonter :
+        ce thread ne répond à aucune requête HTTP).
+
+        entry : COPIE PROFONDE (voir copy.deepcopy côté appelant) de l'entrée
+        déjà poussée -- on l'enrichit ici avec narration["suite"] puis on la
+        repousse via on_profile_update. updateProfile côté UI (webview_ui.py)
+        est idempotent : ce 2e push ne fait que compléter l'affichage
+        existant, jamais de scintillement (la flèche/le thème ne bougent
+        pas, seul le paragraphe "Suite envisagée" apparaît).
+
+        cache_key (fen, move_uci) : voir self._scenario_cache -- mutualise le
+        calcul coûteux (compute_scenario_facts) entre profils qui choisissent
+        le MÊME coup sur cette position ("positions à consensus") ; le rendu
+        texte (render_scenario, gratuit) reste lui propre à chaque profil.
+        """
+        cache_key = (fen, chosen.get("move_uci"))
+        try:
+            with self.lock:
+                if position_seq != self._position_seq:
+                    return  # déjà dépassée avant même d'essayer -- pas la peine de prendre engine_lock
+                facts = self._scenario_cache.get(cache_key, "MISS")
+
+            if facts == "MISS":
+                with self.engine_lock:
+                    with self.lock:
+                        if position_seq != self._position_seq:
+                            return  # garde n°1 : dépassée pendant l'attente du verrou moteur
+                    tier = human_profile.ELO_TIERS.get(elo_tier_id)
+                    depth = tier.depth_max if tier is not None else variation_narrator.DEFAULT_EVAL_DEPTH
+                    facts = narration.compute_scenario_facts(chosen, board, self.engine, depth=depth)
+                with self.lock:
+                    # Cache borné implicitement : vidé à chaque nouvelle
+                    # position (voir handle_single_profile, is_new_position),
+                    # jamais de LRU/taille max à gérer ici.
+                    self._scenario_cache[cache_key] = facts
+
+            suite = narration.render_scenario(facts, profile_id)
+            if not suite:
+                return
+
+            with self.lock:
+                if position_seq != self._position_seq:
+                    return  # garde n°2 : dépassée pendant le calcul lui-même
+
+            entry.setdefault("narration", {})["suite"] = suite
+            if self.on_profile_update:
+                self.on_profile_update(profile_id, entry)
+        except Exception as e:
+            print(f"⚠ Scénario différé indisponible ({profile_id}) : {e}")
+
     def handle_single_profile(self, fen, profile_id):
         """
         Analyse la position pour UN SEUL profil de jeu ("popular",
@@ -558,6 +636,7 @@ class BridgeState:
             elo_tier_id = self.elo_tier_id
             if is_new_position:
                 self._position_seq += 1
+                self._scenario_cache = {}
             current_seq = self._position_seq
 
         if is_new_position:
@@ -703,16 +782,17 @@ class BridgeState:
                 else theme_detector.detect_theme(board, result["candidates"], move_history=list(self._move_history))
             )
             why_motif, why_detail = why_detector.detect_why(board, chosen)
-            # engine_lock requis ici : narration.generate_narration() peut
-            # interroger le moteur pour la trajectoire d'éval du scénario
-            # (voir variation_narrator.py) -- le moteur ne supporte qu'une
-            # recherche à la fois, jamais d'appel moteur hors de ce verrou.
-            with self.engine_lock:
-                entry["narration"] = narration.generate_narration(
-                    theme_result, profile_id, chosen, why_motif, why_detail, board,
-                    move_history=list(self._move_history), opening_book=self.opening_identity,
-                    engine=self.engine,
-                )
+            # include_scenario=False : la partie coûteuse du scénario
+            # (trajectoire d'éval moteur) n'est PAS calculée ici -- voir
+            # _attach_scenario_async plus bas, appelé APRÈS que la flèche ait
+            # déjà été poussée. Plus d'engine_lock tenu sur ce chemin : la
+            # flèche n'attend donc plus jamais le scénario, seulement les
+            # candidats déjà calculés plus haut.
+            entry["narration"] = narration.generate_narration(
+                theme_result, profile_id, chosen, why_motif, why_detail, board,
+                move_history=list(self._move_history), opening_book=self.opening_identity,
+                engine=self.engine, include_scenario=False,
+            )
 
             # Narration v2 (transition) : ajoute le PARAGRAPHE tissé (une seule
             # pensée de 2-4 phrases, principal + secondaires) au dict
@@ -753,6 +833,23 @@ class BridgeState:
 
         if self.on_profile_update:
             self.on_profile_update(profile_id, dict(entry))
+
+        # Scénario différé (trajectoire d'éval + motifs structurels) : la
+        # flèche et le thème sont déjà affichés (push ci-dessus), ce thread ne
+        # fait qu'ENRICHIR l'affichage un peu plus tard avec narration["suite"]
+        # -- voir _attach_scenario_async. deepcopy (pas dict() simple) : entry
+        # contient un sous-dict "narration" mutable, il ne doit PAS être
+        # partagé par référence avec l'entry déjà renvoyée/poussée ci-dessus
+        # (sinon le thread muterait aussi la copie déjà envoyée). Uniquement
+        # si un scénario a une chance d'exister (pv_uci d'au moins 2 coups) --
+        # évite de spawn un thread pour rien sur un coup de mat ou de livre
+        # sans suite calculée.
+        if chosen.get("pv_uci") and len(chosen["pv_uci"]) >= 2:
+            threading.Thread(
+                target=self._attach_scenario_async,
+                args=(fen, board, chosen, profile_id, current_seq, elo_tier_id, copy.deepcopy(entry)),
+                daemon=True,
+            ).start()
 
         return entry
 
@@ -814,9 +911,23 @@ def _make_handler(state: BridgeState):
                 fen = data["fen"]
                 profile = data.get("profile")  # un seul profil "humain"
                 quick = data.get("quick", False)  # aperçu rapide (depth 12) des 4 profils d'un coup
+                side = data.get("side")  # couleur du joueur, auto-détectée par le userscript (orientation du plateau)
             except Exception:
                 self._send_single(400, {"error": "JSON invalide, champ \"fen\" attendu"})
                 return
+
+            # Détection AUTOMATIQUE du camp (voir chess_coach_bridge.user.js :
+            # l'orientation du plateau = tes pièces en bas = ta couleur). Le
+            # userscript envoie 'side' à CHAQUE requête, mais on n'applique le
+            # changement que s'il DIFFÈRE du camp actuel : set_my_side() vide
+            # _initiative_history (par cohérence, voir son commentaire), donc
+            # l'appeler à chaque poll réinitialiserait en boucle la fenêtre
+            # d'initiative et empêcherait INITIATIVE_SHIFT de jamais se
+            # déclencher. Le bouton manuel de la fenêtre Python reste un
+            # override : le dernier réglage reçu (auto ou manuel) gagne.
+            if side in ("w", "b") and side != state.my_side:
+                state.set_my_side(side)
+                print(f"Coach : camp auto-détecté depuis le navigateur -> {'Blancs' if side == 'w' else 'Noirs'}")
 
             if quick:
                 result = state.handle_quick_take(fen)

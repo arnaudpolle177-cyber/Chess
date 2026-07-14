@@ -13,14 +13,15 @@ Principe (2 sources d'information, combinées) :
    d'une pièce sans capture, rupture de pion qui ouvre une ligne, pression
    croissante autour du roi adverse (coups qui rapprochent des pièces de
    lui). Ce sont des FAITS géométriques/matériels, jamais inventés.
-2. TRAJECTOIRE D'ÉVAL -- une éval RAPIDE (depth réduite, voir EVAL_DEPTH)
-   à chaque étape de la ligne, pour dire si la position s'améliore
-   progressivement, décolle d'un coup, ou reste stable. Profondeur
-   volontairement plus basse que le niveau Elo choisi par l'utilisateur :
-   à depth 13, un coup de ligne peut différer du "vrai" coup calculé à
-   depth 18-24 pour la flèche affichée -- l'éval intermédiaire ne sert
-   qu'à dessiner une TENDANCE, jamais à recommander un coup précis, donc
-   ce risque n'a aucune conséquence sur la fiabilité du scénario.
+2. TRAJECTOIRE D'ÉVAL -- une éval à chaque étape de la ligne (voir
+   analyze_variation(depth=...)), pour dire si la position s'améliore
+   progressivement, décolle d'un coup, ou reste stable. Historiquement
+   bridée à une profondeur < niveau Elo choisi pour ne pas retarder la
+   flèche affichée -- ce n'est plus nécessaire depuis que le scénario est
+   calculé de façon ASYNCHRONE, après coup, sans bloquer l'affichage (voir
+   web_bridge.py, _attach_scenario_async) : l'appelant peut donc passer la
+   depth du niveau Elo actif directement (voir DEFAULT_EVAL_DEPTH plus bas
+   pour le repli si aucune depth n'est précisée).
 
 S'applique à N'IMPORTE QUELLE phase de partie et n'importe quel thème
 détecté (BLUNDER, TACTICAL, ENDGAME, etc.) -- ce module ne connaît pas le
@@ -31,7 +32,7 @@ from typing import List, Optional
 
 import chess
 
-EVAL_DEPTH = 13  # voir docstring ci-dessus : volontairement < niveau Elo choisi
+DEFAULT_EVAL_DEPTH = 13  # repli si l'appelant ne précise pas de depth (voir analyze_variation)
 MAX_PLY = 6      # nombre de demi-coups de la PV analysés (cohérent avec pv_san actuel)
 
 PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
@@ -58,9 +59,9 @@ class VariationFacts:
     eval_end_cp: Optional[int] = None
 
 
-def _eval_at(engine, board):
+def _eval_at(engine, board, depth):
     """
-    Éval rapide (depth EVAL_DEPTH, multipv=1) de la position actuelle, du
+    Éval (depth donnée par l'appelant, multipv=1) de la position actuelle, du
     point de vue du camp qui a choisi ce coup au départ (pas du camp au
     trait sur CETTE position intermédiaire -- voir _pov_cp). None si le
     moteur échoue (ex: position déjà terminée) -- traité comme "on ne sait
@@ -69,7 +70,7 @@ def _eval_at(engine, board):
     if board.is_game_over():
         return None
     try:
-        info = engine.engine.analyse(board, chess.engine.Limit(depth=EVAL_DEPTH))
+        info = engine.engine.analyse(board, chess.engine.Limit(depth=depth))
         return info["score"]
     except Exception:
         return None
@@ -106,7 +107,7 @@ def _classify_trend(cps):
     return "improving"
 
 
-def analyze_variation(engine, board, pv_moves, compute_eval=True):
+def analyze_variation(engine, board, pv_moves, compute_eval=True, depth=DEFAULT_EVAL_DEPTH):
     """
     board : position AVANT le 1er coup de la ligne (déjà le coup choisi par
     le profil, pas encore joué -- pv_moves[0] EST ce coup).
@@ -116,6 +117,11 @@ def analyze_variation(engine, board, pv_moves, compute_eval=True):
     compute_eval : si False, saute complètement la trajectoire d'éval
     (motifs structurels seuls) -- utile pour tester/désactiver le coût
     moteur sans toucher au reste du code.
+    depth : profondeur d'analyse à chaque étape de la ligne (voir
+    DEFAULT_EVAL_DEPTH si non précisé). Depuis que le scénario est calculé
+    de façon asynchrone (voir web_bridge._attach_scenario_async), rien
+    n'empêche plus de passer la depth du niveau Elo actif ici -- l'appelant
+    (narration.compute_scenario_facts) est celui qui décide.
 
     Retourne un VariationFacts (jamais None -- QUIET_IMPROVE en repli si
     rien de plus spécifique ne matche).
@@ -128,7 +134,7 @@ def analyze_variation(engine, board, pv_moves, compute_eval=True):
     cur = board.copy()
     cps = []
     if compute_eval:
-        start_score = _eval_at(engine, cur)
+        start_score = _eval_at(engine, cur, depth)
         start_cp = _pov_cp(start_score, root_color)
         if start_cp is not None:
             cps.append(start_cp)
@@ -177,7 +183,7 @@ def analyze_variation(engine, board, pv_moves, compute_eval=True):
             moved_squares[move.from_square] = moved_squares.get(move.from_square, 0) + 1
 
         if compute_eval:
-            score = _eval_at(engine, cur)
+            score = _eval_at(engine, cur, depth)
             cp = _pov_cp(score, root_color)
             if cp is not None:
                 cps.append(cp)

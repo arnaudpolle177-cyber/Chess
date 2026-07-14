@@ -863,7 +863,7 @@ CAUTION_TEXT_FR = {
 }
 
 
-def compute_scenario_facts(chosen, board, engine, compute_eval=True):
+def compute_scenario_facts(chosen, board, engine, compute_eval=True, depth=variation_narrator.DEFAULT_EVAL_DEPTH):
     """
     Partie COÛTEUSE du scénario (voir variation_narrator.analyze_variation :
     jusqu'à 1 + MAX_PLY évaluations moteur légères) -- volontairement
@@ -879,6 +879,12 @@ def compute_scenario_facts(chosen, board, engine, compute_eval=True):
     l'exclut : déjà visible via la flèche affichée).
     engine : instance ChessCoachEngine, nécessaire pour la trajectoire
     d'éval -- si None, motifs structurels seuls (aucun appel moteur).
+    depth : profondeur de l'éval à chaque étape de la ligne (voir
+    variation_narrator.DEFAULT_EVAL_DEPTH si non précisé). Comme ce calcul
+    tourne maintenant de façon asynchrone après l'affichage de la flèche
+    (voir web_bridge._attach_scenario_async), rien n'empêche plus de passer
+    la depth du niveau Elo actif -- l'appelant décide (web_bridge.py passe
+    tier.random_depth() ; les autres appelants gardent le repli par défaut).
 
     Retourne un VariationFacts, ou None si la ligne est trop courte pour en
     tirer quoi que ce soit (ex: coup de livre sans PV calculée au-delà).
@@ -899,6 +905,7 @@ def compute_scenario_facts(chosen, board, engine, compute_eval=True):
         return None  # coup illégal sur cette position (désync improbable mais possible) -- pas de scénario plutôt qu'un crash
     return variation_narrator.analyze_variation(
         engine, board_after_chosen, follow_up_moves, compute_eval=compute_eval and engine is not None,
+        depth=depth,
     )
 
 
@@ -914,14 +921,14 @@ def render_scenario(facts, profile_id):
     return variation_narrator.narrate_variation(facts, profile_id)
 
 
-def _scenario_phrase(chosen, profile_id, board, engine, compute_eval=True):
+def _scenario_phrase(chosen, profile_id, board, engine, compute_eval=True, depth=variation_narrator.DEFAULT_EVAL_DEPTH):
     """
     Scénario complet (faits coûteux + rendu texte) en un appel -- conservé
     pour l'usage inline de generate_narration (include_scenario=True). Le
     chemin décomposé (compute_scenario_facts + render_scenario) est préféré
     par web_bridge.py pour pouvoir mutualiser/décorréler le coût moteur.
     """
-    facts = compute_scenario_facts(chosen, board, engine, compute_eval)
+    facts = compute_scenario_facts(chosen, board, engine, compute_eval, depth=depth)
     return render_scenario(facts, profile_id)
 
 
@@ -951,7 +958,7 @@ def _opening_identity_body(opening_match):
 
 def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, board,
                         move_history=None, opening_book=None, engine=None, compute_scenario_eval=True,
-                        include_scenario=True):
+                        include_scenario=True, scenario_depth=variation_narrator.DEFAULT_EVAL_DEPTH):
     """
     Retourne un dict prêt à afficher :
     {"theme_label", "theme_icon", "label1", "text1", "label2", "text2",
@@ -984,6 +991,8 @@ def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, 
     profils et/ou la différer pour afficher la flèche sans attendre (voir
     web_bridge.py, compute_scenario_facts / _scenario_cache). True par
     défaut pour ne rien changer aux appels existants (tests, autres modes).
+    scenario_depth : profondeur transmise à compute_scenario_facts si
+    include_scenario=True (voir variation_narrator.DEFAULT_EVAL_DEPTH).
 
     Tous ces paramètres sont optionnels (défaut None/True) pour ne rien
     casser des autres appels existants (thèmes autres que OPENING, tests).
@@ -999,7 +1008,7 @@ def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, 
                 **_opening_identity_body(opening_match),
             }
             if include_scenario:
-                suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval)
+                suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval, scenario_depth)
                 if suite:
                     result["suite"] = suite
             if theme_result.caution:
@@ -1018,7 +1027,7 @@ def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, 
         **body,
     }
     if include_scenario:
-        suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval)
+        suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval, scenario_depth)
         if suite:
             result["suite"] = suite
     if theme_result.caution:
