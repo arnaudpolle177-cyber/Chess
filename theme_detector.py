@@ -46,8 +46,6 @@ PRIORITY_ORDER = (
 
 # Seuils (centipawns), ajustables si l'usage réel montre qu'ils déclenchent
 # trop souvent/pas assez.
-# Seuils (centipawns), ajustables si l'usage réel montre qu'ils déclenchent
-# trop souvent/pas assez.
 BLUNDER_THRESHOLD_CP = 150       # l'adversaire vient de perdre au moins 1.5 pion d'éval -- erreur nette
 # MISSED_OPPORTUNITY : bande INTERMÉDIAIRE sous BLUNDER -- l'adversaire n'a
 # pas complètement craqué, mais n'a pas non plus joué la ligne la plus

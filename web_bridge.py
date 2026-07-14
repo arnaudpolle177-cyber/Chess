@@ -119,6 +119,17 @@ class BridgeState:
         # set_my_side) -- une éval "de mon point de vue" n'a plus de sens
         # cohérent si le camp change en cours de route.
         self._initiative_history = deque(maxlen=theme_detector.INITIATIVE_WINDOW)
+        # Numéro de séquence (voir _position_seq) du DERNIER ply déjà ajouté
+        # à _initiative_history -- garde-fou anti double-comptage : un
+        # Rafraîchir ou un changement d'Elo relance handle_single_profile sur
+        # la MÊME position (même current_seq) en invalidant le cache de
+        # candidats, ce qui re-déclenche _update_eval_tracking_and_theme. Sans
+        # ce garde-fou, on réajoutait alors le même ply dans la fenêtre
+        # glissante -> la régression linéaire croyait avoir 2-3 tours
+        # distincts identiques et faussait silencieusement INITIATIVE_SHIFT
+        # (pente artificiellement aplatie). L'append n'avance donc que sur un
+        # ply réellement nouveau (current_seq différent).
+        self._initiative_last_seq = None
         self.my_side = "w"
         # Niveau Elo actif (voir human_profile.ELO_TIERS). Change le style
         # de jeu proposé par les 4 profils, PAS juste la profondeur -- voir
@@ -258,7 +269,13 @@ class BridgeState:
                 self._opponent_turn_eval = None
                 return
 
-            self._initiative_history.append(current_eval)
+            # N'avance la fenêtre glissante que sur un ply RÉELLEMENT nouveau
+            # (voir _initiative_last_seq) : un Rafraîchir / changement d'Elo
+            # re-déclenche cette fonction sur la même position (même
+            # current_seq) et ne doit PAS réajouter le même point d'éval.
+            if current_seq != self._initiative_last_seq:
+                self._initiative_history.append(current_eval)
+                self._initiative_last_seq = current_seq
             initiative_trend = theme_detector.compute_initiative_trend(list(self._initiative_history))
 
             opponent_eval_cp = None
@@ -322,6 +339,11 @@ class BridgeState:
             # sans ce reset, un changement de camp mi-partie ferait passer
             # une pente calculée pour Blancs comme si elle décrivait Noirs.
             self._initiative_history.clear()
+            # Remis à None en même temps que le clear : sinon le prochain ply
+            # (dont le current_seq peut coïncider avec _initiative_last_seq
+            # d'avant le reset) serait sauté par le garde-fou anti
+            # double-comptage, laissant la fenêtre vide un tour de trop.
+            self._initiative_last_seq = None
 
     def set_elo_tier(self, tier_id):
         """tier_id : 1, 2 ou 3 (voir human_profile.ELO_TIERS)."""
@@ -458,6 +480,7 @@ class BridgeState:
                     self._move_history = []
                 self._move_history_board = None
                 self._initiative_history.clear()
+                self._initiative_last_seq = None  # cohérent avec le clear (voir set_my_side)
                 return
 
             if self._move_history_board is None:
