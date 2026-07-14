@@ -83,9 +83,66 @@ jobs:
           downloaded_name=$(basename "$asset_url")
           curl -L -o "$downloaded_name" "$asset_url"
 
-          if [[ "$downloaded_name" == *.zip ]]; then
-            mkdir berserk_extracted
-            unzip -q "$downloaded_name" -d berserk_extracted
-            find berserk_extracted -iname "*.exe" -exec cp {} dist/stockfish.exe \;
+          # Decision zip vs .exe direct via `case` POSIX (pas de [[ ]], qui
+          # est un bashisme fragile selon le shell qui execute le script) --
+          # Berserk publie en pratique un .exe direct, mais on gere le .zip
+          # au cas ou une future release changerait de format.
+          case "$downloaded_name" in
+            *.zip)
+              mkdir berserk_extracted
+              unzip -q "$downloaded_name" -d berserk_extracted
+              find berserk_extracted -iname "*.exe" -exec cp {} dist/stockfish.exe \;
+              ;;
+            *)
+              cp "$downloaded_name" dist/stockfish.exe
+              ;;
+          esac
+
+          if [ ! -f dist/stockfish.exe ]; then
+            echo "Échec : dist/stockfish.exe n'a pas été produit."
+            exit 1
+          fi
+          echo "Berserk installé avec succès dans dist/stockfish.exe"
+
+      - name: Préparer le package final
+        shell: bash
+        run: |
+          set -e
+          mkdir -p package/CoachEchecs
+          cp dist/CoachEchecs.exe package/CoachEchecs/
+          cp dist/stockfish.exe package/CoachEchecs/
+          cp README_UTILISATEUR.md package/CoachEchecs/LISEZ-MOI.md
+          # Livre d'ouvertures : optionnel. S'il est présent à la racine du
+          # dépôt (voir opening_book.py), on l'embarque à côté de l'exe --
+          # sinon le coach fonctionne quand même, juste sans lui.
+          if [ -f opening_book.bin ]; then
+            cp opening_book.bin package/CoachEchecs/
+            echo "Livre d'ouvertures inclus dans le package."
           else
-            # .exe déjà en asset direct (format 
+            echo "Pas de opening_book.bin trouvé à la racine du dépôt -- package sans livre d'ouvertures."
+          fi
+          # Base ECO locale (nom d'ouverture + points forts/faibles, voir
+          # opening_identity.py) : même principe que opening_book.bin
+          # ci-dessus -- optionnelle, embarquée si présente à la racine du
+          # dépôt, sinon le coach retombe sur les gabarits génériques.
+          if [ -f eco_openings.json ]; then
+            cp eco_openings.json package/CoachEchecs/
+            echo "Base d'ouvertures (ECO) incluse dans le package."
+          else
+            echo "Pas de eco_openings.json trouvé à la racine du dépôt -- package sans identification d'ouverture par nom."
+          fi
+          cd package
+          7z a -r CoachEchecs-windows.zip CoachEchecs
+
+      - name: Publier la Release avec le zip
+        uses: softprops/action-gh-release@v2
+        with:
+          files: package/CoachEchecs-windows.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Garder aussi le zip comme artifact (pour les builds manuels sans tag)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CoachEchecs-windows
+          path: package/CoachEchecs-windows.zip
