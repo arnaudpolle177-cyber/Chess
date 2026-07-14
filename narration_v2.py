@@ -17,13 +17,13 @@ Séparation clé (pour l'étape 6, cache) :
   - render() dépend du profil -> se rejoue pour chacun des 3 profils, à
     partir de la même sélection cachée. Seul le tissage varie.
 
-Ce module NE TOUCHE À RIEN en production : ni web_bridge.py, ni
-webview_ui.py, ni generate_narration. Le vrai câblage (remplacer l'appel
-generate_narration dans handle_single_profile, adapter le format d'affichage
-de webview_ui.py qui attend aujourd'hui label1/text1/label2/text2 vers le
-paragraphe unique de v2) est un CHANGEMENT DE CONTRAT D'AFFICHAGE à décider
-et appliquer explicitement -- volontairement laissé hors de ce module pour
-qu'il reste un diff petit et relisible.
+CÂBLÉ en production (2026-07-14) : web_bridge.handle_single_profile ajoute
+entry["narration"]["paragraph"] = render(...)["text"] à côté de la façade v1
+(generate_narration reste calculée en repli), et webview_ui.renderDetail
+affiche ce paragraphe s'il est présent (Option B rétro-compat : sinon
+fallback label1/text1/label2/text2). La SÉLECTION est cachée par position
+(SelectionCache ci-dessous), seul render() se rejoue par profil. Retirer le
+champ paragraph suffit à revenir intégralement à la narration v1.
 
 CONTRAINTE ADN respectée de bout en bout : rien d'inventé (chaque fragment
 ancré sur un champ réel de brique), hors-ligne, aucun appel moteur ajouté
@@ -61,7 +61,8 @@ class Selection:
 
 
 def build_selection(board, candidates, swing_cp=None, opponent_better_move_san=None,
-                    initiative_trend=None, max_supports=2, require_relation=False):
+                    initiative_trend=None, move_history=None, max_supports=2,
+                    require_relation=False):
     """
     Étape position-level : détecte toutes les briques, les score, sélectionne
     1 principal + 0..2 secondaires. NE DÉPEND PAS du profil -> cacheable.
@@ -69,6 +70,15 @@ def build_selection(board, candidates, swing_cp=None, opponent_better_move_san=N
     Mêmes paramètres d'entrée que theme_detector.detect_theme (swing_cp,
     opponent_better_move_san, initiative_trend), pour un remplacement
     "iso-signaux" à l'étape de câblage.
+
+    move_history : liste des coups SAN réellement joués (voir web_bridge.py,
+        BridgeState._move_history) -- transmise telle quelle à
+        collect_theme_bricks pour en déduire ply_count (source FIABLE du
+        nombre de demi-coups, contrairement au compteur du FEN). Indispensable
+        pour que le plafond de phase "opening" (voir human_profile._game_phase,
+        OPENING_MAX_PLY) s'applique AUSSI dans le pipeline v2 -- sans elle, une
+        partie calme du milieu de jeu resterait signalée "Ouverture". None =
+        détection de phase au matériel seul (comme les appelants sans historique).
 
     require_relation : si True, un secondaire n'est retenu que s'il a une
         RELATION sémantique listée avec le principal (voir
@@ -90,6 +100,7 @@ def build_selection(board, candidates, swing_cp=None, opponent_better_move_san=N
     bricks = td.collect_theme_bricks(
         board, candidates, swing_cp=swing_cp,
         opponent_better_move_san=opponent_better_move_san, initiative_trend=initiative_trend,
+        move_history=move_history,
     )
     relation_ok = nw.relation_is_useful if require_relation else None
     lead, supports = ts.select_lead_and_support(
@@ -127,8 +138,8 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
 
 
 def narrate(board, candidates, profile_id, swing_cp=None, opponent_better_move_san=None,
-            initiative_trend=None, chosen=None, why_motif=None, why_detail=None,
-            caution_text=None, require_relation=False):
+            initiative_trend=None, move_history=None, chosen=None, why_motif=None,
+            why_detail=None, caution_text=None, require_relation=False):
     """
     Raccourci tout-en-un (sélection + tissage) -- pratique pour les tests et
     le chemin non caché. En production, PRÉFÉRER build_selection() une fois
@@ -138,7 +149,7 @@ def narrate(board, candidates, profile_id, swing_cp=None, opponent_better_move_s
     selection = build_selection(
         board, candidates, swing_cp=swing_cp,
         opponent_better_move_san=opponent_better_move_san, initiative_trend=initiative_trend,
-        require_relation=require_relation,
+        move_history=move_history, require_relation=require_relation,
     )
     return render(selection, profile_id, chosen=chosen, why_motif=why_motif,
                   why_detail=why_detail, board=board, caution_text=caution_text)

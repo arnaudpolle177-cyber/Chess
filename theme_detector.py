@@ -74,8 +74,15 @@ THEME_TIER = {
     DEFENSE: TIER_STRONG,
     STRATEGIC_ADVANTAGE: TIER_MEDIUM,
     ENDGAME: TIER_MEDIUM,
-    OPENING: TIER_MEDIUM,
     MISSED_OPPORTUNITY: TIER_MEDIUM,
+    # OPENING rétrogradé MEDIUM -> ENRICHMENT (décision terrain 2026-07-14) :
+    # en MEDIUM (poids 500) il devenait presque toujours le thème PRINCIPAL et
+    # écrasait des observations plus concrètes et utiles (avantage, structure,
+    # activité). En ENRICHMENT (100), dès qu'une brique concrète existe elle
+    # passe devant ; OPENING ne vient qu'en secondaire, ou seul en tout début
+    # de partie quand rien d'autre ne se dégage -- ce qui est le seul moment
+    # où "développe tes pièces" est réellement le message juste.
+    OPENING: TIER_ENRICHMENT,
     PAWN_STRUCTURE: TIER_ENRICHMENT,
     PIECE_ACTIVITY_GAP: TIER_ENRICHMENT,
     KING_SAFETY_WARNING: TIER_ENRICHMENT,

@@ -278,7 +278,8 @@ class BridgeState:
                 # Narration v2 : sélection sans signaux d'éval (coup de livre),
                 # comme le thème v1 juste au-dessus. Best-effort.
                 try:
-                    self._selection_cache.set(fen, narration_v2.build_selection(board, candidates))
+                    self._selection_cache.set(fen, narration_v2.build_selection(
+                        board, candidates, move_history=list(self._move_history)))
                 except Exception as e:
                     print(f"⚠ Sélection narration v2 indisponible (coup de livre) : {e}")
                 self._opponent_turn_eval = None
@@ -349,7 +350,7 @@ class BridgeState:
                 selection = narration_v2.build_selection(
                     board, candidates, swing_cp=swing_cp,
                     opponent_better_move_san=opponent_better_move_san,
-                    initiative_trend=initiative_trend,
+                    initiative_trend=initiative_trend, move_history=list(self._move_history),
                 )
                 self._selection_cache.set(fen, selection)
             except Exception as e:
@@ -725,8 +726,10 @@ class BridgeState:
                 selection = self._selection_cache.get(fen)
                 if selection is None:
                     # Repli RARE (même cas de cache miss que le thème v1
-                    # ci-dessus) : sans signaux swing/initiative, comme la façade.
-                    selection = narration_v2.build_selection(board, result["candidates"])
+                    # ci-dessus) : sans signaux swing/initiative, mais on garde
+                    # move_history pour que la phase (plafond "opening") reste correcte.
+                    selection = narration_v2.build_selection(
+                        board, result["candidates"], move_history=list(self._move_history))
                 woven = narration_v2.render(
                     selection, profile_id, chosen=chosen,
                     why_motif=why_motif, why_detail=why_detail, board=board,

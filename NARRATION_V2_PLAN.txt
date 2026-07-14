@@ -1,0 +1,303 @@
+====================================================================
+ COACH D'ÉCHECS — PLAN NARRATION v2
+ "Les thèmes deviennent des briques d'analyse, pas des commentaires"
+ Conçu le 2026-07-14. À attaquer au prochain réveil.
+====================================================================
+
+--------------------------------------------------------------------
+ AVANCEMENT (mis à jour à chaque étape)
+--------------------------------------------------------------------
+[x] Étape 1 — BRIQUES : collect_theme_bricks() dans theme_detector.py
+    (miroir exact de detect_theme, sans early-return, +tier/+famille).
+    ADDITIF, detect_theme() inchangé. TESTÉ : test_bricks_mirror.py
+    (88 cas positions x signaux) -> OK, miroir fidèle confirmé.
+[x] Étape 2 — SCORING + SÉLECTION : theme_scoring.py (module pur).
+    score = poids_tier + intensité_normalisée(0..99) ;
+    select_lead_and_support (anti-redondance famille + plancher +
+    crochet relation_ok). TESTÉ : test_theme_scoring.py -> OK.
+[x] Étape 3 — RÉSERVOIR DE FRAGMENTS : fragment_library.py (NOUVEAU).
+    Chaque brique -> {observation, cause, plan} x 3 voix. Fragments =
+    CLAUSES (minuscule, sans point) pour être tissables. Rien d'inventé
+    (chaque fragment ancré sur un champ réel de la brique). ADDITIF,
+    non branché. TESTÉ : test_fragment_library.py -> OK.
+[x] Étape 4 — WEAVER + RELATIONS : narration_weaver.py (NOUVEAU).
+    weave(lead, supports, voice, ctx) -> UN paragraphe 2..4 phrases.
+    Table de relations PAR FAMILLE (cause/conséquence/moyen/contraste/
+    renforcement, défaut neutre). Connecteurs inline (1er secondaire à
+    relation forte) vs phrase à part (neutre / 2e secondaire). Le PLAN
+    vient TOUJOURS du principal. caution NON tissé (renvoyé à part).
+    TESTÉ : test_narration_weaver.py -> OK.
+    Bonus : relation_is_useful() fournit le crochet relation_ok de
+    l'étape 2 (filtre sémantique "secondaire vraiment utile ?").
+[x] Étape 5 — CÂBLAGE web_bridge.py + webview_ui.py : FAIT + testé en réel
+    (1er passage en jeu OK, 3 correctifs terrain appliqués -- voir section
+    CORRECTIFS TERRAIN plus bas).
+    ORCHESTRATEUR : narration_v2.py (build_selection/render/narrate) -- TESTÉ.
+    CÂBLAGE PRODUCTION (2026-07-14) :
+      * web_bridge.py : import narration_v2 ; self._selection_cache
+        (SelectionCache) ; build_selection() appelé et caché dans
+        _update_eval_tracking_and_theme (chemin normal ET coup de livre,
+        mêmes signaux que detect_theme) ; dans handle_single_profile, après
+        la façade v1 generate_narration, ajout du champ
+        entry["narration"]["paragraph"] (render v2, HORS engine_lock car
+        pur) + alignement theme_label/theme_icon sur le principal v2.
+      * webview_ui.py (renderDetail) : Option B rétro-compat -- SI n.paragraph
+        -> un seul <p> ; SINON fallback label1/text1/label2/text2. suite +
+        caution inchangés dans les deux cas.
+    v1 (generate_narration) TOUJOURS calculée -> repli automatique si le
+    paragraphe v2 manque. Rien de cassé, réversible (retirer le champ
+    paragraph = retour v1). curseur require_relation=False par défaut.
+    RESTE : test EN CONDITIONS RÉELLES (Stockfish + Tampermonkey) + réglage
+    du style sur de vrais commentaires (require_relation, nuance MEANS/ATTACK).
+
+--------------------------------------------------------------------
+ CORRECTIFS TERRAIN (après 1er test réel, 2026-07-14)
+--------------------------------------------------------------------
+Bugs vus en jeu réel (captures) + corrections :
+1) "Ouverture" affichée au 18e coup. CAUSE : le fix de phase
+   (human_profile._game_phase + ply_count / OPENING_MAX_PLY) et son passage
+   de move_history à detect_theme/collect_theme_bricks étaient faits, MAIS
+   le pipeline v2 (build_selection) ne transmettait PAS move_history ->
+   ply_count=None dans le chemin AFFICHÉ -> plafond de phase ignoré.
+   FIX : move_history threadé build_selection() + narrate() + les 3 appelants
+   web_bridge (coup de livre, chemin normal, repli handle_single_profile).
+2) "Roque puis connecte tes tours" alors que le roi est déjà roqué.
+   FIX : fragment_library._frag_opening lit ctx.board.has_castling_rights() ;
+   si le roque n'est plus possible -> plan alternatif (achever le
+   développement / activer les pièces), plus jamais "roque".
+3) OPENING trop souvent thème PRINCIPAL et générique/redondant.
+   FIX : OPENING rétrogradé tier MEDIUM -> ENRICHMENT (theme_detector.THEME_TIER).
+   Dès qu'une brique concrète existe (avantage/structure/activité) elle passe
+   devant ; OPENING ne reste principal qu'en vraie ouverture calme sans autre
+   observation. (Score OPENING = 100 + 50 = 150 : reste > EQUAL 100 et >
+   plancher secondaire 120, donc toujours utilisable comme lead-de-repli ou
+   comme secondaire.)
+Tous les tests repassent verts après ces 3 correctifs.
+RESTE de style à juger sur commentaires réels : nuance MEANS/ATTACK
+("; heureusement," meilleur en défense qu'en attaque), curseur require_relation.
+[x] Étape 6 — CACHE DE SÉLECTION.
+    SelectionCache dans narration_v2.py (NOUVEAU) : cache la sélection
+    principal+secondaires par fen (profil-indépendant), mêmes précautions
+    thread que l'actuel _theme_cache (valeur écrite avant clé). Prêt à
+    remplacer _theme_cache_key/_value en une ligne. Test inclus.
+    RESTE : l'adopter dans web_bridge (fait avec le câblage étape 5).
+
+Fichiers v2 créés à ce stade :
+  theme_scoring.py, fragment_library.py, narration_weaver.py, narration_v2.py
+  + tests : test_theme_scoring.py, test_bricks_mirror.py,
+            test_fragment_library.py, test_narration_weaver.py,
+            test_narration_v2.py
+Aucun code de production (detect_theme, narration.generate_narration,
+web_bridge, webview_ui) n'est modifié : tout l'ajout v2 est parallèle et
+non appelé. Le câblage final (étape 5) est le seul reste, isolé et petit.
+
+--------------------------------------------------------------------
+ RECETTE DE CÂBLAGE (étape 5 -- à appliquer ensemble)
+--------------------------------------------------------------------
+Point d'entrée unique : web_bridge.py, handle_single_profile (~ligne 655)
+et _update_eval_tracking_and_theme (~ligne 300).
+
+1) POSITION-LEVEL (dans _update_eval_tracking_and_theme, là où
+   detect_theme est appelé et mis en cache) : en plus (ou à la place) du
+   _theme_cache actuel, calculer et cacher la sélection :
+       sel = narration_v2.build_selection(
+                 board, candidates, swing_cp=swing_cp,
+                 opponent_better_move_san=opponent_better_move_san,
+                 initiative_trend=initiative_trend)
+       self._selection_cache.set(fen, sel)         # SelectionCache()
+   Garder detect_theme/_theme_cache tant que la façade generate_narration
+   reste utilisée (transition douce) -- les deux caches coexistent sans
+   conflit (même fen, calculs indépendants, aucun appel moteur ajouté).
+
+2) PROFIL-LEVEL (dans handle_single_profile, à la place de l'appel
+   generate_narration) :
+       sel = self._selection_cache.get(fen)  # fallback: build_selection(...)
+       why_motif, why_detail = why_detector.detect_why(board, chosen)
+       woven = narration_v2.render(sel, profile_id, chosen=chosen,
+                   why_motif=why_motif, why_detail=why_detail, board=board,
+                   caution_text=narration.CAUTION_TEXT_FR.get(caution_key))
+   -> woven["text"] = le paragraphe ; woven["caution"] = à part.
+   La "suite" (scénario) et l'identité d'ouverture (OPENING) restent
+   calculées comme aujourd'hui (compute_scenario_facts/render_scenario,
+   opening_identity) et AJOUTÉES au dict d'affichage -- v2 ne remplace que
+   le coeur "thème" (label1/text1/label2/text2), pas ces enrichissements.
+
+3) CONTRAT D'AFFICHAGE (webview_ui.py, renderDetail ~ligne 282) -- CHOISIR :
+   Option A (mini-diff front) : mapper woven["text"] dans un seul bloc.
+     Construire narration = {theme_label, theme_icon, text1=woven["text"],
+     label1="", suite?, caution?}. Le front rend déjà text1 ; masquer le
+     "— " quand label1 est vide (petit ajustement JS).
+   Option B (front propre, rétro-compat) : ajouter un champ n.paragraph ;
+     dans renderDetail, SI n.paragraph -> un seul <p>, SINON fallback
+     label1/text1/label2/text2 (garde l'ancien chemin vivant pendant la
+     transition). Recommandé : plus propre, réversible.
+   Dans les DEUX cas : theme_label/theme_icon viennent du thème PRINCIPAL
+   (narration.THEME_LABELS_FR / THEME_ICONS[woven["lead"]]).
+
+4) CURSEUR DE STYLE : build_selection(require_relation=False|True).
+   False = les secondaires de famille différente apparaissent même sans
+   relation forte (connecteur "Par ailleurs"). True = uniquement les
+   secondaires à relation sémantique listée (plus strict, colle davantage
+   à la "consigne finale"). À régler en lisant de vrais commentaires.
+
+--------------------------------------------------------------------
+0. OBJECTIF
+--------------------------------------------------------------------
+Ne plus CHOISIR un commentaire (1 thème -> 1 gabarit).
+Mais CONSTRUIRE un raisonnement, comme un vrai entraîneur :
+observer plusieurs éléments de la position, sélectionner les 2-3 idées
+les plus importantes, et les tisser en UNE réflexion cohérente.
+
+Le lecteur ne doit jamais sentir que des commentaires ont été collés.
+Il doit lire une seule pensée fluide de 2 à 4 phrases.
+
+CONSIGNE FINALE (la plus importante) :
+Si un thème secondaire n'améliore pas réellement la compréhension,
+NE PAS l'utiliser. Mieux vaut 1 excellente idée qu'un commentaire
+artificiellement enrichi.
+
+--------------------------------------------------------------------
+1. DÉCISION D'ARCHITECTURE VERROUILLÉE
+--------------------------------------------------------------------
+Assemblage retenu : FRAGMENTS + CONNECTEURS RELATIONNELS.
+  - PAS de LLM (refusé).
+  - PAS de templates par paire de thèmes (option écartée : explosion
+    combinatoire, ~13 thèmes => trop de paires x 3 profils, ingérable,
+    et contraire à "modulaire, pas un bloc de conditions").
+
+Principe :
+  - Chaque thème/brique fournit des FRAGMENTS courts, pas un texte fini :
+        { observation, cause, plan }   (x3 voix : popular/creative/classical)
+  - Le narrateur assemble avec un CONNECTEUR choisi selon la RELATION
+    sémantique entre le thème principal et le secondaire.
+  - Le PLAN vient TOUJOURS du thème principal (garde le paragraphe
+    centré sur une seule idée directrice).
+
+Pourquoi ça marche : la table de relations est petite et éparse (des
+types de connecteurs, pas des phrases entières). Ajouter un thème =
+ajouter ses fragments, rien d'autre à toucher (coût linéaire).
+
+--------------------------------------------------------------------
+2. LE PIPELINE
+--------------------------------------------------------------------
+Position
+   |
+   v
+detect_all_themes(board, candidates, ...)      [theme_detector.py]
+   |   -> liste de ThemeCandidate (scaffold DÉJÀ présent : all_candidates)
+   v
+score_and_rank(candidates)                     [NOUVEAU: theme_scoring.py]
+   |   -> candidats triés par pertinence globale
+   v
+select_lead_and_support(ranked)                [NOUVEAU]
+   |   -> 1 principal + 0..2 secondaires (parfois 0 !)
+   |      filtres : famille différente, au-dessus d'un seuil, relation utile
+   v
+weave(lead, supports, profile_id)              [NOUVEAU: narration_weaver.py]
+   |   -> fragments + connecteurs
+   v
+COMMENTAIRE FINAL (2 à 4 phrases)
+
+Chaque étape est un module pur, testable isolément.
+generate_narration() reste une FAÇADE rétro-compatible pendant la
+transition (on ne casse pas web_bridge d'un coup).
+
+--------------------------------------------------------------------
+3. LES 4 PIÈCES À CONCEVOIR
+--------------------------------------------------------------------
+
+3.1 SCORING GLOBAL  (theme_scoring.py)
+    score = poids_tier + intensité_normalisée(0..99)
+    Tiers (d'après la priorisation demandée) :
+      Très forte  = 1000 : BLUNDER, TACTICAL, ATTACK, DEFENSE
+      Moyenne     =  500 : STRATEGIC_ADVANTAGE, ENDGAME, OPENING, MISSED_OPPORTUNITY
+      Enrichisst. =  100 : PAWN_STRUCTURE, PIECE_ACTIVITY_GAP, MATERIAL_IMBALANCE,
+                           KING_SAFETY_WARNING, INITIATIVE_SHIFT, SIMPLIFICATION
+    L'intensité (0..99) départage AU SEIN d'un tier (ex: swing_cp pour
+    BLUNDER, |eval_cp| pour STRATEGIC, activity_ratio pour ACTIVITY...).
+    Principal = score max.
+
+3.2 SÉLECTION + ANTI-REDONDANCE
+    - Chaque thème reçoit une FAMILLE : ex. structure / roi / activité /
+      dynamique / matériel / phase / tactique.
+    - Deux thèmes de la MÊME famille ne coexistent pas -> garder le mieux scoré
+      (ex: PAWN_STRUCTURE et STRATEGIC_ADVANTAGE racontent souvent la même
+      idée "structure meilleure" -> un seul).
+    - Prendre jusqu'à 2 secondaires qui :
+        (a) dépassent un SEUIL plancher,
+        (b) sont d'une famille DIFFÉRENTE du principal,
+        (c) ont une relation UTILE avec le principal.
+    - Si aucun secondaire n'apporte de dimension neuve -> 0 secondaire.
+      (Consigne finale : un excellent commentaire à 1 idée > un enrichi bancal.)
+
+3.3 TABLE DE RELATIONS  (petite)
+    relation(principal, secondaire) -> type_de_connecteur
+    Types suffisants : cause / conséquence / moyen / contraste / renforcement.
+    Défaut si paire non listée : connecteur neutre ("Par ailleurs...").
+    Exemples :
+      structure  -> activité   = cause->effet      "...grâce à..., ce qui permet à tes pièces de..."
+      roi_faible + activité     = problème+moyen    "...est l'élément clé. Tes pièces tiennent déjà
+                                                     les lignes, il est donc préférable de..."
+      avantage + simplification = constat+plan      "...; pas besoin de forcer, cherche plutôt à..."
+
+3.4 LE WEAVER  (narration_weaver.py)
+    Assemble : observation(principal)
+             + connecteur(relation)
+             + observation/cause(secondaire)
+             + plan(principal)
+    Décliné par voix de profil (popular / creative / classical).
+    Le plan vient toujours du PRINCIPAL.
+
+--------------------------------------------------------------------
+4. ÉTAPES D'ATTAQUE (ordre conseillé)
+--------------------------------------------------------------------
+1) BRIQUES : dans detect_theme, arrêter de "return au 1er match".
+   Passer en mode "collecte TOUT dans all_candidates". Attribuer à chaque
+   thème : famille + tier + fonction d'intensité.
+2) SCORING + SÉLECTION : modules purs (entrée = liste de candidats,
+   sortie = principal + secondaires). Faciles à tester unitairement.
+3) RÉSERVOIR DE FRAGMENTS : refactorer les gabarits actuels de
+   narration.py en { observation, cause, plan } x 3 voix.
+   (C'est le gros du travail rédactionnel, mais mécanique.)
+4) WEAVER + TABLE DE RELATIONS.
+5) CÂBLAGE dans web_bridge.py : remplacer l'appel unique à
+   generate_narration par le pipeline. Garder la façade rétro-compat.
+6) GARDE-FOUS CACHE : le _theme_cache actuel devient un cache de
+   SÉLECTION (principal+secondaires), toujours calculé UNE fois par
+   position et partagé entre les 3 profils. Seul le weaving varie par
+   profil.
+
+--------------------------------------------------------------------
+5. POINTS DE VIGILANCE
+--------------------------------------------------------------------
+- PARTAGE DE THÈME : aujourd'hui le thème est calculé 1 fois/position et
+  réutilisé par les 3 profils (cache). En v2 : la SÉLECTION est
+  indépendante du profil -> se cache 1 fois ; seul le WEAVING varie.
+  Cohérent avec l'archi existante.
+- MATERIAL_IMBALANCE / SIMPLIFICATION : aujourd'hui ce sont des CHAMPS de
+  STRATEGIC_ADVANTAGE, pas des thèmes. Décision penchée : en faire des
+  BRIQUES à part entière (scoring uniforme, plus propre). À confirmer.
+- CONTRAINTES ADN À NE JAMAIS CASSER :
+    * Rien d'inventé : chaque fragment s'appuie sur un champ RÉEL du
+      ThemeResult (swing_cp, eval_cp, king_square, pawn_weakness_*,
+      material_imbalance_kind, simplification_advice, activity_ratio,
+      king_safety_warning_*, opponent_better_move_san, passed_pawn_square).
+    * Hors-ligne / gratuit par défaut.
+    * CLAUDE.md local : séparer overlay (flèches) et coach (explications) ;
+      préférer extraire plus d'info d'une analyse existante plutôt que
+      multiplier les appels moteur.
+
+--------------------------------------------------------------------
+6. FICHIERS CONCERNÉS
+--------------------------------------------------------------------
+  theme_detector.py       -> collecter tous les thèmes (all_candidates) + famille/tier/intensité
+  theme_scoring.py        -> NOUVEAU : scoring + rank
+  (sélection)             -> NOUVEAU : select_lead_and_support (peut vivre dans theme_scoring.py)
+  narration.py            -> gabarits -> réservoir de fragments {obs,cause,plan} ; garde la façade generate_narration
+  narration_weaver.py     -> NOUVEAU : weave + table de relations
+  web_bridge.py           -> câblage pipeline + cache de sélection (ex-_theme_cache)
+
+====================================================================
+ Rappel : objectif = un système qui CONSTRUIT un raisonnement,
+ pas un système qui choisit un commentaire.
+====================================================================

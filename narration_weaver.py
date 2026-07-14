@@ -23,9 +23,9 @@ PRINCIPE (voir roadmap §3.3/3.4) :
   le weaver lui-même reste surtout structurel (les connecteurs varient peu
   par voix, volontairement -- la couleur vient des fragments).
 
-ADDITIF ET NON BRANCHÉ : rien n'appelle encore ce module en production. Le
-câblage dans web_bridge.py est l'étape 5. generate_narration (narration.py)
-reste la façade de l'affichage actuel.
+BRANCHÉ en production depuis 2026-07-14 (via narration_v2.render ->
+web_bridge). generate_narration (narration.py) reste calculée comme façade de
+repli : si le paragraphe tissé manque, l'affichage retombe dessus.
 
 CONTRAINTE ADN : le weaver n'invente RIEN -- il ne fait qu'assembler des
 fragments déjà ancrés sur des champs réels (voir fragment_library). Il

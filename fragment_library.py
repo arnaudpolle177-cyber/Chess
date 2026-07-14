@@ -331,24 +331,39 @@ def _frag_endgame(fields, voice, ctx):
 
 
 # --- OPENING -----------------------------------------------------------
-# NOTE : quand une identité d'ouverture ECO est trouvée (voir
-# opening_identity.py), le câblage (étape 5) remplacera ENTIÈREMENT
-# l'observation générique ci-dessous par le nom + pros_cons de l'ouverture
-# (fait, pas question de style). Ces fragments sont le FALLBACK "hors
-# théorie connue", identique en esprit aux gabarits _opening_xxx de
-# narration.py.
+# CONSCIENT DE LA POSITION : le plan ne recommande de ROQUER que si le
+# roque est encore LÉGALEMENT possible (board.has_castling_rights). Sinon
+# (droits perdus = déjà roqué, ou roi/tour déjà bougés), conseiller de
+# roquer serait absurde -- on bascule sur "achève ton développement". Bug
+# observé en pratique : "Roque puis connecte tes tours" affiché alors que
+# le roi était déjà roqué (voir la conversation). ctx.board peut être None
+# (fragments en formulation générale) -> repli prudent sur can_castle=True
+# (le conseil de roque reste vrai par défaut en vraie ouverture).
 def _frag_opening(fields, voice, ctx):
+    can_castle = True
+    if ctx is not None and ctx.board is not None:
+        try:
+            can_castle = ctx.board.has_castling_rights(ctx.board.turn)
+        except Exception:
+            can_castle = True
     if voice == CREATIVE:
         obs = "toutes tes pièces ne sont pas encore prêtes à se battre"
         plan = "développe la pièce la plus utile, garde l'idée d'attaque pour plus tard"
         return _f(obs, plan, None)
     if voice == CLASSICAL:
         obs = "l'ouverture obéit à trois priorités : centre, développement, sécurité du roi"
-        plan = "choisis le coup qui sert un de ces buts sans compromettre les autres"
+        if can_castle:
+            plan = "choisis le coup qui sert un de ces buts sans compromettre les autres"
+        else:
+            plan = "ton roi est à l'abri, concentre-toi maintenant sur l'activité de tes pièces et le centre"
         return _f(obs, plan, None)
     # popular
-    obs = "ton développement n'est pas terminé"
-    plan = "roque puis connecte tes tours, le reste suivra naturellement"
+    if can_castle:
+        obs = "ton développement n'est pas terminé"
+        plan = "roque puis connecte tes tours, le reste suivra naturellement"
+    else:
+        obs = "ton roi est déjà en sécurité, mais ton développement n'est pas tout à fait fini"
+        plan = "amène ta dernière pièce inactive vers une bonne case et relie tes tours"
     return _f(obs, plan, None)
 
 
@@ -356,9 +371,10 @@ def _frag_opening(fields, voice, ctx):
 def _frag_initiative(fields, voice, ctx):
     # Le SENS du basculement dépend de l'éval (voir detect_theme point 6 /
     # narration _initiative_xxx) : en avantage -> je PERDS l'initiative ;
-    # en désavantage -> je la REPRENDS.
+    # en désavantage -> je la REPRENDS. (La pente initiative_slope_cp elle-même
+    # n'est pas citée dans le texte : sa valeur chiffrée n'apporte rien au
+    # lecteur, seul son SIGNE -- déjà porté par l'éval -- compte.)
     winning = ctx.eval_cp > 0
-    slope = fields.get("initiative_slope_cp")
     if voice == CREATIVE:
         if winning:
             obs = "l'initiative que tu avais construite commence à s'effriter"
