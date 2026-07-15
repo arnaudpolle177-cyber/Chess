@@ -436,12 +436,29 @@ class BridgeState:
 
     def _get_theory_move(self, fen, board):
         """
-        Suggestion "coup théorique" pour la flèche turquoise côté
-        navigateur : livre polyglot local en priorité (instantané), Lichess
-        en repli SEULEMENT si le livre ne couvre plus cette position (voir
-        lichess_explorer.py -- ne bloque jamais, retourne None tant que la
-        requête en tâche de fond n'a pas encore rempli le cache).
+        Suggestion "coup théorique" pour la flèche affichée côté navigateur
+        (masque les 3 flèches de profils tant qu'elle est active, voir
+        chess_coach_bridge_user.js redrawProfileArrows) : livre polyglot
+        local en priorité (instantané), Lichess en repli SEULEMENT si le
+        livre ne couvre plus cette position (voir lichess_explorer.py -- ne
+        bloque jamais, retourne None tant que la requête en tâche de fond
+        n'a pas encore rempli le cache).
+
+        BORNAGE (voir bug terrain : flèche théorique encore active au 18e
+        coup) : l'explorer Lichess utilisé est la base GÉNÉRALE
+        (explorer.lichess.org/lichess, toutes parties confondues), pas
+        /masters -- avec un seuil de popularité de seulement 1%
+        (lichess_explorer.MIN_POPULARITY), une suite très jouée en
+        amateur/blitz peut rester "populaire" bien au-delà de la vraie
+        théorie d'ouverture. Plutôt que de faire confiance aveuglément à ce
+        signal, on le borne à la même définition de "phase d'ouverture" que
+        le reste de l'appli (human_profile.OPENING_MAX_PLY, déjà utilisée
+        pour la classification de phase ailleurs) -- au-delà, même si le
+        livre/Lichess renvoie encore un coup, on ne le considère plus comme
+        une suggestion théorique à afficher.
         """
+        if len(self._move_history) >= human_profile.OPENING_MAX_PLY:
+            return None
         book_entries = self.opening_book.lookup(board)
         if book_entries:
             top = max(book_entries, key=lambda e: e.weight)
