@@ -27,6 +27,7 @@ Annulation des analyses obsolètes (important) :
 """
 import json
 import os
+import glob
 import threading
 import copy
 from collections import deque
@@ -56,6 +57,14 @@ DEFAULT_PORT = 8765
 # prête. Voir handle_quick_take() plus bas.
 QUICK_DEPTH = 15
 QUICK_MULTIPV = 3
+# Fallback réseau (Lichess Opening Explorer, voir lichess_explorer.py) :
+# DÉSACTIVÉ par défaut. Depuis l'ajout de la couverture ECO locale
+# (opening_identity.covered_positions, ~7500 positions) + des livres
+# polyglot supplémentaires (opening_book*.bin, 1M+ entrées), le repli
+# réseau ne sert plus que pour des lignes vraiment exotiques hors de toute
+# couverture locale -- rare. Remets à True pour le réactiver (aucun autre
+# changement nécessaire, le code reste intact).
+LICHESS_EXPLORER_ENABLED = False
 
 
 class BridgeState:
@@ -68,16 +77,21 @@ class BridgeState:
         self.threads = threads
         self.hash_mb = hash_mb
         self.engine = ChessCoachEngine(stockfish_path, threads=threads, hash_mb=hash_mb)
-        # Livre d'ouvertures (optionnel) : cherché à côté de l'exécutable
-        # (même dossier que stockfish.exe), fichier "opening_book.bin". Rien
-        # ne casse si le fichier est absent -- voir opening_book.py.
-        book_path = os.path.join(app_paths.get_base_dir(), "opening_book.bin")
-        self.opening_book = opening_book.OpeningBook(book_path)
+        # Livre(s) d'ouvertures (optionnel) : cherchés à côté de l'exécutable
+        # (même dossier que stockfish.exe), motif "opening_book*.bin" --
+        # couvre le fichier historique "opening_book.bin" ET d'éventuels
+        # livres supplémentaires ("opening_book_2.bin", etc., voir
+        # opening_book.OpeningBook -- leurs entrées sont fusionnées, aucun
+        # n'est privilégié arbitrairement sur les autres). Rien ne casse si
+        # aucun fichier n'est présent -- voir opening_book.py.
+        book_paths = sorted(glob.glob(os.path.join(app_paths.get_base_dir(), "opening_book*.bin")))
+        self.opening_book = opening_book.OpeningBook(book_paths)
         # Fallback en ligne (Lichess Opening Explorer) pour le nom
         # d'ouverture ET la flèche théorique quand le livre local/la base
         # ECO locale ne couvrent plus la position -- voir
         # lichess_explorer.py (jamais bloquant, cache mémoire par FEN).
-        self.lichess_explorer = lichess_explorer.LichessExplorer()
+        # Désactivé par défaut (voir LICHESS_EXPLORER_ENABLED ci-dessus).
+        self.lichess_explorer = lichess_explorer.LichessExplorer(enabled=LICHESS_EXPLORER_ENABLED)
         # Base ECO locale (nom d'ouverture + points forts/faibles rédigés à
         # la main) -- distincte du livre polyglot ci-dessus (qui donne des
         # coups, jamais de noms). Voir opening_identity.py et narration.py.
@@ -451,19 +465,33 @@ class BridgeState:
         (lichess_explorer.MIN_POPULARITY), une suite très jouée en
         amateur/blitz peut rester "populaire" bien au-delà de la vraie
         théorie d'ouverture. Plutôt que de faire confiance aveuglément à ce
-        signal, on le borne à la même définition de "phase d'ouverture" que
-        le reste de l'appli (human_profile.OPENING_MAX_PLY, déjà utilisée
-        pour la classification de phase ailleurs) -- au-delà, même si le
-        livre/Lichess renvoie encore un coup, on ne le considère plus comme
-        une suggestion théorique à afficher.
+        signal, on ne le garde que tant qu'on est COUVERT PAR AU MOINS UNE
+        DES DEUX SOURCES locales -- livre polyglot (opening_book*.bin, 1M+
+        entrées) OU base ECO NOMMÉE (opening_identity.is_in_theory,
+        transposition comprise) -- pas seulement l'ECO : le livre polyglot
+        est bien plus large en couverture, donc consulté EN PREMIER, avant
+        tout plafond ; celui-ci ne coupe la flèche que si le livre est déjà
+        muet sur cette position ET qu'on est aussi sorti de la couverture
+        ECO (ou, base absente, au-delà de human_profile.OPENING_MAX_PLY en
+        repli). Une base ECO absente ne désactive donc jamais le livre.
         """
-        if len(self._move_history) >= human_profile.OPENING_MAX_PLY:
-            return None
         book_entries = self.opening_book.lookup(board)
         if book_entries:
             top = max(book_entries, key=lambda e: e.weight)
             if top.move in board.legal_moves:
                 return {"move_uci": top.move.uci(), "move_san": board.san(top.move), "source": "book"}
+
+        # Le livre ne couvre plus cette position (ou entrée invalide) --
+        # encore potentiellement en théorie si la base ECO locale couvre
+        # cette position précise ; sinon plus rien à tenter (Lichess
+        # restera de toute façon muet par défaut, voir
+        # LICHESS_EXPLORER_ENABLED).
+        if self.opening_identity.covered_positions:
+            if not self.opening_identity.is_in_theory(fen):
+                return None
+        elif len(self._move_history) >= human_profile.OPENING_MAX_PLY:
+            return None
+
         remote = self.lichess_explorer.lookup(fen)
         if remote and remote.get("top_move_uci"):
             return {"move_uci": remote["top_move_uci"], "move_san": remote.get("top_move_san"), "source": "lichess"}

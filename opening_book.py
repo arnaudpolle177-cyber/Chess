@@ -23,41 +23,54 @@ import chess.polyglot
 
 
 class OpeningBook:
-    def __init__(self, path):
-        self.path = path
-        self.reader = None
-        if path and os.path.isfile(path):
-            try:
-                self.reader = chess.polyglot.open_reader(path)
-                print(f"📖 Livre d'ouvertures chargé : {path}")
-            except Exception as e:
-                print(f"⚠ Livre d'ouvertures illisible ({path}) : {e}. Le coach fonctionnera sans.")
-        else:
+    def __init__(self, paths):
+        """
+        paths : un chemin (str) OU une liste de chemins vers un ou
+        plusieurs livres polyglot (.bin). Avec plusieurs livres, leurs
+        entrées sont FUSIONNÉES à chaque position (voir lookup) plutôt que
+        de n'en garder qu'un seul -- le tri par poids déjà fait dans
+        candidates_from_book_entries départage naturellement entre
+        sources sans qu'on ait à en privilégier une arbitrairement.
+        """
+        if isinstance(paths, str):
+            paths = [paths]
+        self.readers = []
+        for path in paths or []:
+            if path and os.path.isfile(path):
+                try:
+                    self.readers.append(chess.polyglot.open_reader(path))
+                    print(f"📖 Livre d'ouvertures chargé : {path}")
+                except Exception as e:
+                    print(f"⚠ Livre d'ouvertures illisible ({path}) : {e}. Ignoré.")
+        if not self.readers:
             print(
-                f"ℹ Pas de livre d'ouvertures trouvé ({path or 'chemin non défini'}). "
-                "Le coach utilisera Stockfish dès le 1er coup -- rien de cassé, juste moins "
-                "\"humain\" en ouverture. Voir README pour en ajouter un (optionnel)."
+                "ℹ Pas de livre d'ouvertures trouvé. Le coach utilisera Stockfish dès le "
+                "1er coup -- rien de cassé, juste moins \"humain\" en ouverture. Voir README "
+                "pour en ajouter un (optionnel)."
             )
 
     def lookup(self, board):
         """
-        Retourne la liste des entrées du livre pour cette position EXACTE
-        (chacune avec .move et .weight), ou une liste vide si la position
-        n'est pas dans le livre (= on considère qu'on est sorti de la
-        théorie à partir d'ici). None si aucun livre n'est chargé.
+        Retourne la liste FUSIONNÉE des entrées de TOUS les livres chargés
+        pour cette position EXACTE (chacune avec .move et .weight), liste
+        vide si aucun livre ne couvre cette position (= on considère qu'on
+        est sorti de la théorie à partir d'ici). None si aucun livre n'est
+        chargé du tout.
         """
-        if self.reader is None:
+        if not self.readers:
             return None
-        try:
-            return list(self.reader.find_all(board))
-        except Exception as e:
-            print(f"⚠ Erreur de lecture du livre d'ouvertures pour cette position : {e}")
-            return []
+        entries = []
+        for reader in self.readers:
+            try:
+                entries.extend(reader.find_all(board))
+            except Exception as e:
+                print(f"⚠ Erreur de lecture d'un livre d'ouvertures pour cette position : {e}")
+        return entries
 
     def close(self):
-        if self.reader is not None:
+        for reader in self.readers:
             try:
-                self.reader.close()
+                reader.close()
             except Exception:
                 pass
 
