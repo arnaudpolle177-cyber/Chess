@@ -67,9 +67,9 @@ class CoachOverlay:
             # Debounce : le Scale Tkinter déclenche ce callback à CHAQUE
             # valeur traversée pendant qu'on fait glisser le curseur, pas
             # seulement au relâchement. Sans ça, glisser rapidement de 1 à 3
-            # pouvait lancer 2-3 recalculs complets (4 profils chacun) qui
+            # pouvait lancer 2-3 recalculs complets (3 profils chacun) qui
             # se chevauchaient -- plusieurs threads martelant le moteur
-            # Stockfish en même temps, terrain propice aux crashs observés
+            # en même temps, terrain propice aux crashs observés
             # en pratique. On annule tout recalcul déjà programmé et on en
             # reprogramme un nouveau : seul le DERNIER niveau choisi, une
             # fois le glissement stabilisé (~400ms sans changement),
@@ -92,7 +92,7 @@ class CoachOverlay:
         self.elo_scale.set(human_profile.DEFAULT_ELO_TIER)
         self.elo_scale.pack(fill="x")
 
-        # --- Zone des meilleurs coups (4 profils) ---
+        # --- Zone des meilleurs coups (3 profils) ---
         self.lines_frame = tk.Frame(self.root, bg="#1e1e2e")
         self.lines_frame.pack(pady=(2, 6), padx=8, fill="x")
 

@@ -331,38 +331,61 @@ def _frag_endgame(fields, voice, ctx):
 
 
 # --- OPENING -----------------------------------------------------------
-# CONSCIENT DE LA POSITION : le plan ne recommande de ROQUER que si le
-# roque est encore LÉGALEMENT possible (board.has_castling_rights). Sinon
-# (droits perdus = déjà roqué, ou roi/tour déjà bougés), conseiller de
-# roquer serait absurde -- on bascule sur "achève ton développement". Bug
-# observé en pratique : "Roque puis connecte tes tours" affiché alors que
-# le roi était déjà roqué (voir la conversation). ctx.board peut être None
-# (fragments en formulation générale) -> repli prudent sur can_castle=True
-# (le conseil de roque reste vrai par défaut en vraie ouverture).
+# CONSCIENT DE LA POSITION : le conseil de roque distingue TROIS états, car le
+# bug observé venait de les confondre --
+#   "now"   : un coup de roque est LÉGAL tout de suite -> "roque maintenant" ;
+#   "later" : le roque reste un objectif (droits encore là) mais les pièces
+#             mineures bloquent encore les cases (coup 1-3 typique) -> il faut
+#             DÉVELOPPER pour pouvoir roquer ensuite ; surtout PAS dire "roque
+#             derrière toi", ce serait faux ;
+#   "done"  : plus de droits de roque (déjà roqué OU roi/tour bougés) -> on ne
+#             parle plus de roque du tout.
+# Une version précédente ne testait QUE le coup de roque légal, fusionnant
+# "later" et "done" : au coup 1-3 elle annonçait donc "le roque est derrière
+# toi" alors que le joueur n'avait pas encore roqué. On lit maintenant AUSSI
+# has_castling_rights pour séparer "pas encore" de "terminé".
+# ctx.board peut être None (formulation générale) -> repli prudent sur "now".
+_CASTLE_NOW, _CASTLE_LATER, _CASTLE_DONE = "now", "later", "done"
+
+
+def _castle_state(ctx):
+    if ctx is None or ctx.board is None:
+        return _CASTLE_NOW  # repli : sans position, on garde le conseil de roque classique
+    try:
+        board = ctx.board
+        if any(board.is_castling(m) for m in board.legal_moves):
+            return _CASTLE_NOW
+        if board.has_castling_rights(board.turn):
+            return _CASTLE_LATER  # droits présents mais pas jouable là -> développer d'abord
+        return _CASTLE_DONE
+    except Exception:
+        return _CASTLE_NOW
+
+
 def _frag_opening(fields, voice, ctx):
-    can_castle = True
-    if ctx is not None and ctx.board is not None:
-        try:
-            can_castle = ctx.board.has_castling_rights(ctx.board.turn)
-        except Exception:
-            can_castle = True
+    state = _castle_state(ctx)
     if voice == CREATIVE:
         obs = "toutes tes pièces ne sont pas encore prêtes à se battre"
         plan = "développe la pièce la plus utile, garde l'idée d'attaque pour plus tard"
         return _f(obs, plan, None)
     if voice == CLASSICAL:
         obs = "l'ouverture obéit à trois priorités : centre, développement, sécurité du roi"
-        if can_castle:
+        if state == _CASTLE_NOW:
             plan = "choisis le coup qui sert un de ces buts sans compromettre les autres"
+        elif state == _CASTLE_LATER:
+            plan = "développe tes pièces mineures pour dégager le roque, puis mets ton roi à l'abri"
         else:
-            plan = "ton roi est à l'abri, concentre-toi maintenant sur l'activité de tes pièces et le centre"
+            plan = "le roque n'est plus à l'ordre du jour, concentre-toi sur l'activité de tes pièces et le centre"
         return _f(obs, plan, None)
     # popular
-    if can_castle:
+    if state == _CASTLE_NOW:
         obs = "ton développement n'est pas terminé"
         plan = "roque puis connecte tes tours, le reste suivra naturellement"
+    elif state == _CASTLE_LATER:
+        obs = "tes pièces mineures ne sont pas encore toutes sorties"
+        plan = "développe-les pour pouvoir roquer, puis relie tes tours"
     else:
-        obs = "ton roi est déjà en sécurité, mais ton développement n'est pas tout à fait fini"
+        obs = "le roque est derrière toi, mais ton développement n'est pas tout à fait fini"
         plan = "amène ta dernière pièce inactive vers une bonne case et relie tes tours"
     return _f(obs, plan, None)
 
@@ -572,6 +595,187 @@ _FRAGMENT_FUNCS = {
     KING_SAFETY_WARNING: _frag_king_safety_warning,
     EQUAL_POSITION: _frag_equal,
 }
+
+
+# =====================================================================
+# FRAGMENTS D'INTENTION DE COUP (voir move_intent.py)
+# =====================================================================
+# Contrairement aux fragments de THÈME ci-dessus (qui décrivent la POSITION),
+# ceux-ci décrivent CE QUE FAIT le coup recommandé -- la flèche affichée. Ils
+# citent la pièce et la case RÉELLES du coup (jamais inventées : lues sur
+# l'intent, lui-même dérivé de la position). Ils prennent la main quand le coup
+# est FORÇANT (échec, prise, sacrifice...), cas où parler de structure de pions
+# n'aurait aucun sens. Même contrat que les autres fragments : clause
+# minuscule, sans ponctuation finale, {observation, cause, plan}.
+
+def _piece_type_name(piece_type):
+    """Nom FR d'un type de pièce (chess.PAWN..KING). None/inconnu -> 'pièce'."""
+    return PIECE_NAMES_FR.get(piece_type, "pièce")
+
+
+def _frag_check_escape(intent, voice, ctx):
+    # Le roi était en échec : le coup le met à l'abri. On nomme la case
+    # d'arrivée si on l'a. On distingue "le roi bouge" d'une parade (une autre
+    # pièce s'interpose ou capture l'attaquant) via la pièce jouée.
+    dest = _sq(intent.to_square)
+    king_moves = intent.moved_piece == chess.KING
+    if voice == CREATIVE:
+        if king_moves:
+            obs = f"ton roi est attaqué et file en {dest}" if dest else "ton roi est attaqué et doit filer"
+        else:
+            obs = "ton roi est attaqué, ce coup pare la menace"
+        plan = "mets-le d'abord au calme, tu chercheras l'initiative une fois hors de danger"
+        return _f(obs, plan, None)
+    if voice == CLASSICAL:
+        if king_moves:
+            obs = f"ton roi est en échec et se réfugie en {dest}" if dest else "ton roi est en échec et doit se déplacer"
+        else:
+            obs = "ton roi est en échec, la priorité absolue est d'y répondre"
+        plan = "assure la sécurité du roi avant toute autre considération"
+        return _f(obs, plan, None)
+    # popular
+    if king_moves:
+        obs = f"ton roi est en échec, il se met à l'abri en {dest}" if dest else "ton roi est en échec et doit bouger"
+    else:
+        obs = "ton roi est en échec, ce coup répond à la menace"
+    plan = "sors d'abord de l'échec, le reste attendra"
+    return _f(obs, plan, None)
+
+
+def _frag_capture_free(intent, voice, ctx):
+    # Prise NETTE : soit la pièce ne peut pas être reprise, soit l'échange
+    # laisse un gain net (voir move_intent._capture_is_free). Le texte reste
+    # donc vrai dans les DEUX cas -- on n'affirme pas "non défendue", ce qui
+    # serait faux pour une prise défendue mais gagnante à l'échange.
+    dest = _sq(intent.to_square)
+    prise = _piece_type_name(intent.captured_piece)
+    par = _piece_type_name(intent.moved_piece)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        obs = f"le {prise} adverse {where} tombe sans compensation".replace("  ", " ").rstrip()
+        plan = "prends-le, puis enchaîne pendant que tu tiens l'avantage matériel"
+        return _f(obs, plan, None)
+    if voice == CLASSICAL:
+        obs = f"le {par} capture le {prise} {where} avec un gain net de matériel".replace("  ", " ")
+        plan = "encaisse le matériel, puis convertis proprement l'avantage"
+        return _f(obs, plan, None)
+    # popular
+    obs = f"le {prise} adverse {where} tombe sans reprise à ta hauteur".replace("  ", " ")
+    plan = "prends la pièce, c'est du matériel gagné"
+    return _f(obs, plan, None)
+
+
+def _frag_sacrifice(intent, voice, ctx):
+    # On donne du matériel (material_delta négatif, calculé sur la ligne) mais
+    # le moteur recommande le coup : il y a une idée derrière (souvent
+    # l'attaque). On reste factuel sur ce qu'on voit -- on ne PROMET pas un mat
+    # qu'on n'a pas vérifié.
+    par = _piece_type_name(intent.moved_piece)
+    dest = _sq(intent.to_square)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        obs = f"ce coup sacrifie du matériel {where} pour ouvrir la position".replace("  ", " ").rstrip()
+        plan = "lance la combinaison : ici l'activité vaut plus que les points"
+        return _f(obs, plan, None)
+    if voice == CLASSICAL:
+        obs = f"le {par} se donne {where} au profit de l'initiative".replace("  ", " ")
+        plan = "calcule la suite jusqu'au bout avant de t'engager dans le sacrifice"
+        return _f(obs, plan, None)
+    # popular
+    obs = f"ce coup abandonne du matériel volontairement {where}".replace("  ", " ").rstrip()
+    plan = "ose le sacrifice, la compensation est bien réelle ici"
+    return _f(obs, plan, None)
+
+
+def _frag_gives_check(intent, voice, ctx):
+    par = _piece_type_name(intent.moved_piece)
+    dest = _sq(intent.to_square)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        obs = f"ce coup donne échec {where} et force la réponse adverse".replace("  ", " ").rstrip()
+        plan = "enchaîne les coups forçants tant que l'adversaire n'a pas le choix"
+        return _f(obs, plan, None)
+    if voice == CLASSICAL:
+        obs = f"le {par} donne échec {where}, un coup forçant".replace("  ", " ")
+        plan = "vérifie chaque réponse à l'échec avant de poursuivre le plan"
+        return _f(obs, plan, None)
+    # popular
+    obs = f"échec au roi {where}, l'adversaire doit réagir tout de suite".replace("  ", " ").rstrip()
+    plan = "profite de l'échec pour garder la main sur la partie"
+    return _f(obs, plan, None)
+
+
+def _frag_promotion(intent, voice, ctx):
+    dest = _sq(intent.to_square)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        obs = f"ton pion va à dame {where}".replace("  ", " ").rstrip()
+        plan = "promeus et bascule aussitôt vers l'attaque avec ta nouvelle pièce"
+        return _f(obs, plan, None)
+    if voice == CLASSICAL:
+        obs = f"le pion atteint la dernière rangée {where} et se transforme".replace("  ", " ")
+        plan = "promeus, puis exploite calmement la supériorité matérielle"
+        return _f(obs, plan, None)
+    # popular
+    obs = f"ton pion arrive à promotion {where}".replace("  ", " ").rstrip()
+    plan = "fais dame, c'est une pièce lourde de plus dans ton camp"
+    return _f(obs, plan, None)
+
+
+def _frag_capture_trade(intent, voice, ctx):
+    # Échange à valeur ~égale : on décrit la prise sans dramatiser.
+    prise = _piece_type_name(intent.captured_piece)
+    par = _piece_type_name(intent.moved_piece)
+    dest = _sq(intent.to_square)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        obs = f"le {par} prend le {prise} {where} et relance la position".replace("  ", " ")
+        plan = "engage l'échange, puis cherche à en tirer l'initiative"
+        return _f(obs, plan, None)
+    if voice == CLASSICAL:
+        obs = f"le {par} échange le {prise} {where}".replace("  ", " ")
+        plan = "réalise l'échange, il clarifie la position"
+        return _f(obs, plan, None)
+    # popular
+    obs = f"le {par} prend le {prise} {where}".replace("  ", " ")
+    plan = "fais l'échange, il simplifie la position sans rien concéder"
+    return _f(obs, plan, None)
+
+
+_INTENT_FUNCS = {
+    "check_escape": _frag_check_escape,
+    "capture_free": _frag_capture_free,
+    "sacrifice": _frag_sacrifice,
+    "gives_check": _frag_gives_check,
+    "promotion": _frag_promotion,
+    "capture_trade": _frag_capture_trade,
+}
+
+
+def fragments_for_intent(intent, voice, ctx=None):
+    """
+    Fragments {observation, cause, plan} décrivant le COUP recommandé (voir
+    move_intent.MoveIntent), dans la voix demandée. Miroir de fragments_for()
+    mais pour les intentions de coup, pas les thèmes de position.
+
+    intent : MoveIntent. Un intent de kind "quiet" (non forçant) n'a pas de
+             fragment dédié -> retourne None (l'appelant garde le thème de
+             position). Un kind inconnu -> None aussi (jamais d'exception).
+    voice  : "popular" / "creative" / "classical". Inconnue -> VOICE_FALLBACK.
+    ctx    : FragmentContext optionnel (non utilisé aujourd'hui par ces
+             fragments -- tout vient de l'intent -- mais accepté pour rester
+             homogène avec fragments_for et permettre un enrichissement futur).
+
+    Retour : dict fragment, ou None si aucune intention à narrer.
+    """
+    if intent is None:
+        return None
+    if voice not in VOICES:
+        voice = VOICE_FALLBACK
+    fn = _INTENT_FUNCS.get(intent.kind)
+    if fn is None:
+        return None  # "quiet" ou inconnu : pas d'intention marquante à raconter
+    return fn(intent, voice, ctx)
 
 
 def fragments_for(brick, voice, ctx=None):

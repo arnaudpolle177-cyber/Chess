@@ -32,10 +32,63 @@ ancré sur un champ réel de brique), hors-ligne, aucun appel moteur ajouté
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+import chess
+
 import theme_detector as td
 import theme_scoring as ts
 import narration_weaver as nw
+import move_intent as mi
 from fragment_library import FragmentContext
+
+# Champs de brique portant une CASE-CLÉ de position (voir ThemeResult) : c'est
+# sur ces cases que se joue la "porte de cohérence" (le coup touche-t-il la
+# zone du thème ?). Une brique peut n'en porter aucune (thème diffus comme
+# STRATEGIC_ADVANTAGE) -> pas de case, la porte tranche alors sur la seule
+# proximité au roi le cas échéant, sinon abandonne le thème.
+_THEME_KEY_SQUARE_FIELDS = (
+    "pawn_weakness_square",     # PAWN_STRUCTURE : le pion faible ciblé
+    "king_square",              # ATTACK / DEFENSE : le roi concerné
+    "king_safety_warning_square",  # KING_SAFETY_WARNING
+    "passed_pawn_square",       # ENDGAME : le pion passé
+)
+
+
+def _theme_key_squares(candidate):
+    """Cases-clés réelles portées par la brique (voir _THEME_KEY_SQUARE_FIELDS)."""
+    if candidate is None or not candidate.fields:
+        return []
+    out = []
+    for name in _THEME_KEY_SQUARE_FIELDS:
+        sq = candidate.fields.get(name)
+        if sq is not None:
+            out.append(sq)
+    return out
+
+
+def _intent_is_coherent_with_theme(intent, theme_candidate):
+    """
+    Porte de COHÉRENCE (géométrique, pas par famille) : le coup recommandé
+    touche-t-il la zone du thème de position ? Si oui, le thème garde du sens
+    en secondaire (ex: "la dame reprend en e5, la faiblesse que tu ciblais") ;
+    sinon il est hors-sujet et l'appelant l'abandonne (ex: fuir un échec n'a
+    aucun rapport avec un pion isolé à l'autre bout).
+
+    Vrai si la case d'arrivée OU de départ du coup est SUR une case-clé du
+    thème, ou à distance <= 1 d'elle (le coup agit dans la zone). Un thème sans
+    case-clé (avantage diffus) est jugé NON cohérent avec un coup forçant : on
+    préfère un commentaire net sur le coup à un rappel positionnel vague.
+    """
+    if intent is None or theme_candidate is None:
+        return False
+    key_squares = _theme_key_squares(theme_candidate)
+    if not key_squares:
+        return False
+    move_squares = [s for s in (intent.to_square, intent.from_square) if s is not None]
+    for ks in key_squares:
+        for ms in move_squares:
+            if chess.square_distance(ks, ms) <= 1:
+                return True
+    return False
 
 
 @dataclass
@@ -134,6 +187,31 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
         board=board, chosen=chosen, why_motif=why_motif, why_detail=why_detail,
         eval_cp=selection.eval_cp,
     )
+
+    # Intention du COUP recommandé (voir move_intent) : quand le coup est
+    # FORÇANT (fuite d'échec, prise nette, sacrifice, échec, promotion), il
+    # DOIT primer sur le thème de position -- sinon on affiche "pion isolé"
+    # alors que la flèche prend une pièce ou sauve le roi (bug observé). Le
+    # thème de position n'est gardé en secondaire QUE s'il est cohérent avec le
+    # coup (porte géométrique : le coup touche la zone du thème) -- ta consigne
+    # "garder le thème positionnel quand il est cohérent avec une prise".
+    # Calculé par profil (chosen diffère selon le profil) -> différencie enfin
+    # les 3 profils et débloque le figement du thème de position.
+    intent = None
+    if board is not None and chosen is not None:
+        try:
+            intent = mi.detect_move_intent(board, chosen, why_motif, why_detail)
+        except Exception:
+            intent = None  # best-effort : jamais bloquant, on retombe sur le thème
+
+    if intent is not None and intent.forcing:
+        kept_theme = selection.lead if _intent_is_coherent_with_theme(intent, selection.lead) else None
+        woven = nw.weave_intent(intent, kept_theme, profile_id, ctx, caution_text=caution_text)
+        if woven.get("text"):
+            return woven
+        # Repli : si l'intention n'a produit aucun texte (kind sans fragment),
+        # on retombe proprement sur le tissage de thème habituel ci-dessous.
+
     return nw.weave(selection.lead, selection.supports, profile_id, ctx, caution_text=caution_text)
 
 

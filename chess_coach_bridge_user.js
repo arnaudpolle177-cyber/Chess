@@ -80,6 +80,12 @@
     creative:  { color: "#f38ba8", width: 5, opacity: 0.75 }, // rose : coup tactique/sacrificiel
     classical: { color: "#f5f5f5", width: 2, opacity: 1.0 },  // blanc : coup textbook, sensible à la phase de partie
   };
+  // Style dédié à la flèche "coup théorique" (livre local ou base Lichess,
+  // voir web_bridge.py _get_theory_move) -- volontairement HORS
+  // PROFILE_STYLE : ce n'est pas un profil de jeu, dessinée séparément
+  // dans redrawProfileArrows() en pointillé pour ne jamais se confondre
+  // avec les flèches pleines des profils.
+  const THEORY_STYLE = { color: "#00e5cc", width: 6, opacity: 0.9 };
   const PIECE_LETTERS = { pawn: "p", knight: "n", bishop: "b", rook: "r", queen: "q", king: "k" };
 
   // Passe à true si tu as besoin de déboguer la lecture du plateau : affiche
@@ -127,6 +133,7 @@
   // d'afficher/mettre à jour une flèche dès qu'un palier arrive, sans
   // attendre les autres.
   let currentProfileEntries = {};
+  let currentTheoryEntry = null; // {move_uci, move_san, source} ou null -- voir handleQuickTakePayload
 
   // ---------------------------------------------------------------------
   // 1. Lecture du plateau (DOM chessground -> grille 8x8 -> FEN)
@@ -589,8 +596,13 @@
 
   async function sendFenToCoach(fen, boardPart, side, turn) {
     // Nouvelle position -> on repart d'un état de flèches vierge, elles
-    // seront redessinées une par une au fil des profils reçus.
+    // seront redessinées une par une au fil des profils reçus. Idem pour
+    // currentTheoryEntry : sans ce reset, la flèche turquoise de l'ANCIENNE
+    // position resterait affichée jusqu'à la prochaine mise à jour valide
+    // -- trompeur si la nouvelle position, elle, n'a aucune suggestion
+    // théorique (ex: on vient de sortir de la théorie connue).
     currentProfileEntries = {};
+    currentTheoryEntry = null;
 
     // 1. Aperçu rapide (depth 12, quasi instantané) : les 3 profils d'un
     // coup, affichés immédiatement. On l'ATTEND avant de lancer les vraies
@@ -677,6 +689,10 @@
         console.log(`Coach d'échecs [debug] : aperçu rapide pour ${profileId} ignoré (déjà une entrée présente).`);
       }
     });
+    if (data.theory_move && data.theory_move.move_uci) {
+      currentTheoryEntry = data.theory_move;
+      updated = true;
+    }
     if (DEBUG) console.log("Coach d'échecs [debug] : aperçu rapide -- profils reçus:", Object.keys(data.profiles), "mise à jour appliquée:", updated);
     if (updated) redrawProfileArrows();
   }
@@ -751,6 +767,13 @@
       // uniquement la flèche correspondante, les autres restent affichées
       // telles quelles en attendant leur propre mise à jour.
       currentProfileEntries[data.profile] = data;
+      // Idem côté serveur (voir handle_single_profile, entry["theory_move"]) :
+      // chaque réponse de profil est une nouvelle chance de récupérer la
+      // suggestion théorique si le cache Lichess s'est rempli entre-temps
+      // (l'aperçu rapide seul ne suffit pas, voir handleQuickTakePayload).
+      if (data.theory_move && data.theory_move.move_uci) {
+        currentTheoryEntry = data.theory_move;
+      }
       redrawProfileArrows();
       lastSentKey = lockKey;
     }
@@ -826,6 +849,7 @@
 
   function clearArrows() {
     currentProfileEntries = {};
+    currentTheoryEntry = null;
     lastDrawnMovesKey = null;
     const svg = document.getElementById("chess-coach-arrows");
     if (svg) {
@@ -841,7 +865,13 @@
     const profileIds = Object.keys(currentProfileEntries).sort(
       (a, b) => PROFILE_IDS.indexOf(a) - PROFILE_IDS.indexOf(b)
     );
-    const movesKey = JSON.stringify(profileIds.map((p) => `${p}:${currentProfileEntries[p].move_uci}`));
+    const movesKey = JSON.stringify([
+      ...profileIds.map((p) => `${p}:${currentProfileEntries[p].move_uci}`),
+      // Sans cette entrée, l'arrivée/le changement de la seule flèche
+      // théorique (les 3 profils restant sur les mêmes coups) serait
+      // silencieusement ignoré par le court-circuit ci-dessous.
+      currentTheoryEntry ? `theory:${currentTheoryEntry.move_uci}` : "theory:none",
+    ]);
     if (movesKey === lastDrawnMovesKey) return; // déjà affiché tel quel, rien à refaire
 
     const els = getBoardElements();
@@ -884,6 +914,34 @@
       line.setAttribute("marker-end", `url(#cc-arrowhead-${profileId})`);
       svg.appendChild(line);
     });
+
+    // Flèche "coup théorique" (livre local / base Lichess) -- dessinée à
+    // part, en pointillé turquoise, jamais confondue avec les flèches
+    // pleines des profils ci-dessus. Pas de marker-end dédié : la couleur +
+    // le pointillé suffisent à la distinguer sans toucher au <defs> existant.
+    if (currentTheoryEntry && currentTheoryEntry.move_uci) {
+      const uci = currentTheoryEntry.move_uci;
+      const fromSq = uci.slice(0, 2);
+      const toSq = uci.slice(2, 4);
+      const from = squareToXY(fromSq, squareSize, isWhiteOrientation);
+      const to = squareToXY(toSq, squareSize, isWhiteOrientation);
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const shorten = squareSize * 0.35;
+
+      const theoryLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      theoryLine.setAttribute("x1", from.x);
+      theoryLine.setAttribute("y1", from.y);
+      theoryLine.setAttribute("x2", to.x - (dx / len) * shorten);
+      theoryLine.setAttribute("y2", to.y - (dy / len) * shorten);
+      theoryLine.setAttribute("stroke", THEORY_STYLE.color);
+      theoryLine.setAttribute("stroke-width", THEORY_STYLE.width);
+      theoryLine.setAttribute("stroke-linecap", "round");
+      theoryLine.setAttribute("opacity", THEORY_STYLE.opacity);
+      theoryLine.setAttribute("stroke-dasharray", "10,6");
+      svg.appendChild(theoryLine);
+    }
   }
 
 

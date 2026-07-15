@@ -181,6 +181,32 @@ def test_king_safety_mine_vs_opponent():
     check("adverse" in opp["observation"].lower(), f"is_mine=False -> roi adverse -> {opp['observation']!r}")
 
 
+def test_opening_castle_three_states():
+    # Trois états distincts (voir fragment_library._castle_state) :
+    #   - roque JOUABLE maintenant  -> conseille de roquer ;
+    #   - droits présents mais pièces pas sorties (coup 1) -> conseille de
+    #     DÉVELOPPER, jamais "roque derrière toi" (le bug corrigé) ;
+    #   - plus de droits (déjà roqué) -> ne parle plus de roque.
+    now = chess.Board("rnbqk2r/pppp1ppp/5n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1")  # O-O légal
+    early = chess.Board("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1")  # droits, mais rien de sorti
+    done = chess.Board("rnbq1rk1/pppp1ppp/5n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQ1RK1 w - - 0 1")  # les deux ont roqué
+
+    def line(board):
+        frag = fragments_for(brick(OPENING), "popular", FragmentContext(board=board))
+        return " ".join(v for v in frag.values() if v).lower()
+
+    now_txt, early_txt, done_txt = line(now), line(early), line(done)
+    check("roque" in now_txt, f"roque jouable -> devrait conseiller de roquer -> {now_txt!r}")
+    # Coup 1 : on doit inviter à développer, PAS annoncer un roque déjà fait.
+    check("roque est derrière" not in early_txt,
+          f"début d'ouverture -> ne doit PAS dire 'le roque est derrière toi' -> {early_txt!r}")
+    check("développe" in early_txt or "sorties" in early_txt,
+          f"début d'ouverture -> devrait parler de développement -> {early_txt!r}")
+    # Déjà roqué : on ne renvoie plus vers le roque.
+    check("roque est derrière" in done_txt or "roque n'est plus" in done_txt,
+          f"déjà roqué -> devrait acter que le roque est fait -> {done_txt!r}")
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

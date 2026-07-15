@@ -874,9 +874,10 @@ def compute_scenario_facts(chosen, board, engine, compute_eval=True, depth=varia
     les évals 3 fois.
 
     board : position AVANT le coup choisi (chosen) -- même `board` que reçu
-    par generate_narration. On joue `chosen` sur une copie pour obtenir la
-    position de départ de la ligne à analyser (pv_uci[0] EST déjà chosen, on
-    l'exclut : déjà visible via la flèche affichée).
+    par generate_narration. La ligne analysée COMMENCE par le coup recommandé
+    lui-même (pv_uci[0] = chosen) : on passe donc `board` tel quel à
+    analyze_variation, sans rien pousser, pour que le scénario s'ancre sur ce
+    que FAIT la flèche (voir le corps ci-dessous).
     engine : instance ChessCoachEngine, nécessaire pour la trajectoire
     d'éval -- si None, motifs structurels seuls (aucun appel moteur).
     depth : profondeur de l'éval à chaque étape de la ligne (voir
@@ -890,21 +891,24 @@ def compute_scenario_facts(chosen, board, engine, compute_eval=True, depth=varia
     tirer quoi que ce soit (ex: coup de livre sans PV calculée au-delà).
     """
     pv_uci = chosen.get("pv_uci") or []
-    follow_up_uci = pv_uci[1:]
-    if not follow_up_uci:
+    # La ligne narrée COMMENCE par le coup recommandé (pv_uci[0] = chosen), pas
+    # par la réponse adverse : une version précédente sautait le coup proposé
+    # ("déjà visible via la flèche") et racontait UNIQUEMENT la suite théorique,
+    # ce qui déconnectait le scénario du coup affiché (ex: la flèche prend une
+    # pièce mais la "suite" parle d'autre chose). En incluant le coup choisi, le
+    # motif structurel (échange, rupture, pression) s'ancre sur CE que fait la
+    # flèche. Il faut au moins le coup + une réponse pour raconter une suite.
+    if len(pv_uci) < 2:
         return None
     try:
-        chosen_move = chess.Move.from_uci(chosen["move_uci"])
-        follow_up_moves = [chess.Move.from_uci(u) for u in follow_up_uci]
+        pv_moves = [chess.Move.from_uci(u) for u in pv_uci]
     except (ValueError, KeyError):
         return None
-    board_after_chosen = board.copy()
-    try:
-        board_after_chosen.push(chosen_move)
-    except AssertionError:
-        return None  # coup illégal sur cette position (désync improbable mais possible) -- pas de scénario plutôt qu'un crash
+    # analyze_variation attend la position AVANT le 1er coup de la ligne, avec
+    # pv_moves[0] = le coup choisi (voir sa docstring). On part donc du `board`
+    # tel quel (position avant le coup recommandé), sans pousser quoi que ce soit.
     return variation_narrator.analyze_variation(
-        engine, board_after_chosen, follow_up_moves, compute_eval=compute_eval and engine is not None,
+        engine, board.copy(), pv_moves, compute_eval=compute_eval and engine is not None,
         depth=depth,
     )
 
@@ -1000,7 +1004,7 @@ def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, 
     theme = theme_result.theme
 
     if theme == OPENING and opening_book is not None and move_history:
-        opening_match = opening_book.identify(move_history)
+        opening_match = opening_book.identify(move_history, fen=board.fen())
         if opening_match is not None:
             result = {
                 "theme_label": THEME_LABELS_FR.get(theme, theme),

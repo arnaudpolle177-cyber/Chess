@@ -67,8 +67,8 @@ def candidates_from_book_entries(board, entries, max_candidates=4):
     Convertit des entrées de livre polyglot en la même structure que
     ChessCoachEngine.analyze_candidates() (voir engine_analysis.py), pour
     pouvoir réutiliser TEL QUEL human_profile.select_move() sans aucune
-    modification -- les 4 profils continuent de fonctionner exactement
-    pareil, que le coup vienne du livre ou de Stockfish.
+    modification -- les 3 profils continuent de fonctionner exactement
+    pareil, que le coup vienne du livre ou du moteur (Berserk).
 
     Le "eval_loss" ici est SYNTHÉTIQUE (basé sur le poids relatif du coup
     dans le livre, pas sur une vraie évaluation Stockfish) : un coup de

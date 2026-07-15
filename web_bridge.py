@@ -46,6 +46,7 @@ import narration
 import narration_v2
 import opening_identity
 import variation_narrator
+import lichess_explorer
 
 DEFAULT_PORT = 8765
 # Aperçu rapide (depth 12, quasi instantané) : calculé UNE fois pour les 4
@@ -72,11 +73,16 @@ class BridgeState:
         # ne casse si le fichier est absent -- voir opening_book.py.
         book_path = os.path.join(app_paths.get_base_dir(), "opening_book.bin")
         self.opening_book = opening_book.OpeningBook(book_path)
+        # Fallback en ligne (Lichess Opening Explorer) pour le nom
+        # d'ouverture ET la flèche théorique quand le livre local/la base
+        # ECO locale ne couvrent plus la position -- voir
+        # lichess_explorer.py (jamais bloquant, cache mémoire par FEN).
+        self.lichess_explorer = lichess_explorer.LichessExplorer()
         # Base ECO locale (nom d'ouverture + points forts/faibles rédigés à
         # la main) -- distincte du livre polyglot ci-dessus (qui donne des
         # coups, jamais de noms). Voir opening_identity.py et narration.py.
         eco_path = os.path.join(app_paths.get_base_dir(), "eco_openings.json")
-        self.opening_identity = opening_identity.OpeningIdentity(eco_path)
+        self.opening_identity = opening_identity.OpeningIdentity(eco_path, explorer=self.lichess_explorer)
         self.explain_mode = explain_mode
         self.on_update = on_update            # callback(lines, explanation) -> messages ponctuels (skip/erreur/fin de partie)
         self.on_profile_update = on_profile_update  # callback(profile_id, entry) -> coach "humain"
@@ -135,14 +141,14 @@ class BridgeState:
         self._initiative_last_seq = None
         self.my_side = "w"
         # Niveau Elo actif (voir human_profile.ELO_TIERS). Change le style
-        # de jeu proposé par les 4 profils, PAS juste la profondeur -- voir
+        # de jeu proposé par les 3 profils, PAS juste la profondeur -- voir
         # human_profile.py pour le détail.
         self.elo_tier_id = human_profile.DEFAULT_ELO_TIER
         # Cache des coups candidats (MultiPV) pour la DERNIÈRE position
-        # analysée. Les 4 profils (vert/bleu/rose/N&B) arrivent en 4
+        # analysée. Les 3 profils (bleu/rose/blanc) arrivent en 3
         # requêtes HTTP séparées pour LA MÊME position -- sans ce cache,
-        # chacune relancerait sa propre analyse MultiPV complète (4x le
-        # travail du moteur pour rien, et 4x plus de risque de backlog si
+        # chacune relancerait sa propre analyse MultiPV complète (3x le
+        # travail du moteur pour rien, et 3x plus de risque de backlog si
         # les coups s'enchaînent vite). Protégé par engine_lock (jamais lu/
         # écrit hors de ce verrou).
         self._candidates_cache_key = None      # (fen, elo_tier_id)
@@ -160,7 +166,7 @@ class BridgeState:
         # fait planter l'analyse complète (multipv=3) bascule directement
         # sur une analyse dégradée mais fiable (multipv=1, profondeur
         # réduite) au lieu de retenter la même config qui replanterait --
-        # les 4 profils partagent alors le même coup pour cette position
+        # les 3 profils partagent alors le même coup pour cette position
         # précise, plutôt que de rester bloqués sans rien afficher.
         self._main_engine_degraded = set()
 
@@ -428,9 +434,27 @@ class BridgeState:
         )
         print("✅ Moteur redémarré.")
 
+    def _get_theory_move(self, fen, board):
+        """
+        Suggestion "coup théorique" pour la flèche turquoise côté
+        navigateur : livre polyglot local en priorité (instantané), Lichess
+        en repli SEULEMENT si le livre ne couvre plus cette position (voir
+        lichess_explorer.py -- ne bloque jamais, retourne None tant que la
+        requête en tâche de fond n'a pas encore rempli le cache).
+        """
+        book_entries = self.opening_book.lookup(board)
+        if book_entries:
+            top = max(book_entries, key=lambda e: e.weight)
+            if top.move in board.legal_moves:
+                return {"move_uci": top.move.uci(), "move_san": board.san(top.move), "source": "book"}
+        remote = self.lichess_explorer.lookup(fen)
+        if remote and remote.get("top_move_uci"):
+            return {"move_uci": remote["top_move_uci"], "move_san": remote.get("top_move_san"), "source": "lichess"}
+        return None
+
     def handle_quick_take(self, fen):
         """
-        Version rapide (depth 12, quasi instantanée) des 4 profils en UNE
+        Version rapide (depth 12, quasi instantanée) des 3 profils en UNE
         seule requête -- affichée immédiatement côté navigateur pendant que
         la vraie analyse (plus profonde, au niveau Elo choisi) tourne
         derrière. Ne calcule PAS l'avis Elo-bridé (pour rester rapide) --
@@ -497,7 +521,8 @@ class BridgeState:
                     "score": chosen["score"],
                     "pv_san": chosen["pv_san"],
                 }
-        return {"quick": True, "profiles": profiles_out}
+        theory_move = self._get_theory_move(fen, board)
+        return {"quick": True, "profiles": profiles_out, "theory_move": theory_move}
 
     def _update_move_history(self, fen, board):
         """
@@ -754,6 +779,15 @@ class BridgeState:
             "move_san": chosen["move_san"],
             "score": chosen["score"],
             "pv_san": chosen["pv_san"],
+            # Rebranché ici (pas seulement dans handle_quick_take) : sinon,
+            # une position jamais vue avant dans la partie ne bénéficie
+            # QUE de l'aperçu rapide pour vérifier le cache Lichess -- s'il
+            # n'est pas encore prêt à ce moment précis, la flèche turquoise
+            # ne reviendrait plus jamais pour ce coup. En le recalculant
+            # ici aussi (3 requêtes supplémentaires par coup, cache-hit
+            # quasi gratuit), on laisse une vraie 2e/3e/4e chance au cache
+            # de s'être rempli entre-temps.
+            "theory_move": self._get_theory_move(fen, board),
         }
 
         # Narration : thème partagé (calculé une seule fois par position,
@@ -855,7 +889,7 @@ class BridgeState:
 
     def refresh_last_profiles(self):
         """
-        Relance les 4 profils sur la dernière position reçue, au niveau Elo
+        Relance les 3 profils sur la dernière position reçue, au niveau Elo
         actuel -- c'est la vraie méthode derrière le bouton "Rafraîchir"
         dans main.py. Invalide d'abord le cache de candidats pour forcer un
         vrai recalcul (sinon, si rien n'a changé, on retomberait juste sur
@@ -910,7 +944,7 @@ def _make_handler(state: BridgeState):
                 data = json.loads(body)
                 fen = data["fen"]
                 profile = data.get("profile")  # un seul profil "humain"
-                quick = data.get("quick", False)  # aperçu rapide (depth 12) des 4 profils d'un coup
+                quick = data.get("quick", False)  # aperçu rapide (depth 12) des 3 profils d'un coup
                 side = data.get("side")  # couleur du joueur, auto-détectée par le userscript (orientation du plateau)
             except Exception:
                 self._send_single(400, {"error": "JSON invalide, champ \"fen\" attendu"})

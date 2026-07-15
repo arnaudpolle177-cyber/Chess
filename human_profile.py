@@ -29,7 +29,7 @@ Architecture évolutive :
   entrée dans PROFILE_IDS/select_move(). Rien d'autre à changer côté
   web_bridge.py (qui appelle juste select_move(profile_id=...)).
 - Futur sélecteur de style -> profile_id devient un choix utilisateur au
-  lieu d'être fixé par la boucle des 4 flèches.
+  lieu d'être fixé par la boucle des 3 flèches.
 - Futur curseur "Humanité" -> humanity devient un paramètre venant de l'UI
   au lieu de DEFAULT_HUMANITY.
 """
@@ -62,7 +62,7 @@ class EloTier:
         c'est un ordinateur". Tiré UNE fois par position (pas par profil) :
         voir le cache dans web_bridge.py, qui appelle analyze_candidates()
         une seule fois par (position, tier) et réutilise le résultat pour
-        les 4 profils -- donc les 4 flèches d'un même coup partagent
+        les 3 profils -- donc les 3 flèches d'un même coup partagent
         toujours la même profondeur, seul le coup SUIVANT en tire une autre.
         """
         rng = rng or random

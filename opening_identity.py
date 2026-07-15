@@ -36,8 +36,9 @@ def _pgn_to_san_list(pgn):
 
 
 class OpeningIdentity:
-    def __init__(self, path):
+    def __init__(self, path, explorer=None):
         self.entries = []  # liste de (san_list, eco, name, pros_cons), triée par longueur décroissante
+        self.explorer = explorer  # LichessExplorer optionnel, voir lichess_explorer.py -- fallback si la base locale ne matche pas
         if not path or not os.path.isfile(path):
             print(
                 f"ℹ Base d'ouvertures introuvable ({path or 'chemin non défini'}). "
@@ -62,20 +63,40 @@ class OpeningIdentity:
         except Exception as e:
             print(f"⚠ Base d'ouvertures illisible ({path}) : {e}. Le coach fonctionnera sans.")
 
-    def identify(self, move_history):
+    def identify(self, move_history, fen=None):
         """
         move_history : liste de coups SAN joués depuis le début de la
         partie (voir web_bridge.py, BridgeState._move_history).
+        fen : position actuelle (optionnel) -- utilisée UNIQUEMENT pour le
+        fallback Lichess ci-dessous, la base locale continue de matcher
+        par historique de coups comme avant.
 
         Retourne un dict {"eco", "name", "pros_cons"} pour le meilleur
-        match (préfixe exact le plus long), ou None si aucune entrée de la
-        base ne correspond à l'historique joué.
+        match (préfixe exact le plus long) dans la base locale. Si rien ne
+        matche (ligne absente des entrées locales, ou déjà hors théorie
+        connue) ET qu'un explorer Lichess est configuré, tente un fallback
+        en ligne (voir lichess_explorer.py) -- non bloquant : peut renvoyer
+        None la première fois qu'une position est vue, le temps que la
+        requête en tâche de fond remplisse le cache.
         """
-        if not move_history or not self.entries:
-            return None
-        for san_list, eco, name, pros_cons in self.entries:
-            if len(san_list) > len(move_history):
-                continue  # cette ligne va plus loin que ce qui a été joué, ne peut pas matcher un préfixe
-            if move_history[:len(san_list)] == san_list:
-                return {"eco": eco, "name": name, "pros_cons": pros_cons}
+        if move_history and self.entries:
+            for san_list, eco, name, pros_cons in self.entries:
+                if len(san_list) > len(move_history):
+                    continue  # cette ligne va plus loin que ce qui a été joué, ne peut pas matcher un préfixe
+                if move_history[:len(san_list)] == san_list:
+                    return {"eco": eco, "name": name, "pros_cons": pros_cons}
+
+        # Base locale muette sur cette position -- tente Lichess si
+        # configuré (souvent déjà en cache si on est resté plusieurs coups
+        # dans la même ouverture, voir lichess_explorer.py).
+        if self.explorer is not None and fen:
+            remote = self.explorer.lookup(fen)
+            if remote and remote.get("name"):
+                return {
+                    "eco": remote.get("eco") or "?",
+                    "name": remote.get("name"),
+                    "pros_cons": "Ouverture identifiée via la base Lichess (statistiques de "
+                                 "popularité) -- pas encore de commentaire détaillé rédigé pour "
+                                 "cette ligne précise.",
+                }
         return None

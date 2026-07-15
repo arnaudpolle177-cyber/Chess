@@ -36,6 +36,7 @@ from theme_detector import (
     FAMILY_OPPONENT_MOVE, FAMILY_TACTICS, FAMILY_KING, FAMILY_ADVANTAGE,
     FAMILY_STRUCTURE, FAMILY_ACTIVITY, FAMILY_DYNAMICS, FAMILY_PHASE,
     FAMILY_NEUTRAL,
+    TACTICAL, DEFENSE,  # thèmes d'EN-TÊTE réutilisés pour les intentions de coup (voir weave_intent)
 )
 import fragment_library as fl
 
@@ -237,6 +238,78 @@ def weave(lead, supports, voice, ctx=None, caution_text=None):
         "text": text,
         "lead": lead.theme,
         "supports": [s.theme for s in supports],
+        "voice": voice,
+        "caution": caution_text,
+    }
+
+
+# Famille d'affichage (icône/libellé d'en-tête) d'une intention forçante. On
+# réutilise les thèmes EXISTANTS pour ne toucher NI l'UI ni les tables
+# d'icônes : une prise/un sacrifice s'affichent sous l'étiquette "tactique",
+# une fuite d'échec sous "défense". C'est ce `lead` que web_bridge mappe vers
+# THEME_LABELS_FR / THEME_ICONS -- aucune nouvelle entrée requise (TACTICAL /
+# DEFENSE importés en tête de module).
+_INTENT_HEADER_THEME = {
+    "check_escape": DEFENSE,
+    "capture_free": TACTICAL,
+    "sacrifice": TACTICAL,
+    "gives_check": TACTICAL,
+    "promotion": TACTICAL,
+    "capture_trade": TACTICAL,
+}
+
+
+def weave_intent(intent, kept_support, voice, ctx=None, caution_text=None):
+    """
+    Tisse un commentaire CENTRÉ SUR LE COUP recommandé (voir move_intent.py),
+    utilisé quand le coup est FORÇANT -- il prend alors la main sur le thème de
+    position (raconter la structure de pions n'a aucun sens quand le roi est en
+    échec ou qu'on prend une pièce).
+
+    intent : move_intent.MoveIntent forçant (kind != "quiet").
+    kept_support : ThemeCandidate de position à GARDER en secondaire, ou None.
+        L'appelant (narration_v2.render) ne le fournit QUE s'il a jugé le thème
+        de position cohérent avec le coup (porte de cohérence géométrique :
+        le coup touche la case/zone du thème). Sinon None -> on ne raconte que
+        le coup, le thème hors-sujet est abandonné (pas empilé).
+    voice / ctx / caution_text : comme weave().
+
+    Retour : même forme que weave() -- {text, lead, supports, voice, caution}.
+    `lead` est un THÈME d'en-tête existant (voir _INTENT_HEADER_THEME) pour que
+    l'icône/le libellé continuent de fonctionner sans changement d'UI. Si
+    l'intent n'a pas de fragment (ne devrait pas arriver pour un intent
+    forçant), text="" -> l'appelant retombe sur la narration de position.
+    """
+    intent_frag = fl.fragments_for_intent(intent, voice, ctx)
+    header = _INTENT_HEADER_THEME.get(intent.kind, TACTICAL)
+    if intent_frag is None:
+        return {"text": "", "lead": header, "supports": [], "voice": voice, "caution": caution_text}
+
+    # Le secondaire (thème de position gardé) est tissé inline s'il a une
+    # relation forte avec la FAMILLE de l'intention, sinon en phrase à part.
+    # La famille de l'intention est celle de son thème d'en-tête (tactics /
+    # king), ce qui réutilise la table _RELATIONS déjà réglée.
+    support_frag = fl.fragments_for(kept_support, voice, ctx) if kept_support else None
+    rel = NEUTRAL
+    if kept_support is not None:
+        rel = _RELATIONS.get((theme_family(header), theme_family(kept_support.theme)), NEUTRAL)
+
+    if support_frag is not None and rel != NEUTRAL:
+        sentences = [_lead_sentence(intent_frag, support_frag, rel)]
+    else:
+        sentences = [_lead_sentence(intent_frag, None, NEUTRAL)]
+        if support_frag is not None:
+            starter = _SENTENCE_CONNECTORS[NEUTRAL]
+            sentences.append(f"{starter}, {support_frag['observation']}")
+
+    # Le PLAN vient de l'INTENTION : l'idée directrice est le coup à jouer.
+    sentences.append(_capitalize(intent_frag["plan"]))
+
+    text = ". ".join(s.rstrip(" .") for s in sentences if s) + "."
+    return {
+        "text": text,
+        "lead": header,
+        "supports": [kept_support.theme] if kept_support else [],
         "voice": voice,
         "caution": caution_text,
     }
