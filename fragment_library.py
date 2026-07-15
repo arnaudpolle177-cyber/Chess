@@ -670,20 +670,47 @@ def _frag_sacrifice(intent, voice, ctx):
     # le moteur recommande le coup : il y a une idée derrière (souvent
     # l'attaque). On reste factuel sur ce qu'on voit -- on ne PROMET pas un mat
     # qu'on n'a pas vérifié.
+    #
+    # intent.sacrifice_ply : demi-coup de la PV où le déficit matériel
+    # apparaît pour la 1re fois (voir move_intent._material_delta_over_pv).
+    # <=2 -> le matériel part DÈS ce coup (prise rendue tout de suite) :
+    # phrasing existant. Au-delà -> ce coup précis ne perd encore rien, il
+    # ENGAGE une séquence forcée qui débouche sur un sacrifice plus loin --
+    # on le dit au conditionnel plutôt que de laisser croire qu'on donne la
+    # pièce maintenant.
     par = _piece_type_name(intent.moved_piece)
     dest = _sq(intent.to_square)
     where = f"en {dest}" if dest else ""
+    immediate = intent.sacrifice_ply is None or intent.sacrifice_ply <= 2
+    moves_away = None if immediate else (intent.sacrifice_ply + 1) // 2
+
+    if immediate:
+        if voice == CREATIVE:
+            obs = f"ce coup sacrifie du matériel {where} pour ouvrir la position".replace("  ", " ").rstrip()
+            plan = "lance la combinaison : ici l'activité vaut plus que les points"
+            return _f(obs, plan, None)
+        if voice == CLASSICAL:
+            obs = f"le {par} se donne {where} au profit de l'initiative".replace("  ", " ")
+            plan = "calcule la suite jusqu'au bout avant de t'engager dans le sacrifice"
+            return _f(obs, plan, None)
+        # popular
+        obs = f"ce coup abandonne du matériel volontairement {where}".replace("  ", " ").rstrip()
+        plan = "ose le sacrifice, la compensation est bien réelle ici"
+        return _f(obs, plan, None)
+
+    # Sacrifice différé : le déficit n'apparaît que plus loin dans la ligne
+    # forcée, pas sur ce coup.
     if voice == CREATIVE:
-        obs = f"ce coup sacrifie du matériel {where} pour ouvrir la position".replace("  ", " ").rstrip()
-        plan = "lance la combinaison : ici l'activité vaut plus que les points"
+        obs = f"ce coup {where} lance une séquence qui force un sacrifice dans {moves_away} coups".replace("  ", " ").rstrip()
+        plan = "engage-toi : la ligne forcée vaut le matériel qui partira plus loin"
         return _f(obs, plan, None)
     if voice == CLASSICAL:
-        obs = f"le {par} se donne {where} au profit de l'initiative".replace("  ", " ")
-        plan = "calcule la suite jusqu'au bout avant de t'engager dans le sacrifice"
+        obs = f"le {par} {where} prépare une ligne forcée où du matériel sera cédé dans {moves_away} coups".replace("  ", " ").rstrip()
+        plan = "vérifie toute la séquence forcée avant de t'y engager"
         return _f(obs, plan, None)
     # popular
-    obs = f"ce coup abandonne du matériel volontairement {where}".replace("  ", " ").rstrip()
-    plan = "ose le sacrifice, la compensation est bien réelle ici"
+    obs = f"ce coup {where} met en route un sacrifice qui n'arrive que dans {moves_away} coups".replace("  ", " ").rstrip()
+    plan = "suis la ligne forcée jusqu'au bout, la compensation arrive après le sacrifice"
     return _f(obs, plan, None)
 
 

@@ -97,6 +97,11 @@ class MoveIntent:
     material_delta : gain net de matériel du coup SEUL, en points, du point de
                      vue de mon camp (négatif = je donne du matériel = sacrifice).
     gives_check : le coup donne-t-il échec au roi adverse.
+    sacrifice_ply : demi-coup de la PV où le déficit matériel net apparaît
+                    pour la 1re fois (None si kind != SACRIFICE). <=2 -> le
+                    matériel part DÈS ce coup ; au-delà -> le déficit ne se
+                    matérialise que plus loin dans la ligne forcée (voir
+                    _material_delta_over_pv et fragment_library._frag_sacrifice).
     """
     kind: str
     forcing: bool
@@ -106,6 +111,7 @@ class MoveIntent:
     captured_piece: Optional[int] = None
     material_delta: int = 0
     gives_check: bool = False
+    sacrifice_ply: Optional[int] = None
 
 
 def _immediate_material_delta(board, move):
@@ -138,15 +144,24 @@ def _material_delta_over_pv(board, pv_uci):
     quelques demi-coups plus loin qui révèle qu'on a donné du matériel. Un
     résultat négatif = on finit la ligne en déficit matériel = sacrifice
     (l'éval reste bonne, sinon le moteur ne le recommanderait pas). pv_uci
-    trop court ou illisible -> 0 (on ne conclut pas à un sacrifice sans
-    preuve). None-safe.
+    trop court ou illisible -> (0, None) (on ne conclut pas à un sacrifice
+    sans preuve). None-safe.
+
+    Retourne (gain, sacrifice_ply) -- sacrifice_ply = demi-coup de la PV
+    (1-based) où le déficit apparaît pour la 1re fois, ou None si jamais
+    négatif. Sert à distinguer un sacrifice IMMÉDIAT (<=2 demi-coups : la
+    pièce part et est reprise tout de suite) d'un sacrifice qui ne se
+    matérialise que plus loin dans la ligne forcée -- la narration
+    (fragment_library._frag_sacrifice) en parle alors au conditionnel
+    plutôt que comme si le matériel partait déjà maintenant.
     """
     if not pv_uci:
-        return 0
+        return 0, None
     my_side = board.turn
     tmp = board.copy()
     gain = 0
-    for uci in pv_uci:
+    sacrifice_ply = None
+    for ply, uci in enumerate(pv_uci, start=1):
         try:
             move = chess.Move.from_uci(uci)
         except ValueError:
@@ -164,7 +179,9 @@ def _material_delta_over_pv(board, pv_uci):
             promo_gain = PIECE_VALUES.get(move.promotion, 0) - 1
             gain += promo_gain if mover_is_me else -promo_gain
         tmp.push(move)
-    return gain
+        if gain < 0 and sacrifice_ply is None:
+            sacrifice_ply = ply
+    return gain, sacrifice_ply
 
 
 def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
@@ -209,7 +226,7 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
         captured_piece = chess.PAWN  # en passant : la case d'arrivée est vide mais on prend bien un pion
     immediate_delta = _immediate_material_delta(board, move)
     pv_uci = chosen.get("pv_uci") or [chosen.get("move_uci")]
-    line_delta = _material_delta_over_pv(board, pv_uci)
+    line_delta, sacrifice_ply = _material_delta_over_pv(board, pv_uci)
     gives_check = board.gives_check(move)
     was_in_check = board.is_check()
 
@@ -233,7 +250,9 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     #    (line_delta négatif) comme material_delta pour que le fragment cite
     #    l'ampleur réelle du sacrifice.
     if line_delta < 0:
-        return _mk(SACRIFICE, True, line_delta)
+        intent = _mk(SACRIFICE, True, line_delta)
+        intent.sacrifice_ply = sacrifice_ply
+        return intent
 
     # 3. Promotion (sans perte de matériel) : événement majeur, on le dit.
     if move.promotion:

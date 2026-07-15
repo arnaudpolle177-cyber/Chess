@@ -54,7 +54,7 @@ DEFAULT_PORT = 8765
 # navigateur pendant que la vraie analyse (au niveau Elo choisi, plus
 # profonde) tourne derrière et vient remplacer l'affichage dès qu'elle est
 # prête. Voir handle_quick_take() plus bas.
-QUICK_DEPTH = 12
+QUICK_DEPTH = 15
 QUICK_MULTIPV = 3
 
 
