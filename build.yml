@@ -66,8 +66,21 @@ jobs:
           else
             echo "Pas de opening_book.bin trouvé à la racine du dépôt -- package sans livre d'ouvertures."
           fi
+          # Token Lichess (voir lichess_explorer.py) : vient d'un SECRET
+          # GitHub Actions, jamais du dépôt lui-même -- il ne doit JAMAIS
+          # être commité en clair (historique Git permanent). Configure-le
+          # une fois dans Settings > Secrets and variables > Actions >
+          # New repository secret, nom LICHESS_API_TOKEN.
+          if [ -n "${LICHESS_API_TOKEN:-}" ]; then
+            printf '%s' "$LICHESS_API_TOKEN" > package/CoachEchecs/lichess_token.txt
+            echo "Token Lichess inclus dans le package."
+          else
+            echo "Pas de secret LICHESS_API_TOKEN configuré -- package sans repli Lichess (livre local + base ECO locale uniquement)."
+          fi
           cd package
           7z a -r CoachEchecs-windows.zip CoachEchecs
+        env:
+          LICHESS_API_TOKEN: ${{ secrets.LICHESS_API_TOKEN }}
 
       - name: Publier la Release avec le zip
         uses: softprops/action-gh-release@v2
