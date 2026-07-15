@@ -474,7 +474,24 @@ class BridgeState:
         muet sur cette position ET qu'on est aussi sorti de la couverture
         ECO (ou, base absente, au-delà de human_profile.OPENING_MAX_PLY en
         repli). Une base ECO absente ne désactive donc jamais le livre.
+
+        EXCEPTION : jamais de flèche théorique sur NOTRE tout premier coup
+        de la partie (voir _get_theory_move, is_our_first_move ci-dessous)
+        -- à ce stade, il n'y a pas encore d'"ouverture en cours" à
+        prolonger : c'est justement le choix qui va la définir (ça dépend
+        de la toute première pièce qu'on bouge). Suggérer un coup de livre
+        ici reviendrait à dicter QUELLE ouverture jouer plutôt qu'aider à
+        continuer celle déjà engagée -- les 3 flèches de profils restent
+        donc affichées normalement pour ce coup précis, dès le 2e coup la
+        flèche théorique reprend son fonctionnement habituel.
         """
+        is_our_first_move = (
+            (self.my_side == "w" and len(self._move_history) == 0) or
+            (self.my_side == "b" and len(self._move_history) == 1)
+        )
+        if is_our_first_move:
+            return None
+
         book_entries = self.opening_book.lookup(board)
         if book_entries:
             top = max(book_entries, key=lambda e: e.weight)

@@ -960,6 +960,26 @@ def _opening_identity_body(opening_match):
     }
 
 
+def _opening_tag(opening_match):
+    """
+    Bannière {"eco", "family", "variation"} affichée en PLUS du thème
+    principal (voir generate_narration) quand le thème affiché n'est PAS
+    OPENING lui-même -- reste visible tant que la position est dans une
+    ligne ECO connue (livre local, transposition comprise), même après la
+    phase d'ouverture (7 coups) et même si un thème tactique/stratégique a
+    pris le dessus sur l'affichage principal. `family` = nom de la famille
+    d'ouverture (avant le ":"), `variation` = ce qui suit (None si le nom
+    ne comporte pas de variation nommée, ex: "Réti Opening" seul).
+    """
+    name = opening_match["name"]
+    if ":" in name:
+        family, variation = name.split(":", 1)
+        family, variation = family.strip(), variation.strip()
+    else:
+        family, variation = name.strip(), None
+    return {"eco": opening_match["eco"], "family": family, "variation": variation}
+
+
 def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, board,
                         move_history=None, opening_book=None, engine=None, compute_scenario_eval=True,
                         include_scenario=True, scenario_depth=variation_narrator.DEFAULT_EVAL_DEPTH):
@@ -1000,26 +1020,40 @@ def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, 
 
     Tous ces paramètres sont optionnels (défaut None/True) pour ne rien
     casser des autres appels existants (thèmes autres que OPENING, tests).
+
+    "opening_tag" (optionnel, présent uniquement si theme != OPENING) :
+    {"eco", "family", "variation"} -- même source que le bloc OPENING
+    (opening_book.identify(), voir plus haut) mais affiché comme bannière
+    SUPPLÉMENTAIRE plutôt que de remplacer le contenu du thème principal.
+    Permet de garder "tu es dans telle ouverture/variation" visible même
+    quand la partie a dépassé la phase d'ouverture (7 coups) mais reste
+    dans une ligne connue (livre polyglot et/ou base ECO), et même quand
+    un autre thème (tactique, stratégique...) est celui affiché.
     """
     theme = theme_result.theme
 
-    if theme == OPENING and opening_book is not None and move_history:
+    # Calculé une seule fois, réutilisé par les deux branches ci-dessous :
+    # thème OPENING lui-même (bloc complet, voir _opening_identity_body) OU
+    # tout autre thème (juste la bannière opening_tag, voir _opening_tag).
+    opening_match = None
+    if opening_book is not None and move_history:
         opening_match = opening_book.identify(move_history, fen=board.fen())
-        if opening_match is not None:
-            result = {
-                "theme_label": THEME_LABELS_FR.get(theme, theme),
-                "theme_icon": THEME_ICONS.get(theme, "info"),
-                **_opening_identity_body(opening_match),
-            }
-            if include_scenario:
-                suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval, scenario_depth)
-                if suite:
-                    result["suite"] = suite
-            if theme_result.caution:
-                caution_text = CAUTION_TEXT_FR.get(theme_result.caution)
-                if caution_text:
-                    result["caution"] = caution_text
-            return result
+
+    if theme == OPENING and opening_match is not None:
+        result = {
+            "theme_label": THEME_LABELS_FR.get(theme, theme),
+            "theme_icon": THEME_ICONS.get(theme, "info"),
+            **_opening_identity_body(opening_match),
+        }
+        if include_scenario:
+            suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval, scenario_depth)
+            if suite:
+                result["suite"] = suite
+        if theme_result.caution:
+            caution_text = CAUTION_TEXT_FR.get(theme_result.caution)
+            if caution_text:
+                result["caution"] = caution_text
+        return result
 
     profile_templates = TEMPLATES.get(theme, TEMPLATES[EQUAL_POSITION])
     variants = profile_templates.get(profile_id, profile_templates["popular"])
@@ -1030,6 +1064,8 @@ def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, 
         "theme_icon": THEME_ICONS.get(theme, "info"),
         **body,
     }
+    if opening_match is not None:
+        result["opening_tag"] = _opening_tag(opening_match)
     if include_scenario:
         suite = _scenario_phrase(chosen, profile_id, board, engine, compute_scenario_eval, scenario_depth)
         if suite:

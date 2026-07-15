@@ -189,6 +189,10 @@ _HTML = r"""
   #detail-lines p.secondary .block-label { color: var(--text-dim); }
   #detail-lines p.suite { color: var(--text-dim); font-size: 12.5px; font-style: italic; }
   #detail-lines p.caution { color: var(--warn); font-size: 12.5px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+  #detail-opening-tag { display: none; align-items: baseline; gap: 5px; font-size: 12px; color: var(--text-dim); margin-bottom: 2px; }
+  #detail-opening-tag.visible { display: flex; }
+  #detail-opening-tag .eco { font-weight: 600; color: var(--text); }
+  #detail-opening-tag .variation { font-style: italic; }
   #status-line { font-size: 12.5px; color: var(--text-faint); margin: 0; }
 </style>
 </head>
@@ -231,6 +235,7 @@ _HTML = r"""
   </div>
 
   <div id="detail">
+    <div id="detail-opening-tag"></div>
     <div id="detail-theme">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
       <span id="detail-theme-label">En attente</span>
@@ -270,18 +275,39 @@ _HTML = r"""
     const themeEl = document.getElementById("detail-theme");
     const themeLabel = document.getElementById("detail-theme-label");
     const lines = document.getElementById("detail-lines");
+    const openingTagEl = document.getElementById("detail-opening-tag");
 
     if (!entry || !entry.narration) {
       themeEl.querySelector("svg").innerHTML = THEME_ICON_PATHS["info"];
       themeLabel.textContent = "En attente";
       lines.innerHTML = '<p id="status-line">' +
         (entry ? "Analyse en cours..." : "En attente du prochain coup...") + '</p>';
+      openingTagEl.classList.remove("visible");
+      openingTagEl.innerHTML = "";
       return;
     }
 
     const n = entry.narration;
     themeEl.querySelector("svg").innerHTML = THEME_ICON_PATHS[n.theme_icon] || THEME_ICON_PATHS["info"];
     themeLabel.textContent = n.theme_label || "";
+
+    // Bannière ouverture/variation (voir narration.py, _opening_tag) --
+    // affichée uniquement quand le thème PRINCIPAL n'est PAS déjà OPENING
+    // (auquel cas le nom est déjà le contenu principal ci-dessous, pas la
+    // peine de le répéter dans la bannière).
+    if (n.opening_tag) {
+      const t = n.opening_tag;
+      let tagHtml = '<span class="eco">' + escapeHtml(t.family || "") +
+        (t.eco ? ' (' + escapeHtml(t.eco) + ')' : '') + '</span>';
+      if (t.variation) {
+        tagHtml += '<span class="variation">' + escapeHtml(t.variation) + '</span>';
+      }
+      openingTagEl.innerHTML = tagHtml;
+      openingTagEl.classList.add("visible");
+    } else {
+      openingTagEl.classList.remove("visible");
+      openingTagEl.innerHTML = "";
+    }
 
     // Narration v2 (voir narration_v2.py) : si un paragraphe tissé est fourni,
     // on l'affiche comme UNE seule pensée (2-4 phrases). Sinon, repli sur
