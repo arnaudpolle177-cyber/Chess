@@ -57,6 +57,15 @@ jobs:
           cp dist/CoachEchecs.exe package/CoachEchecs/
           cp dist/stockfish.exe package/CoachEchecs/
           cp README_UTILISATEUR.md package/CoachEchecs/LISEZ-MOI.md
+          # Base ECO locale (noms d'ouverture + pros_cons, voir
+          # opening_identity.py) : committée au repo, donc copiée SANS
+          # condition -- contrairement à opening_book.bin ci-dessous qui est
+          # optionnel/fourni par l'utilisateur. Oubliée une 1re fois (bug
+          # constaté : l'exe compilé n'affichait jamais les noms d'ouverture,
+          # alors qu'une exécution locale via `python main.py` fonctionnait
+          # -- app_paths.get_base_dir() cherchait le fichier à côté de
+          # l'exe, où il n'avait jamais été copié).
+          cp eco_openings.json package/CoachEchecs/
           # Livre d'ouvertures : optionnel. S'il est présent à la racine du
           # dépôt (voir opening_book.py), on l'embarque à côté de l'exe --
           # sinon le coach fonctionne quand même, juste sans lui.
