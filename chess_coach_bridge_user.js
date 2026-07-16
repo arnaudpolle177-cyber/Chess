@@ -129,6 +129,10 @@
   // en vol -- sert à la fois à éviter les envois en double ET à reconstruire
   // lastSentKey au verrouillage (voir handleCoachPayload). null hors requête.
   let inFlightKey = null;
+  // Handles GM_xmlhttpRequest des requêtes profil actuellement en vol, pour
+  // pouvoir les couper net si un nouveau coup est joué avant leur réponse
+  // (voir abortInFlightRequests / sendOneProfile).
+  const inFlightRequests = new Set();
   let localTurnToggle = "w"; // repli si getSideToMove() ne peut rien déterminer (voir plus bas)
   let lastStableGrid = null; // dernière position confirmée (grille 8x8), pour déduire qui vient de jouer
 
@@ -141,7 +145,7 @@
   // d'afficher/mettre à jour une flèche dès qu'un palier arrive, sans
   // attendre les autres.
   let currentProfileEntries = {};
-  let currentTheoryEntry = null; // {move_uci, move_san, source} ou null -- voir handleQuickTakePayload
+  let currentTheoryEntry = null; // {move_uci, move_san, source} ou null
 
   // ---------------------------------------------------------------------
   // 1. Lecture du plateau (DOM chessground -> grille 8x8 -> FEN)
@@ -612,20 +616,19 @@
     currentProfileEntries = {};
     currentTheoryEntry = null;
 
-    // 1. Aperçu rapide (depth 12, quasi instantané) : les 3 profils d'un
-    // coup, affichés immédiatement. On l'ATTEND avant de lancer les vraies
-    // requêtes -- sinon rien ne garantit qu'elle arrive au serveur (et
-    // donc au verrou moteur) avant les 3 requêtes plus lourdes, ce qui la
-    // rendrait aussi lente que le reste. Un petit délai fixe (~100-300ms
-    // typiquement), largement rentabilisé par l'affichage immédiat.
-    await sendQuickTake(fen, boardPart, side, turn);
-
-    // 2. Une requête HTTP INDÉPENDANTE par profil (au lieu d'un seul flux
+    // Une requête HTTP INDÉPENDANTE par profil (au lieu d'un seul flux
     // streamé) : plus robuste, chaque profil arrive et s'affiche dès qu'IL
     // est prêt, sans dépendre du support d'onprogress() du navigateur/
     // gestionnaire d'extensions (voir le commentaire dans web_bridge.py,
-    // handle_single_profile). Remplace automatiquement l'aperçu rapide dès
-    // qu'elle arrive (voir handleCoachPayload).
+    // handle_single_profile).
+    //
+    // Plus d'aperçu rapide préalable (ancien sendQuickTake, retiré) : depuis
+    // que la vraie analyse démarre immédiatement, l'ancien "quick take"
+    // faisait tourner le moteur une PREMIÈRE fois (à la même profondeur ou
+    // presque) juste avant, en tenant le verrou moteur -- donc la vraie
+    // analyse ne pouvait même pas démarrer tant qu'il n'avait pas fini. On
+    // payait quasiment deux fois le même calcul en série. En le supprimant,
+    // la première vraie flèche arrive PLUS TÔT qu'avant, pas plus tard.
     const results = await Promise.all(
       PROFILE_IDS.map((profileId) => sendOneProfile(fen, boardPart, profileId, side, turn))
     );
@@ -643,71 +646,9 @@
     if (inFlightKey === `${boardPart}:${turn}`) inFlightKey = null;
   }
 
-  function sendQuickTake(fen, boardPart, side, turn) {
-    if (DEBUG) console.log("Coach d'échecs [debug] : envoi aperçu rapide (quick take)...");
-    return new Promise((resolve) => {
-      GM_xmlhttpRequest({
-        method: "POST",
-        url: COACH_ENDPOINT,
-        headers: { "Content-Type": "application/json" },
-        data: JSON.stringify(side ? { fen, quick: true, side } : { fen, quick: true }),
-        // depth 12 doit être quasi instantané -- pas la peine d'attendre
-        // longtemps ; si ça traîne, on laisse juste les vraies requêtes
-        // prendre le relais sans aperçu préalable pour cette position.
-        timeout: 2000,
-        onload: (response) => {
-          if (DEBUG) console.log("Coach d'échecs [debug] : aperçu rapide reçu, statut", response.status, "corps brut:", response.responseText);
-          let payload;
-          try {
-            payload = JSON.parse(response.responseText || "{}");
-          } catch (e) {
-            if (DEBUG) console.warn("Coach d'échecs [debug] : aperçu rapide -- JSON invalide.", e);
-            resolve();
-            return;
-          }
-          handleQuickTakePayload(payload, boardPart);
-          resolve();
-        },
-        onerror: (response) => {
-          if (DEBUG) console.warn("Coach d'échecs [debug] : aperçu rapide -- erreur réseau.", response);
-          resolve();
-        },
-        ontimeout: () => {
-          if (DEBUG) console.warn("Coach d'échecs [debug] : aperçu rapide -- timeout (>2s), abandon pour cette position.");
-          resolve();
-        },
-      });
-    });
-  }
-
-  function handleQuickTakePayload(data, boardPart) {
-    if (data.error || data.game_over || data.skip || data.stale || !data.profiles) {
-      if (DEBUG) console.log("Coach d'échecs [debug] : aperçu rapide ignoré, raison :", data);
-      return; // rien à afficher pour l'instant, la vraie requête suivra de toute façon
-    }
-    let updated = false;
-    Object.entries(data.profiles).forEach(([profileId, entry]) => {
-      // Ne remplace jamais un résultat déjà présent pour ce profil (garde-fou
-      // si jamais une vraie réponse arrivait avant, cas rare mais possible) :
-      // l'aperçu rapide ne doit jamais écraser un résultat plus fiable.
-      if (!currentProfileEntries[profileId]) {
-        currentProfileEntries[profileId] = { ...entry, profile: profileId };
-        updated = true;
-      } else if (DEBUG) {
-        console.log(`Coach d'échecs [debug] : aperçu rapide pour ${profileId} ignoré (déjà une entrée présente).`);
-      }
-    });
-    if (data.theory_move && data.theory_move.move_uci) {
-      currentTheoryEntry = data.theory_move;
-      updated = true;
-    }
-    if (DEBUG) console.log("Coach d'échecs [debug] : aperçu rapide -- profils reçus:", Object.keys(data.profiles), "mise à jour appliquée:", updated);
-    if (updated) redrawProfileArrows();
-  }
-
   function sendOneProfile(fen, boardPart, profileId, side, turn) {
     return new Promise((resolve) => {
-      GM_xmlhttpRequest({
+      const handle = GM_xmlhttpRequest({
         method: "POST",
         url: COACH_ENDPOINT,
         headers: { "Content-Type": "application/json" },
@@ -716,6 +657,7 @@
         // une position déjà chargée : quelques secondes grand maximum.
         timeout: 15000,
         onload: (response) => {
+          inFlightRequests.delete(handle);
           let payload;
           try {
             payload = JSON.parse(response.responseText || "{}");
@@ -729,6 +671,7 @@
           resolve(true);
         },
         onerror: () => {
+          inFlightRequests.delete(handle);
           updateStatusIndicator({ serverOk: false });
           console.warn(
             `Coach d'échecs : impossible de contacter le serveur local (port 8765) pour le profil ${profileId}. ` +
@@ -737,18 +680,49 @@
           resolve(false);
         },
         ontimeout: () => {
+          inFlightRequests.delete(handle);
           updateStatusIndicator({ serverOk: false });
           console.warn(`Coach d'échecs : le serveur local met trop de temps à répondre pour le profil ${profileId}.`);
           resolve(false);
         },
+        onabort: () => {
+          // Annulée volontairement (un nouveau coup a été joué avant que ce
+          // profil ait répondu -- voir abortInFlightRequests). Rien à
+          // afficher, la nouvelle position a déjà sa propre volée de requêtes.
+          inFlightRequests.delete(handle);
+          resolve(false);
+        },
       });
+      // Mémorise le handle pour pouvoir couper cette requête net si un
+      // nouveau coup est joué avant sa réponse (voir abortInFlightRequests).
+      // Certains gestionnaires (vieux Greasemonkey) ne retournent pas de
+      // handle abortable -- on ne mémorise que si .abort existe, sinon on
+      // retombe simplement sur l'ancien comportement (garde-fou JS + stale
+      // serveur) pour cette requête.
+      if (handle && typeof handle.abort === "function") {
+        inFlightRequests.add(handle);
+      }
     });
   }
 
-  function handleCoachPayload(data, boardPart, turn) {
-    if (data.stale) {
-      return; // position déjà dépassée entre-temps côté serveur, rien à afficher/verrouiller
+  // Coupe net toutes les requêtes profil encore en vol. Appelé dès qu'un
+  // NOUVEAU coup est détecté (voir onBoardChanged) : sans ça, les 2-3
+  // requêtes de l'ancienne position que le serveur n'a pas encore eu le
+  // temps de marquer "stale" (fenêtre entre la libération du verrou moteur
+  // et l'arrivée du poll de la nouvelle position) continuaient de tenir le
+  // verrou et de calculer un coup déjà obsolète -- ce qui retardait d'autant
+  // l'analyse de la VRAIE nouvelle position. Les couper libère le verrou
+  // moteur tout de suite pour la position réellement à l'écran.
+  function abortInFlightRequests() {
+    if (inFlightRequests.size === 0) return;
+    for (const handle of inFlightRequests) {
+      try { handle.abort(); } catch (e) { /* déjà terminée : sans effet */ }
     }
+    inFlightRequests.clear();
+  }
+
+
+  function handleCoachPayload(data, boardPart, turn) {
     // Verrou = clé (position DES PIÈCES + TRAIT) de CETTE requête (voir
     // onBoardChanged, lastSentKey). On la reçoit en paramètre plutôt que de la
     // reconstruire depuis un état global : si une requête plus récente est
@@ -756,6 +730,26 @@
     // mauvaise clé. Un "skip" sur un trait donné ne bloque plus le renvoi si
     // le trait se corrige ensuite (la clé change).
     const lockKey = `${boardPart}:${turn}`;
+
+    // Garde-fou anti-traînard : si un coup a été joué pendant que CETTE
+    // requête (partie pour l'ANCIENNE position) était encore en vol, le
+    // serveur peut très bien répondre AVANT d'avoir été informé du nouveau
+    // coup (aucune notification push -- il ne le saura qu'au prochain poll
+    // JS) et renvoyer un résultat parfaitement valide, mais pour une
+    // position qui n'existe déjà plus à l'écran. `data.stale` ne couvre que
+    // le cas où le serveur s'en est rendu compte LUI-MÊME ; ici on vérifie
+    // côté navigateur que cette réponse correspond encore à la position
+    // actuellement suivie (inFlightKey pendant un envoi en cours,
+    // lastSentKey une fois verrouillée) avant d'en faire quoi que ce soit --
+    // sinon on l'ignore silencieusement, une réponse plus fraîche est déjà
+    // en route.
+    if (lockKey !== inFlightKey && lockKey !== lastSentKey) {
+      return;
+    }
+
+    if (data.stale) {
+      return; // position déjà dépassée entre-temps côté serveur, rien à afficher/verrouiller
+    }
     if (data.error) {
       console.warn("Coach d'échecs :", data.error);
       clearArrows();
@@ -778,7 +772,7 @@
       // Idem côté serveur (voir handle_single_profile, entry["theory_move"]) :
       // chaque réponse de profil est une nouvelle chance de récupérer la
       // suggestion théorique si le cache Lichess s'est rempli entre-temps
-      // (l'aperçu rapide seul ne suffit pas, voir handleQuickTakePayload).
+      //.
       if (data.theory_move && data.theory_move.move_uci) {
         currentTheoryEntry = data.theory_move;
       }
@@ -1085,6 +1079,13 @@
     const castling = castlingRightsFromGrid(grid);
     const enPassant = enPassantFromGrid(lastMoveSquares, grid);
     const finalFen = `${boardPart} ${turn} ${castling} ${enPassant} 0 1`;
+
+    // Un nouveau coup est confirmé (on a passé les deux guards ci-dessus) :
+    // toute requête profil encore en vol porte forcément l'ANCIENNE position.
+    // On les coupe net pour libérer le verrou moteur côté serveur tout de
+    // suite, au lieu de le laisser finir un calcul déjà obsolète pendant que
+    // la vraie nouvelle position attend derrière (voir abortInFlightRequests).
+    abortInFlightRequests();
 
     inFlightKey = sentKey;
     lastStableGrid = grid;
