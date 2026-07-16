@@ -7,7 +7,7 @@ côté Python.
 Fonctionnement :
 - Le JS de ta page fait, à chaque coup joué (le sien ou celui de
   l'adversaire), un POST http://127.0.0.1:8765/fen : d'abord un aperçu
-  rapide {"fen": ..., "quick": true} (depth 12, quasi instantané), puis une
+  rapide {"fen": ..., "quick": true} (depth QUICK_DEPTH, quasi instantané), puis une
   requête par profil de jeu {"fen": ..., "profile": "popular"|...} au niveau
   Elo choisi.
 - Chaque requête est indépendante et se termine (et met à jour sa flèche)
@@ -50,12 +50,12 @@ import variation_narrator
 import lichess_explorer
 
 DEFAULT_PORT = 8765
-# Aperçu rapide (depth 12, quasi instantané) : calculé UNE fois pour les 4
+# Aperçu rapide (depth QUICK_DEPTH, quasi instantané) : calculé UNE fois pour les 4
 # profils d'un coup (comme le cache principal), affiché immédiatement côté
 # navigateur pendant que la vraie analyse (au niveau Elo choisi, plus
 # profonde) tourne derrière et vient remplacer l'affichage dès qu'elle est
 # prête. Voir handle_quick_take() plus bas.
-QUICK_DEPTH = 15
+QUICK_DEPTH = 18
 QUICK_MULTIPV = 3
 # Fallback réseau (Lichess Opening Explorer, voir lichess_explorer.py) :
 # DÉSACTIVÉ par défaut. Depuis l'ajout de la couverture ECO locale
@@ -167,12 +167,12 @@ class BridgeState:
         # écrit hors de ce verrou).
         self._candidates_cache_key = None      # (fen, elo_tier_id)
         self._candidates_cache_value = None    # (result_dict, board)
-        # Cache SÉPARÉ pour l'aperçu rapide (depth 12) -- ne doit surtout
+        # Cache SÉPARÉ pour l'aperçu rapide (depth QUICK_DEPTH) -- ne doit surtout
         # pas se mélanger avec le cache principal ci-dessus (qui est à la
         # profondeur du niveau Elo choisi) : sinon la "vraie" requête
         # pourrait par erreur réutiliser le résultat rapide et peu profond.
         self._quick_cache_key = None           # fen
-        self._quick_cache_value = None         # liste de candidats (depth 12)
+        self._quick_cache_value = None         # liste de candidats (depth QUICK_DEPTH)
         # Même principe pour le moteur PRINCIPAL (analyse multi-candidats) :
         # certaines positions très tactiques/déséquilibrées font planter la
         # recherche multi-lignes de Stockfish de façon reproductible (crash
@@ -532,7 +532,7 @@ class BridgeState:
 
     def handle_quick_take(self, fen):
         """
-        Version rapide (depth 12, quasi instantanée) des 3 profils en UNE
+        Version rapide (depth QUICK_DEPTH, quasi instantanée) des 3 profils en UNE
         seule requête -- affichée immédiatement côté navigateur pendant que
         la vraie analyse (plus profonde, au niveau Elo choisi) tourne
         derrière. Ne calcule PAS l'avis Elo-bridé (pour rester rapide) --
@@ -1066,7 +1066,7 @@ def _make_handler(state: BridgeState):
                 data = json.loads(body)
                 fen = data["fen"]
                 profile = data.get("profile")  # un seul profil "humain"
-                quick = data.get("quick", False)  # aperçu rapide (depth 12) des 3 profils d'un coup
+                quick = data.get("quick", False)  # aperçu rapide (depth QUICK_DEPTH) des 3 profils d'un coup
                 side = data.get("side")  # couleur du joueur, auto-détectée par le userscript (orientation du plateau)
             except Exception:
                 self._send_single(400, {"error": "JSON invalide, champ \"fen\" attendu"})
