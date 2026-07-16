@@ -172,12 +172,12 @@ class ChessCoachEngine:
         # safe_mode, trop coûteux/risqué -- voir web_bridge.py,
         # _main_engine_degraded), si la déduplication laisse moins de 3
         # coups uniques et qu'on n'a pas déjà demandé le maximum, on
-        # relance une analyse complète à multipv=8 pour donner aux profils
+        # relance une analyse complète à multipv=6 pour donner aux profils
         # un vrai choix de style plutôt que 1-2 coups imposés. Récursif
-        # une seule fois : le rappel passe déjà multipv=8, qui est le
+        # une seule fois : le rappel passe déjà multipv=6, qui est le
         # plafond, donc pas de boucle infinie.
-        if not safe_mode and len(candidates) < 3 and multipv < 8:
-            return self.analyze_candidates(fen, multipv=8, depth=depth, safe_mode=False)
+        if not safe_mode and len(candidates) < 3 and multipv < 6:
+            return self.analyze_candidates(fen, multipv=6, depth=depth, safe_mode=False)
 
         return {"game_over": False, "candidates": candidates}, board
 
