@@ -66,6 +66,46 @@ QUICK_MULTIPV = 3
 # changement nécessaire, le code reste intact).
 LICHESS_EXPLORER_ENABLED = False
 
+# Au-delà de cette valeur ABSOLUE de cp, on considère que le score encode un
+# mat, pas une éval matérielle (voir engine_analysis.analyze_candidates :
+# score().score(mate_score=100000)). 100000 = mat immédiat ; 100000 - N ~=
+# mat en N demi-coups. Un vrai avantage matériel ne dépasse jamais ça (une
+# dame vaut ~900cp), donc le seuil départage sans ambiguïté.
+_MATE_CP_THRESHOLD = 90000
+
+
+def _objective_eval_white(top_candidate, board):
+    """
+    Éval OBJECTIVE de la position (meilleur candidat) convertie du point de vue
+    des BLANCS, prête pour la barre d'avantage côté navigateur.
+
+    top_candidate : candidates[0] (voir engine_analysis) -- son "cp" est du
+        point de vue du camp AU TRAIT (pov(board.turn)), pas des Blancs. On le
+        renverse quand c'est aux Noirs de jouer pour obtenir une valeur absolue
+        (positif = avantage Blancs), indépendante de qui a le trait -- sinon la
+        barre "sauterait" d'un côté à l'autre à chaque demi-coup sans que rien
+        ne change réellement sur l'échiquier.
+
+    Retourne un dict {"cp": int|None, "mate": int|None} :
+      - cp : centipions du point de vue des Blancs (positif = Blancs mieux),
+        None pour un coup de livre (pas de vraie éval Stockfish).
+      - mate : nombre de coups avant mat, SIGNÉ du point de vue des Blancs
+        (positif = les Blancs matent, négatif = les Blancs se font mater),
+        None si la position n'est pas un mat forcé.
+    """
+    cp = top_candidate.get("cp")
+    if cp is None:
+        return {"cp": None, "mate": None}  # coup de livre : pas d'éval réelle
+    # Renverse vers le point de vue des Blancs si c'est aux Noirs de jouer.
+    white_cp = cp if board.turn == chess.WHITE else -cp
+    if abs(white_cp) >= _MATE_CP_THRESHOLD:
+        # Encode un mat : reconstruit le nombre de demi-coups (100000 - |cp|),
+        # converti en coups pleins, en gardant le signe (côté qui mate).
+        plies = max(1, 100000 - abs(white_cp))
+        moves = (plies + 1) // 2
+        return {"cp": white_cp, "mate": moves if white_cp > 0 else -moves}
+    return {"cp": white_cp, "mate": None}
+
 
 class BridgeState:
     """État partagé entre le serveur HTTP et le reste du programme."""
@@ -901,6 +941,16 @@ class BridgeState:
             "move_san": chosen["move_san"],
             "score": chosen["score"],
             "pv_san": chosen["pv_san"],
+            # Éval OBJECTIVE de la position (meilleur candidat, candidates[0]),
+            # pour la barre d'avantage côté navigateur -- PAS l'éval du coup
+            # "humain" choisi (qui peut être volontairement sous-optimal, voir
+            # human_profile). Identique pour les 3 profils : n'importe quelle
+            # réponse porte la même barre. Convertie du point de vue des BLANCS
+            # (candidates[0].cp est du point de vue du camp au trait -- voir
+            # engine_analysis, pov(board.turn)) pour que la barre ait un sens
+            # absolu, indépendant de qui joue. cp=None (coup de livre, pas
+            # d'éval Stockfish) -> barre laissée inchangée côté client.
+            "eval": _objective_eval_white(result["candidates"][0], board),
             # Rebranché ici (pas seulement dans handle_quick_take) : sinon,
             # une position jamais vue avant dans la partie ne bénéficie
             # QUE de l'aperçu rapide pour vérifier le cache Lichess -- s'il

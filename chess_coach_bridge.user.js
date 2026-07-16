@@ -96,6 +96,22 @@
   const THEORY_STYLE = { color: "#fab387", width: 6, opacity: 0.9 };
   const PIECE_LETTERS = { pawn: "p", knight: "n", bishop: "b", rook: "r", queen: "q", king: "k" };
 
+  // Barre d'avantage (façon lichess/chess.com) : une colonne verticale
+  // accolée au bord gauche du plateau, moitié blanche / moitié noire, dont
+  // le partage bouge selon l'éval OBJECTIVE de la position (meilleur coup,
+  // envoyée par le serveur dans data.eval -- voir web_bridge.py). La part
+  // BLANCHE en bas = avantage aux Blancs. Purement informatif (overlay), ne
+  // touche ni aux flèches ni au reste.
+  const EVAL_BAR = {
+    width: 26,          // largeur de la colonne en px
+    gap: 6,             // espace entre la barre et le bord du plateau
+    scaleCp: 400,       // courbe logistique : +/-4 pions ~ barre presque pleine
+    whiteColor: "#f0f0f0",
+    blackColor: "#3a3a42",
+    textColor: "#111",
+    textColorOnBlack: "#eee",
+  };
+
   // Passe à true si tu as besoin de déboguer la lecture du plateau : affiche
   // le détail (FEN, orientation, nb de pièces) à CHAQUE poll. En usage
   // normal, laisse à false -- sinon ça spam la console en continu.
@@ -146,6 +162,11 @@
   // attendre les autres.
   let currentProfileEntries = {};
   let currentTheoryEntry = null; // {move_uci, move_san, source} ou null
+  // Dernière éval OBJECTIVE reçue (point de vue des BLANCS), pour la barre
+  // d'avantage -- {cp, mate} | null. Voir web_bridge.py _objective_eval_white
+  // et updateEvalBar. Remise à null à chaque nouvelle position (sendFenToCoach)
+  // pour ne pas laisser l'ancienne éval affichée le temps du 1er calcul.
+  let currentEval = null;
 
   // ---------------------------------------------------------------------
   // 1. Lecture du plateau (DOM chessground -> grille 8x8 -> FEN)
@@ -615,6 +636,12 @@
     // théorique (ex: on vient de sortir de la théorie connue).
     currentProfileEntries = {};
     currentTheoryEntry = null;
+    // Barre d'avantage : on efface l'ancienne éval mais on NE vide PAS la barre
+    // visuellement tout de suite (updateEvalBar n'est pas appelé ici) -- elle
+    // garde la valeur du coup précédent le temps du calcul, ce qui évite un
+    // clignotement à 0 (position "égale") à chaque coup. La 1re réponse profil
+    // la remplacera dès qu'elle arrive.
+    currentEval = null;
 
     // Une requête HTTP INDÉPENDANTE par profil (au lieu d'un seul flux
     // streamé) : plus robuste, chaque profil arrive et s'affiche dès qu'IL
@@ -776,6 +803,12 @@
       if (data.theory_move && data.theory_move.move_uci) {
         currentTheoryEntry = data.theory_move;
       }
+      // Barre d'avantage : éval OBJECTIVE de la position (identique pour les 3
+      // profils, voir web_bridge.py entry["eval"]). Absente/cp null (coup de
+      // livre) -> on garde la barre inchangée plutôt que de la remettre à 0.
+      if (data.eval && (data.eval.cp !== null || data.eval.mate !== null)) {
+        currentEval = data.eval;
+      }
       redrawProfileArrows();
       lastSentKey = lockKey;
     }
@@ -871,6 +904,15 @@
     // superposaient (le moteur propose souvent un coup DIFFÉRENT du coup de
     // référence en tout début de partie), ce qui rendait la suggestion de
     // livre illisible et contredisait l'idée même de "reste en théorie".
+    //
+    // Barre d'avantage : mise à jour AVANT le court-circuit movesKey ci-dessous.
+    // Elle dépend de currentEval, pas des coups affichés -- une nouvelle éval
+    // peut arriver alors que les 3 profils gardent les mêmes coups (donc même
+    // movesKey), et sans ça la barre resterait figée sur l'ancienne valeur.
+    // Elle vit HORS du SVG (position fixed calée sur le rect du plateau, voir
+    // updateEvalBar) -- jamais clippée par un conteneur au overflow caché.
+    updateEvalBar();
+
     const inTheory = !!(currentTheoryEntry && currentTheoryEntry.move_uci);
     const profileIds = inTheory
       ? []
@@ -955,6 +997,163 @@
       theoryLine.setAttribute("opacity", THEORY_STYLE.opacity);
       theoryLine.setAttribute("stroke-dasharray", "10,6");
       svg.appendChild(theoryLine);
+    }
+  }
+
+  // ---------------------------------------------------------------------
+  // 3bis. Barre d'avantage (style "eval bar" chess.com/lichess)
+  // ---------------------------------------------------------------------
+
+  // Convertit une éval centipions (point de vue BLANCS, voir web_bridge.py
+  // _objective_eval_white) en une fraction 0..1 = part de la barre revenant
+  // aux BLANCS. Courbe logistique : douce autour de 0, sature lentement -- un
+  // avantage de +3 (300cp) ne colle pas déjà la barre à fond, ce qui laisse
+  // voir les variations en milieu de jeu. Un mat force 0 ou 1 (barre pleine).
+  function evalToWhiteFraction(evalData) {
+    if (!evalData) return 0.5;
+    if (evalData.mate !== null && evalData.mate !== undefined) {
+      // mate > 0 = les Blancs matent, mate < 0 = les Noirs matent.
+      return evalData.mate > 0 ? 1 : 0;
+    }
+    const cp = evalData.cp;
+    if (cp === null || cp === undefined) return 0.5;
+    // 1 / (1 + 10^(-cp/400)) -- même familles de courbes que les sites d'échecs.
+    const frac = 1 / (1 + Math.pow(10, -cp / 400));
+    return Math.max(0.02, Math.min(0.98, frac)); // garde un filet visible pour le camp perdant
+  }
+
+  // Texte court affiché sur la barre (côté du camp en tête) : "+1.4", "-0.7"
+  // ou "M3" pour un mat. Toujours du point de vue BLANCS pour le signe, comme
+  // les sites d'échecs (une éval "+" = avantage blanc).
+  function evalToLabel(evalData) {
+    if (!evalData) return "";
+    if (evalData.mate !== null && evalData.mate !== undefined) {
+      return "M" + Math.abs(evalData.mate);
+    }
+    const cp = evalData.cp;
+    if (cp === null || cp === undefined) return "";
+    const pawns = cp / 100;
+    const sign = pawns > 0 ? "+" : (pawns < 0 ? "−" : "");
+    return sign + Math.abs(pawns).toFixed(1);
+  }
+
+  // Crée (une fois) le conteneur de la barre + ses deux segments (blanc/noir)
+  // et l'étiquette. position:fixed -> on la place ensuite sur le rect réel du
+  // plateau à chaque mise à jour (voir updateEvalBar). Renvoie les éléments.
+  function getOrCreateEvalBar() {
+    let bar = document.getElementById("chess-coach-evalbar");
+    if (bar) {
+      return {
+        bar,
+        white: bar.querySelector(".cc-eval-white"),
+        label: bar.querySelector(".cc-eval-label"),
+      };
+    }
+    bar = document.createElement("div");
+    bar.id = "chess-coach-evalbar";
+    bar.style.position = "fixed";
+    bar.style.zIndex = "9998"; // sous les contrôles (10000), au-dessus de la page
+    bar.style.pointerEvents = "none";
+    bar.style.background = "#403d4d"; // fond = part des NOIRS (barre "vide" par le haut)
+    bar.style.borderRadius = "3px";
+    bar.style.overflow = "hidden";
+    bar.style.boxShadow = "0 1px 4px rgba(0,0,0,0.4)";
+    bar.style.transition = "opacity 0.2s";
+
+    // Segment BLANC : ancré en bas, sa hauteur = fraction blanche. Le reste
+    // (haut) laisse voir le fond sombre = part des noirs.
+    const white = document.createElement("div");
+    white.className = "cc-eval-white";
+    white.style.position = "absolute";
+    white.style.left = "0";
+    white.style.right = "0";
+    white.style.bottom = "0";
+    white.style.background = "#f5f5f5";
+    white.style.transition = "height 0.35s ease"; // l'avantage "monte/descend" en douceur
+    bar.appendChild(white);
+
+    const label = document.createElement("div");
+    label.className = "cc-eval-label";
+    label.style.position = "absolute";
+    label.style.left = "0";
+    label.style.right = "0";
+    label.style.textAlign = "center";
+    label.style.fontFamily = "Arial, sans-serif";
+    label.style.fontSize = "10px";
+    label.style.fontWeight = "bold";
+    label.style.padding = "1px 0";
+    bar.appendChild(label);
+
+    document.body.appendChild(bar);
+    return { bar, white, label };
+  }
+
+  // Place la barre le long du BORD GAUCHE du plateau et met à jour sa hauteur
+  // blanche selon currentEval. Recalcule la position à chaque appel (le
+  // plateau peut bouger : scroll, resize, panneaux latéraux qui s'ouvrent).
+  // AUTONOME (aucun argument) : récupère le plateau + son orientation elle-même
+  // (lecture DOM légère), pour pouvoir être appelée depuis n'importe quel
+  // contexte -- réponse serveur, redraw des flèches, scroll/resize -- sans
+  // dépendre d'un `els` déjà calculé par l'appelant.
+  function updateEvalBar() {
+    const els = getBoardElements();
+    if (!els) return;
+    const isWhiteOrientation = els.type === "chesscom"
+      ? !(els.board.classList.contains("flipped") || els.board.hasAttribute("flipped"))
+      : els.wrap.classList.contains("orientation-white");
+    const { bar, white, label } = getOrCreateEvalBar();
+
+    // Pas d'éval connue pour cette position (1er calcul en cours, ou coup de
+    // livre sans éval Stockfish) -> on garde la barre mais on la neutralise
+    // visuellement plutôt que de mentir avec une vieille valeur.
+    if (currentEval === null) {
+      bar.style.opacity = "0.35";
+    } else {
+      bar.style.opacity = "1";
+    }
+
+    const boardEl = els.type === "chesscom" ? els.board : els.container;
+    const rect = boardEl.getBoundingClientRect();
+    if (!rect.width || !rect.height) {
+      bar.style.display = "none";
+      return;
+    }
+    bar.style.display = "block";
+
+    const width = 14;
+    const gap = 6; // petit espace entre la barre et le plateau
+    bar.style.width = width + "px";
+    bar.style.height = rect.height + "px";
+    bar.style.top = rect.top + "px";
+    bar.style.left = (rect.left - width - gap) + "px";
+
+    // Fraction blanche -> hauteur du segment blanc. Quand MES pièces (orientation)
+    // sont en bas, la barre suit l'orientation : si je joue les noirs, le "bas"
+    // de la barre doit représenter les noirs. On oriente donc le segment plein
+    // selon isWhiteOrientation pour que "le bas = mon camp", comme sur les sites.
+    const whiteFrac = evalToWhiteFraction(currentEval);
+    const bottomIsWhite = isWhiteOrientation;
+    const bottomFrac = bottomIsWhite ? whiteFrac : (1 - whiteFrac);
+    // Le segment plein (clair) représente le camp du BAS (= mon camp). Toujours
+    // clair, quel que soit le camp : c'est la HAUTEUR remplie qui porte l'info,
+    // pas la couleur (le fond sombre du conteneur figure la part de l'adversaire).
+    white.style.height = (bottomFrac * 100) + "%";
+
+    // Étiquette : texte d'éval, collé du côté du camp en tête, en couleur
+    // lisible sur le segment correspondant.
+    const text = evalToLabel(currentEval);
+    label.textContent = text;
+    const whiteAhead = whiteFrac >= 0.5;
+    // Place le texte en haut si les noirs mènent (texte sur fond sombre) sinon
+    // en bas (sur segment clair) -- toujours du côté du camp en avantage.
+    if (whiteAhead === bottomIsWhite) {
+      label.style.bottom = "2px";
+      label.style.top = "auto";
+      label.style.color = "#1e1e2e";
+    } else {
+      label.style.top = "2px";
+      label.style.bottom = "auto";
+      label.style.color = "#f5f5f5";
     }
   }
 
@@ -1268,6 +1467,15 @@
         onBoardChanged();
       }
     });
+
+    // La barre d'avantage est en position:fixed calée sur le rect réel du
+    // plateau -- elle doit donc être repositionnée quand la page défile ou
+    // que la fenêtre change de taille (le rect bouge sans qu'aucun coup ne
+    // soit joué, donc onBoardChanged/redrawProfileArrows ne se déclenchent
+    // pas). updateEvalBar est autonome et léger (une lecture DOM + quelques
+    // styles) ; passif + capture pour ne pas gêner le scroll de la page.
+    window.addEventListener("scroll", updateEvalBar, { passive: true, capture: true });
+    window.addEventListener("resize", updateEvalBar, { passive: true });
   }
 
   startWatching();
