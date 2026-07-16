@@ -15,7 +15,7 @@
 // @run-at       document-idle
 // ==/UserScript==
 /*
- * chess_coach_bridge.user.js
+ * chess_coach_bridge_user.js
  * -----------------------------------------------------------------------
  * Installation :
  *   1. Installe l'extension Tampermonkey dans ton navigateur.
@@ -80,12 +80,20 @@
     creative:  { color: "#f38ba8", width: 5, opacity: 0.75 }, // rose : coup tactique/sacrificiel
     classical: { color: "#f5f5f5", width: 2, opacity: 1.0 },  // blanc : coup textbook, sensible à la phase de partie
   };
-  // Style dédié à la flèche "coup théorique" (livre local ou base Lichess,
-  // voir web_bridge.py _get_theory_move) -- volontairement HORS
-  // PROFILE_STYLE : ce n'est pas un profil de jeu, dessinée séparément
-  // dans redrawProfileArrows() en pointillé pour ne jamais se confondre
-  // avec les flèches pleines des profils.
-  const THEORY_STYLE = { color: "#00e5cc", width: 6, opacity: 0.9 };
+  // Style dédié à la flèche "coup théorique" (livre polyglot local en
+  // priorité, base ECO nommée en repli, Lichess en dernier recours --
+  // DÉSACTIVÉ par défaut, voir web_bridge.py LICHESS_EXPLORER_ENABLED --
+  // voir _get_theory_move) -- volontairement HORS PROFILE_STYLE : ce n'est
+  // pas un profil de jeu, dessinée séparément dans redrawProfileArrows()
+  // en pointillé pour ne jamais se confondre avec les flèches pleines des
+  // profils. Orange/pêche plutôt que
+  // turquoise : trop proche du bleu "popular" (#89dceb) pour être
+  // distingué au premier coup d'œil. De toute façon, quand cette flèche
+  // est affichée, les 3 flèches de profils sont masquées (voir
+  // redrawProfileArrows) -- la distinction de couleur ne sert donc plus
+  // qu'à ne pas confondre "en théorie" et "hors théorie" d'un coup d'œil
+  // résiduel pendant la transition entre 2 positions.
+  const THEORY_STYLE = { color: "#fab387", width: 6, opacity: 0.9 };
   const PIECE_LETTERS = { pawn: "p", knight: "n", bishop: "b", rook: "r", queen: "q", king: "k" };
 
   // Passe à true si tu as besoin de déboguer la lecture du plateau : affiche
@@ -597,7 +605,7 @@
   async function sendFenToCoach(fen, boardPart, side, turn) {
     // Nouvelle position -> on repart d'un état de flèches vierge, elles
     // seront redessinées une par une au fil des profils reçus. Idem pour
-    // currentTheoryEntry : sans ce reset, la flèche turquoise de l'ANCIENNE
+    // currentTheoryEntry : sans ce reset, la flèche théorique de l'ANCIENNE
     // position resterait affichée jusqu'à la prochaine mise à jour valide
     // -- trompeur si la nouvelle position, elle, n'a aucune suggestion
     // théorique (ex: on vient de sortir de la théorie connue).
@@ -862,9 +870,19 @@
     // cours (jusqu'à 3 : bleu/rose/blanc = popular/creative/classical), à
     // partir de currentProfileEntries. Appelé à chaque nouveau profil reçu --
     // pas cher (3 lignes max).
-    const profileIds = Object.keys(currentProfileEntries).sort(
-      (a, b) => PROFILE_IDS.indexOf(a) - PROFILE_IDS.indexOf(b)
-    );
+    //
+    // EXCEPTION : si un coup théorique est reconnu (currentTheoryEntry), on
+    // n'affiche QUE la flèche théorique -- les 3 flèches de profils sont
+    // masquées tant qu'on reste en théorie connue. Avant, les 4 flèches se
+    // superposaient (le moteur propose souvent un coup DIFFÉRENT du coup de
+    // référence en tout début de partie), ce qui rendait la suggestion de
+    // livre illisible et contredisait l'idée même de "reste en théorie".
+    const inTheory = !!(currentTheoryEntry && currentTheoryEntry.move_uci);
+    const profileIds = inTheory
+      ? []
+      : Object.keys(currentProfileEntries).sort(
+          (a, b) => PROFILE_IDS.indexOf(a) - PROFILE_IDS.indexOf(b)
+        );
     const movesKey = JSON.stringify([
       ...profileIds.map((p) => `${p}:${currentProfileEntries[p].move_uci}`),
       // Sans cette entrée, l'arrivée/le changement de la seule flèche
@@ -915,9 +933,11 @@
       svg.appendChild(line);
     });
 
-    // Flèche "coup théorique" (livre local / base Lichess) -- dessinée à
-    // part, en pointillé turquoise, jamais confondue avec les flèches
-    // pleines des profils ci-dessus. Pas de marker-end dédié : la couleur +
+    // Flèche "coup théorique" (livre polyglot / base ECO / Lichess -- voir
+    // THEORY_STYLE plus haut pour le détail des sources) -- dessinée à
+    // part, en pointillé (voir THEORY_STYLE), jamais confondue avec les
+    // flèches pleines des profils (masquées de toute façon tant qu'on est
+    // en théorie, voir plus haut). Pas de marker-end dédié : la couleur +
     // le pointillé suffisent à la distinguer sans toucher au <defs> existant.
     if (currentTheoryEntry && currentTheoryEntry.move_uci) {
       const uci = currentTheoryEntry.move_uci;

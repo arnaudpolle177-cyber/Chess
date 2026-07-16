@@ -998,11 +998,12 @@ def generate_narration(theme_result, profile_id, chosen, why_motif, why_detail, 
 
     move_history / opening_book : historique des coups joués (voir
     web_bridge.py, BridgeState._move_history) et instance
-    opening_identity.OpeningIdentity, utilisés UNIQUEMENT pour le thème
-    OPENING -- si un match est trouvé dans la base ECO locale, son nom et
-    son texte pros_cons remplacent entièrement les gabarits génériques
-    _opening_xxx_1 (mêmes gabarits utilisés en fallback si aucun match,
-    ex: partie déjà sortie de la théorie connue).
+    opening_identity.OpeningIdentity. Si un match est trouvé dans la base
+    ECO locale : pour le thème OPENING, son nom et son texte pros_cons
+    remplacent entièrement les gabarits génériques _opening_xxx_1 (mêmes
+    gabarits utilisés en fallback si aucun match, ex: partie déjà sortie de
+    la théorie connue) ; pour tout AUTRE thème, il alimente juste la
+    bannière "opening_tag" (voir plus bas) en plus du contenu principal.
     engine : instance ChessCoachEngine (voir engine_analysis.py), passée
     au scénario pour calculer sa trajectoire d'éval (voir
     variation_narrator.EVAL_DEPTH) -- si None, motifs structurels seuls.

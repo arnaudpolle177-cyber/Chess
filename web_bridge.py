@@ -514,6 +514,22 @@ class BridgeState:
             return {"move_uci": remote["top_move_uci"], "move_san": remote.get("top_move_san"), "source": "lichess"}
         return None
 
+    def _make_is_stale(self, fen):
+        """
+        Callable is_stale() passée à engine_analysis.analyze_candidates
+        (voir is_stale plus bas) : True dès que `fen` n'est plus la
+        dernière position connue (self.last_fen), c'est-à-dire dès qu'un
+        coup plus récent a changé la position pendant que CETTE recherche
+        tournait encore -- permet de la couper court au lieu de la laisser
+        tourner à vide jusqu'à sa profondeur cible, bloquant au passage
+        toutes les requêtes plus récentes derrière elle (un seul moteur,
+        un seul verrou -- voir engine_lock).
+        """
+        def _is_stale():
+            with self.lock:
+                return fen != self.last_fen
+        return _is_stale
+
     def handle_quick_take(self, fen):
         """
         Version rapide (depth 12, quasi instantanée) des 3 profils en UNE
@@ -561,7 +577,10 @@ class BridgeState:
                 is_degraded = fen in self._main_engine_degraded
 
                 def _run_quick(mpv, safe):
-                    result, brd = self.engine.analyze_candidates(fen, multipv=mpv, depth=QUICK_DEPTH, safe_mode=safe)
+                    result, brd = self.engine.analyze_candidates(
+                        fen, multipv=mpv, depth=QUICK_DEPTH, safe_mode=safe,
+                        is_stale=self._make_is_stale(fen),
+                    )
                     return result
 
                 try:
@@ -577,6 +596,13 @@ class BridgeState:
 
                 if result.get("game_over"):
                     return {"quick": True, "game_over": True, "result": result["result"]}
+                if result.get("stale"):
+                    # Coup joué entre-temps, cette recherche a été coupée
+                    # court (voir engine_analysis.analyze_candidates,
+                    # is_stale) plutôt que de tourner à vide jusqu'au bout
+                    # -- rien à mettre en cache, la vraie requête pour la
+                    # nouvelle position est déjà en route côté navigateur.
+                    return {"quick": True, "stale": True}
                 candidates = result["candidates"]
                 self._quick_cache_key = fen
                 self._quick_cache_value = candidates
@@ -607,45 +633,57 @@ class BridgeState:
         jamais bloquer l'affichage des flèches si la déduction échoue pour
         une raison quelconque (ex: 1er coup de la partie, désynchronisation
         ponctuelle).
+
+        Verrouillée entièrement (self.lock) : appelée à la fois par
+        handle_quick_take (sans garde -- voir plus haut) et
+        handle_single_profile (sous garde is_new_position, mais 3 requêtes
+        parallèles par position) -- sans verrou, un appel en retard pour
+        une VIEILLE position pourrait s'entrelacer avec un appel pour la
+        position SUIVANTE et corrompre self._move_history (aucun des deux
+        appelants ne tient déjà self.lock à ce point, donc pas de risque
+        d'interblocage à l'ajouter ici).
         """
-        try:
-            board_part_new = fen.split(" ", 1)[0]
+        with self.lock:
+            try:
+                board_part_new = fen.split(" ", 1)[0]
 
-            # Retour à la position de départ = nouvelle partie -> on repart
-            # d'un historique vierge (même logique que resetTrackingState
-            # côté JS, mais le serveur Python n'a aucun autre moyen de le
-            # savoir).
-            if board_part_new == chess.STARTING_BOARD_FEN:
-                if self._move_history:
-                    self._move_history = []
-                self._move_history_board = None
-                self._initiative_history.clear()
-                self._initiative_last_seq = None  # cohérent avec le clear (voir set_my_side)
-                return
-
-            if self._move_history_board is None:
-                # Rien à comparer (tout premier coup vu depuis le
-                # démarrage du serveur, ou après un reset) -- on initialise
-                # juste le point de départ, sans coup à déduire encore.
-                self._move_history_board = board.copy()
-                return
-
-            old_board = self._move_history_board
-            for legal_move in old_board.legal_moves:
-                test_board = old_board.copy()
-                test_board.push(legal_move)
-                if test_board.board_fen() == board_part_new:
-                    self._move_history.append(old_board.san(legal_move))
-                    self._move_history_board = test_board
+                # Retour à la position de départ = nouvelle partie -> on
+                # repart d'un historique vierge (même logique que
+                # resetTrackingState côté JS, mais le serveur Python n'a
+                # aucun autre moyen de le savoir).
+                if board_part_new == chess.STARTING_BOARD_FEN:
+                    if self._move_history:
+                        self._move_history = []
+                    self._move_history_board = None
+                    self._initiative_history.clear()
+                    self._initiative_last_seq = None  # cohérent avec le clear (voir set_my_side)
                     return
 
-            # Aucun coup légal ne mène à cette position -- désynchronisation
-            # (ex: 2 coups joués très vite entre 2 lectures). On
-            # resynchronise silencieusement sur la position actuelle plutôt
-            # que de laisser l'historique corrompu ou de planter.
-            self._move_history_board = board.copy()
-        except Exception:
-            pass  # cosmétique (identification d'ouverture) -- jamais bloquant
+                if self._move_history_board is None:
+                    # Rien à comparer (tout premier coup vu depuis le
+                    # démarrage du serveur, ou après un reset) -- on
+                    # initialise juste le point de départ, sans coup à
+                    # déduire encore.
+                    self._move_history_board = board.copy()
+                    return
+
+                old_board = self._move_history_board
+                for legal_move in old_board.legal_moves:
+                    test_board = old_board.copy()
+                    test_board.push(legal_move)
+                    if test_board.board_fen() == board_part_new:
+                        self._move_history.append(old_board.san(legal_move))
+                        self._move_history_board = test_board
+                        return
+
+                # Aucun coup légal ne mène à cette position --
+                # désynchronisation (ex: 2 coups joués très vite entre 2
+                # lectures). On resynchronise silencieusement sur la
+                # position actuelle plutôt que de laisser l'historique
+                # corrompu ou de planter.
+                self._move_history_board = board.copy()
+            except Exception:
+                pass  # cosmétique (identification d'ouverture) -- jamais bloquant
 
     def _attach_scenario_async(self, fen, board, chosen, profile_id, position_seq, elo_tier_id, entry):
         """
@@ -800,6 +838,7 @@ class BridgeState:
                 try:
                     result, brd = self.engine.analyze_candidates(
                         fen, multipv=tier.multipv, depth=tier.random_depth(), safe_mode=is_degraded,
+                        is_stale=self._make_is_stale(fen),
                     )
                 except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
                     self._restart_engine(reason=f"{type(e).__name__}: {e}")
@@ -817,7 +856,18 @@ class BridgeState:
                     # planter tout le serveur.
                     result, brd = self.engine.analyze_candidates(
                         fen, multipv=tier.multipv, depth=min(tier.random_depth(), 14), safe_mode=True,
+                        is_stale=self._make_is_stale(fen),
                     )
+                if result.get("stale"):
+                    # Recherche coupée court en cours de route (voir
+                    # engine_analysis.analyze_candidates, is_stale) : rien
+                    # à mettre en cache ni à transmettre à
+                    # _update_eval_tracking_and_theme (pas de "candidates"
+                    # dans ce résultat) -- remonte tel quel, le bloc
+                    # ci-dessous (stale = fen != self.last_fen) gère déjà
+                    # ce retour au même titre qu'une péremption détectée
+                    # après coup.
+                    return result
                 self._candidates_cache_value = result  # valeur avant clé, même raison que le cache de thème plus haut
                 self._candidates_cache_key = cache_key
                 self._update_eval_tracking_and_theme(fen, board, result["candidates"], current_seq)
@@ -854,7 +904,7 @@ class BridgeState:
             # Rebranché ici (pas seulement dans handle_quick_take) : sinon,
             # une position jamais vue avant dans la partie ne bénéficie
             # QUE de l'aperçu rapide pour vérifier le cache Lichess -- s'il
-            # n'est pas encore prêt à ce moment précis, la flèche turquoise
+            # n'est pas encore prêt à ce moment précis, la flèche théorique
             # ne reviendrait plus jamais pour ce coup. En le recalculant
             # ici aussi (3 requêtes supplémentaires par coup, cache-hit
             # quasi gratuit), on laisse une vraie 2e/3e/4e chance au cache

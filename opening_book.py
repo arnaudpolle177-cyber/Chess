@@ -21,6 +21,11 @@ import os
 import chess
 import chess.polyglot
 
+# Mêmes valeurs que engine_analysis.PIECE_VALUES -- dupliquées ici plutôt
+# qu'importées pour garder ce module autonome (pas de dépendance vers
+# engine_analysis.py juste pour une petite table de constantes).
+_PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
+
 
 class OpeningBook:
     def __init__(self, paths):
@@ -110,6 +115,22 @@ def candidates_from_book_entries(board, entries, max_candidates=4):
         from_rank = chess.square_rank(move.from_square)
         back_rank = 0 if board.turn == chess.WHITE else 7
 
+        # Valeurs de pièces (esprit sacrifice) + case de départ du roi (pour
+        # le profil "classique" en finale) -- MÊME calcul que
+        # engine_analysis.analyze_candidates, indispensable ici aussi :
+        # human_profile.py accède à c["is_king_move"] sans .get() en finale
+        # (_score_classical), donc un candidat de livre auquel il manquerait
+        # ce champ ferait planter la sélection de coup si jamais un livre
+        # couvre encore une position déjà classée "finale" (rare mais pas
+        # impossible avec des livres construits sur de vraies parties
+        # longues).
+        moving_piece_value = _PIECE_VALUES.get(piece_type, 0)
+        captured_piece = board.piece_at(move.to_square)
+        captured_piece_value = _PIECE_VALUES.get(captured_piece.piece_type, 0) if captured_piece else None
+        if board.is_en_passant(move):
+            captured_piece_value = 1
+        is_king_move = piece_type == chess.KING and not board.is_castling(move)
+
         candidates.append({
             "move_uci": move.uci(),
             "move_san": board.san(move),
@@ -119,10 +140,14 @@ def candidates_from_book_entries(board, entries, max_candidates=4):
             "is_capture": board.is_capture(move),
             "is_check": tmp_board.is_check(),
             "is_castle": board.is_castling(move),
+            "is_king_move": is_king_move,
             "is_developing_minor": piece_type in (chess.KNIGHT, chess.BISHOP) and from_rank == back_rank,
             "is_pawn_center_push": piece_type == chess.PAWN and chess.square_file(move.to_square) in (3, 4),
             "to_square_central": chess.square_file(move.to_square) in (3, 4)
                                   and chess.square_rank(move.to_square) in (3, 4),
+            "win_prob": None,  # pas de WDL en mode livre (pas une éval moteur)
+            "moving_piece_value": moving_piece_value,
+            "captured_piece_value": captured_piece_value,  # None si pas une capture
             "pv_san": [board.san(move)],  # pas de ligne calculée en mode livre, juste le coup lui-même
             "pv_uci": [move.uci()],
         })
