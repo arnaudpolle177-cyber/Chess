@@ -104,22 +104,71 @@ DEFAULT_HUMANITY = 0.35
 # -- rien n'empêche qu'un seul des 4 arrive à ce moment-là.
 INACCURACY_CHANCE = {1: 0.40, 2: 0.30, 3: 0.15}
 
+# RÉGLAGE PRÉCISION (2026-07-16, suite) : simulation à l'appui (voir la
+# conversation), le 0.30 partagé ci-dessus produisait ~14 coups
+# "inaccuracy" sur 49 pour popular -- beaucoup trop (cible : 2-3 sur 40).
+# Override scopé UNIQUEMENT popular + tier 2 (ne touche pas
+# INACCURACY_CHANCE, donc creative/classical et les 2 autres tiers gardent
+# exactement le comportement précédent). Calibré par simulation pour viser
+# un taux réel post-conversion (le tirage ne débouche pas toujours sur un
+# coup classé "inaccuracy", voir _score_popular) proche de 2-3/40 coups.
+POPULAR_TIER2_INACCURACY_CHANCE = 0.10
 
-def _apply_inaccuracy_roll(tier, elo_tier_id, rng):
+# RÉGLAGE PRÉCISION (2026-07-16, suite) : à l'autre bout du spectre --
+# 1-2 coups "brillants" par partie (façon chess.com : LE coup objectivement
+# meilleur, ET un sacrifice -- pas juste précis, contre-intuitif). Scopé
+# popular+tier2 comme le reste de ce chantier. Contrairement à
+# l'inexactitude, il n'y a pas de "conversion garantie" : ça ne peut se
+# déclencher QUE si la position offre effectivement un sacrifice
+# objectivement meilleur (voir _is_sacrifice_candidate) -- comme pour un
+# vrai joueur, un coup brillant ne se force pas, il se présente ou non.
+POPULAR_TIER2_BRILLIANT_CHANCE = 0.15
+
+
+def _is_sacrifice_candidate(c):
+    """
+    Signature "sacrifice" -- même heuristique que _score_creative (pièce de
+    plus grande valeur qui en prend une de moindre valeur) : donne du
+    matériel pour une compensation qui n'est pas immédiatement évidente.
+    Pas une vraie détection tactique (on n'a pas l'info "cette pièce est-
+    elle reprise tout de suite"), mais un proxy raisonnable vu les données
+    déjà disponibles sur chaque candidat.
+    """
+    if not c.get("is_capture"):
+        return False
+    cv, mv = c.get("captured_piece_value"), c.get("moving_piece_value")
+    return cv is not None and mv is not None and mv > cv
+
+
+def _apply_inaccuracy_roll(tier, elo_tier_id, rng, chance=None):
     """
     Tire au sort si CE coup est une "petite inexactitude" (voir
-    INACCURACY_CHANCE). Si oui, retourne une version du niveau dont la
-    cible de perte typique est poussée près de max_eval_loss_cp -- jamais
-    au-delà, donc jamais un vrai blunder, juste un coup nettement moins
-    précis que la normale pour ce niveau.
+    INACCURACY_CHANCE, ou `chance` si fourni pour un override scopé --
+    voir POPULAR_TIER2_INACCURACY_CHANCE). Si oui, retourne une version du
+    niveau dont la cible de perte typique est poussée près du plafond ET
+    dont le plafond lui-même (max_eval_loss_cp) est relevé pour CE coup
+    précis -- de quoi laisser entrer dans la fenêtre un coup nettement
+    moins bon qu'à l'accoutumée (une vraie imprécision au sens chess.com,
+    ~50-80cp), sans jamais aller jusqu'au blunder.
+
+    RÉGLAGE PRÉCISION (2026-07-16) : sans relèvement du plafond, une
+    "imprécision" restait bornée à max_eval_loss_cp du tier -- au tier 2
+    (max 50cp) elle atteignait à peine le seuil chess.com d'imprécision, au
+    tier 3 (max 20cp) c'était mathématiquement impossible. On relève donc le
+    plafond de 60% (facteur 1.6) le temps de ce seul coup : la fenêtre
+    normale du niveau (donc la force réelle) est intacte sur tous les autres
+    coups, seul ce coup "à passage à vide" peut piocher plus bas. 1.6×50 =
+    80cp au tier 2 : une franche imprécision, jamais une gaffe (>150-200cp).
     """
-    chance = INACCURACY_CHANCE.get(elo_tier_id, 0.2)
+    if chance is None:
+        chance = INACCURACY_CHANCE.get(elo_tier_id, 0.2)
     if rng.random() >= chance:
         return tier, False
-    boosted_typical = round(tier.max_eval_loss_cp * 0.85)
+    boosted_max = round(tier.max_eval_loss_cp * 1.6)
+    boosted_typical = round(boosted_max * 0.85)
     if boosted_typical <= tier.typical_eval_loss_cp:
-        return tier, False  # déjà proche du plafond à ce niveau (ex: niveau 3), rien à pousser de plus
-    return replace(tier, typical_eval_loss_cp=boosted_typical), True
+        return tier, False  # rien à pousser de plus (cas dégénéré)
+    return replace(tier, max_eval_loss_cp=boosted_max, typical_eval_loss_cp=boosted_typical), True
 
 
 def compute_tightening_factor(board):
@@ -252,27 +301,66 @@ def _band_penalty(eval_loss, target_cp, factor):
     return -abs(eval_loss - target_cp) * factor
 
 
-def _score_popular(c, tier):
+def _score_popular(c, tier, is_inaccuracy=False):
     """
     Bleu -- PRAGMATIQUE : maximise les CHANCES DE GAIN PRATIQUES (WDL --
     Win/Draw/Loss), pas juste l'éval brute en centipawns, avec une cible de
-    perte resserrée (proche de l'optimal) -- c'est le profil "sûr et
+    perte proche de la perte "typique" du niveau -- c'est le profil "sûr et
     efficace" : il absorbe ce que faisait avant le profil "solide" (retiré,
     jugé redondant), tout en gardant son signal principal propre (WDL, pas
     juste "perte d'éval minimale"). Pénalise en plus les captures qui
     perdent de l'éval (complication inutile, peu pragmatique).
+
+    RÉGLAGE PRÉCISION (2026-07-16) : avant, ce profil jouait ~96-98% de
+    précision (chess.com) -- trop "moteur" pour un humain. Trois causes,
+    toutes corrigées ici :
+    1. cible à 0.55×typical -> le profil visait PLUS précis que son propre
+       niveau. Remontée à 0.9×typical : il joue enfin autour de la perte
+       typique du tier, pas en dessous.
+    2. bonus WDL à *30 -> écrasait la bande cible et ramenait quasi toujours
+       le meilleur coup pratique (donc un top move). Réduit à *12 : départage
+       encore les coups proches, sans dicter le choix.
+    3. is_inaccuracy (voir _apply_inaccuracy_roll) : sur un coup tiré comme
+       "inexact", on vise la perte typique DÉJÀ poussée vers le plafond par le
+       roll ET on coupe le WDL -- la bande tire alors vraiment vers un coup
+       nettement moins bon (une vraie imprécision), au lieu de rester bridée
+       près de l'optimal. C'est ce qui manquait pour produire les ~2
+       imprécisions/partie d'un vrai joueur.
     """
-    target = tier.typical_eval_loss_cp * 0.55
+    # RÉGLAGE PRÉCISION (2026-07-16, suite) : cible normale (hors tirage)
+    # abaissée au tier 2 -- 0.9x plaçait systématiquement la cible en
+    # pleine zone "good" (16.2cp), ce qui concentrait mécaniquement la
+    # distribution là plutôt que sur best/excellent. Le cap dur (voir
+    # select_move) empêchant déjà toute dérive incontrôlée vers
+    # l'imprécision, on peut se permettre de viser plus près de l'optimal
+    # sans revenir au problème initial (le WDL, lui, reste à *12, pas de
+    # retour au quasi-toujours-top-move). Le tirage explicite (is_inaccuracy)
+    # garde 0.9x sur le tier déjà boosté -- inchangé, sinon le tirage
+    # perdrait sa capacité à produire une vraie imprécision.
+    target_mult = 0.9 if (is_inaccuracy or tier.id != 2) else 0.28
+    target = tier.typical_eval_loss_cp * target_mult
     bonus = 0
-    if c.get("win_prob") is not None:
-        # Échelle empirique : +30 points pour un coup à 100% de chances de
-        # gain plutôt que 0% -- suffisant pour départager des coups très
-        # proches en éval sans jamais l'emporter sur le plafond Elo (déjà
-        # filtré en amont).
-        bonus += c["win_prob"] * 30
+    if not is_inaccuracy and c.get("win_prob") is not None:
+        # Échelle empirique : +12 points pour un coup à 100% de chances de
+        # gain plutôt que 0% -- assez pour départager des coups très proches
+        # en éval sans écraser la bande cible (donc sans forcer le top move).
+        # Coupé sur un coup "inexact" : on veut justement laisser passer un
+        # coup moins sûr ce coup-là.
+        bonus += c["win_prob"] * 12
     if c["is_capture"] and c["eval_loss"] > tier.typical_eval_loss_cp:
         bonus -= 12  # capture qui perd de l'éval = complication risquée, pas pragmatique
-    return bonus + _band_penalty(c["eval_loss"], target, 0.75)
+    # RÉGLAGE PRÉCISION (2026-07-16, suite) : bande resserrée au tier 2
+    # (0.75 -> 1.3) -- simulation à l'appui, avec 0.75 le bruit du softmax
+    # (humanity) suffisait à lui seul à faire sortir ~16% des coups
+    # "normaux" (is_inaccuracy=False) dans la zone imprécision, juste
+    # parce que les écarts entre candidats sont parfois grands dans les
+    # positions tendues. Une bande plus raide concentre le choix autour de
+    # la cible sans toucher au tirage explicite (seule source voulue
+    # d'imprécision) ni à humanity/INACCURACY_CHANCE (partagés avec
+    # creative/classical et les autres tiers). Autres tiers/profils : bande
+    # inchangée (0.75).
+    factor = 1.2 if tier.id == 2 else 0.75
+    return bonus + _band_penalty(c["eval_loss"], target, factor)
 
 
 def _score_creative(c, tier):
@@ -391,11 +479,58 @@ def select_move(candidates, elo_tier_id, profile_id,
     # marge pour une "inexactitude" non plus (déjà cohérent avec
     # compute_tightening_factor -- boosted_typical ne peut jamais dépasser
     # le plafond, lui-même déjà resserré dans ces positions).
-    tier, is_inaccuracy = _apply_inaccuracy_roll(tier, elo_tier_id, rng)
-    eligible = _eligible_candidates(candidates, tier)
+    # RÉGLAGE PRÉCISION (2026-07-16, suite) : override de chance scopé
+    # popular+tier2 (voir POPULAR_TIER2_INACCURACY_CHANCE) -- None pour
+    # tout le reste, donc comportement INACCURACY_CHANCE inchangé ailleurs.
+    inaccuracy_chance = POPULAR_TIER2_INACCURACY_CHANCE if (profile_id == "popular" and elo_tier_id == 2) else None
+    tier, is_inaccuracy = _apply_inaccuracy_roll(tier, elo_tier_id, rng, chance=inaccuracy_chance)
+    scoring_tier = tier
+    # RÉGLAGE PRÉCISION (2026-07-16, suite) : cap d'éligibilité DUR, scopé
+    # popular+tier2, appliqué uniquement HORS tirage explicite. Plutôt que
+    # de compter sur la bande/le softmax pour décourager les gros écarts
+    # (ce qui laissait filtrer ~50% des "inaccuracy" par pur bruit, voir
+    # simulation), on interdit structurellement à un coup normal de
+    # dépasser ~1.5x la cible -- un coup au-delà de ça ne peut plus sortir
+    # QUE via le tirage explicite (qui, lui, élargit tier.max_eval_loss_cp
+    # à 80cp -- voir _apply_inaccuracy_roll). Ne change rien pour
+    # creative/classical ni les autres tiers (scoring_tier reste `tier`
+    # partout ailleurs).
+    if profile_id == "popular" and elo_tier_id == 2 and not is_inaccuracy:
+        hard_cap = round(tier.typical_eval_loss_cp * 0.9 * 1.5)  # ~24cp au tier 2
+        scoring_tier = replace(tier, max_eval_loss_cp=min(tier.max_eval_loss_cp, hard_cap))
+    eligible = _eligible_candidates(candidates, scoring_tier)
+    # Bruit softmax réduit, même scope (popular+tier2) : avec la bande
+    # resserrée de _score_popular, ça finit d'éliminer les "inaccuracy"
+    # accidentelles issues du seul tirage humanity (voir simulation) --
+    # laisse le tirage explicite ci-dessus comme SEULE source
+    # d'imprécision voulue. humanity global inchangé pour les autres
+    # profils/tiers (web_bridge.py continue de leur passer la même valeur).
+    effective_humanity = humanity * 0.6 if (profile_id == "popular" and elo_tier_id == 2) else humanity
+
+    # RÉGLAGE PRÉCISION (2026-07-16, suite) : coup "brillant" -- ne
+    # s'applique jamais en même temps que l'inexactitude (les deux visent
+    # des choses contradictoires). Cherche parmi les candidats OBJECTIFS
+    # (pas seulement `eligible`, mais ça revient au même ici puisque
+    # eval_loss=0 passe toujours n'importe quel cap) celui à eval_loss nul
+    # qui a une signature de sacrifice. S'il y en a un et que le tirage
+    # passe, on le joue directement -- pas de softmax ici, un coup brillant
+    # ne se dilue pas avec humanity comme un choix de style ordinaire.
+    brilliant_candidate = None
+    if profile_id == "popular" and elo_tier_id == 2 and not is_inaccuracy:
+        if rng.random() < POPULAR_TIER2_BRILLIANT_CHANCE:
+            brilliant_candidate = next(
+                (c for c in candidates if c["eval_loss"] <= 0.01 and _is_sacrifice_candidate(c)),
+                None,
+            )
+
+    if brilliant_candidate is not None:
+        chosen = dict(brilliant_candidate)
+        chosen["is_inaccuracy"] = False
+        chosen["is_brilliant"] = True
+        return chosen
 
     if profile_id == "popular":
-        scored = [(c, _score_popular(c, tier)) for c in eligible]
+        scored = [(c, _score_popular(c, tier, is_inaccuracy)) for c in eligible]
     elif profile_id == "creative":
         scored = [(c, _score_creative(c, tier)) for c in eligible]
     elif profile_id == "classical":
@@ -417,8 +552,9 @@ def select_move(candidates, elo_tier_id, profile_id,
     else:
         raise ValueError(f"Profil de jeu inconnu : {profile_id!r}")
 
-    chosen = _softmax_pick(scored, humanity, rng)
+    chosen = _softmax_pick(scored, effective_humanity, rng)
     if chosen is not None:
         chosen = dict(chosen)
         chosen["is_inaccuracy"] = is_inaccuracy
+        chosen["is_brilliant"] = False
     return chosen
