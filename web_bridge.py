@@ -533,6 +533,16 @@ class BridgeState:
             my_side = self.my_side
             elo_tier_id = self.elo_tier_id
 
+        # Sans cet appel, self._move_history restait celui de la POSITION
+        # PRÉCÉDENTE le temps de l'aperçu rapide (seul handle_single_profile
+        # le mettait à jour, et il n'a pas encore tourné pour cette
+        # position) -- _get_theory_move plus bas (is_our_first_move) voyait
+        # donc un état périmé, décalé d'un demi-coup par rapport à la vraie
+        # position. Idempotent (voir _update_move_history) : sans effet si
+        # déjà à jour, donc sans risque même appelée 2x pour la même position
+        # (ici puis dans handle_single_profile juste après).
+        self._update_move_history(fen, board)
+
         side_to_move = "w" if board.turn else "b"
         if side_to_move != my_side:
             return {"quick": True, "skip": True}
