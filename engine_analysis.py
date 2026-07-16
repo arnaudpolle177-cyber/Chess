@@ -51,7 +51,7 @@ class ChessCoachEngine:
         else:
             print("ℹ Ce moteur ne fournit pas de statistiques Win/Draw/Loss -- le profil \"populaire\" s'appuiera uniquement sur la perte d'éval.")
 
-    def analyze_candidates(self, fen, multipv=4, depth=18, safe_mode=False):
+    def analyze_candidates(self, fen, multipv=4, depth=18, safe_mode=False, is_stale=None):
         """
         Retourne jusqu'à `multipv` coups candidats objectivement bons,
         triés du meilleur au moins bon, chacun avec sa perte d'éval
@@ -78,8 +78,13 @@ class ChessCoachEngine:
         if board.is_game_over():
             return {"game_over": True, "result": board.result()}, board
 
+        if is_stale is not None and is_stale():
+            return {"stale": True}, board
+
         if safe_mode:
-            info_list = self._analyse_successive(board, multipv, depth)
+            info_list = self._analyse_successive(board, multipv, depth, is_stale=is_stale)
+            if info_list is None:
+                return {"stale": True}, board
         else:
             info_list = self.engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv)
             if isinstance(info_list, dict):
@@ -197,11 +202,18 @@ class ChessCoachEngine:
             deduped.append(c)
         return deduped
 
-    def _analyse_successive(self, board, multipv, depth):
+    def _analyse_successive(self, board, multipv, depth, is_stale=None):
         """
         Génère `multipv` résultats d'analyse simple-ligne successifs (voir
         analyze_candidates, safe_mode=True), en excluant à chaque fois le
         coup déjà trouvé.
+
+        `is_stale` (optionnel) est re-vérifié avant CHAQUE recherche
+        simple-ligne : dès qu'un coup plus récent a changé la position
+        pendant qu'on enchaînait les recherches, on arrête immédiatement
+        au lieu de continuer à chercher des candidats pour une position
+        qui n'est déjà plus affichée -- retourne None dans ce cas (à
+        distinguer d'une liste vide, qui reste un résultat valide).
         """
         remaining_moves = list(board.legal_moves)
         n_wanted = min(multipv, len(remaining_moves))
@@ -209,6 +221,8 @@ class ChessCoachEngine:
         for _ in range(n_wanted):
             if not remaining_moves:
                 break
+            if is_stale is not None and is_stale():
+                return None
             info = self.engine.analyse(board, chess.engine.Limit(depth=depth), root_moves=remaining_moves)
             pv = info.get("pv")
             if not pv:
