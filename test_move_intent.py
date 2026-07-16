@@ -96,6 +96,20 @@ def test_sacrifice():
     check(intent.material_delta < 0, f"sacrifice: material_delta négatif (={intent.material_delta})")
 
 
+# --- 3bis. PAS un sacrifice : reprise coupée par l'horizon de la PV ---------
+def test_not_sacrifice_recapture_beyond_horizon():
+    # Échange parfaitement égal dont la PV s'arrête PILE sur la prise adverse :
+    # Re1xe5 (prend le cavalier, +3), Re8xe5 (reprend ma tour, net -2). MA
+    # reprise du pion d4 (dxe5, +5 -> net +3) tombe juste au-delà des 2 demi-
+    # coups fournis. Sans la garde d'horizon, le bilan -2 faisait ressortir un
+    # faux "sacrifice" -- exactement le symptôme observé en partie. Le pion d4
+    # défend e5, donc la reprise coupée est bien réelle : intent NON sacrifice.
+    board = chess.Board("k3r3/8/8/4n3/3P4/8/8/K3R3 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("e1e5", pv_uci=["e1e5", "e8e5"]))
+    check(intent is not None and intent.kind != mi.SACRIFICE,
+          f"horizon: ne doit PAS être un sacrifice (kind={intent.kind if intent else None})")
+
+
 # --- 4. PROMOTION ----------------------------------------------------------
 def test_promotion():
     board = chess.Board("8/P7/8/4k3/8/8/6K1/8 w - - 0 1")

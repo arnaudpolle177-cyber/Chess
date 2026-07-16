@@ -154,6 +154,18 @@ def _material_delta_over_pv(board, pv_uci):
     matérialise que plus loin dans la ligne forcée -- la narration
     (fragment_library._frag_sacrifice) en parle alors au conditionnel
     plutôt que comme si le matériel partait déjà maintenant.
+
+    GARDE D'HORIZON (symétrique de _capture_is_free, qui exige déjà len>=2
+    pour croire à un GAIN) : la PV est tronquée en amont (engine_analysis :
+    pv[:6]). Si elle se termine PILE sur une prise adverse, MA reprise tombe
+    juste au-delà de l'horizon -> le bilan finit négatif alors que la
+    position est en réalité rendue. Sans garde, un coup parfaitement normal
+    ressortait "sacrifice". Correctif : si le déficit n'apparaît QU'au tout
+    dernier demi-coup rejoué, que ce dernier coup est une prise adverse et
+    que j'ai une reprise LÉGALE sur cette case, on crédite cette reprise
+    coupée par l'horizon (je récupère la pièce adverse qui vient de s'y
+    poser) avant de conclure. Un vrai sacrifice (déficit précoce et
+    persistant, ou aucune reprise possible -- ex: Bxh7+ Kxh7) reste négatif.
     """
     if not pv_uci:
         return 0, None
@@ -161,6 +173,8 @@ def _material_delta_over_pv(board, pv_uci):
     tmp = board.copy()
     gain = 0
     sacrifice_ply = None
+    last_ply = 0
+    last_was_opponent_capture_sq = None  # case d'une prise adverse au tout dernier demi-coup
     for ply, uci in enumerate(pv_uci, start=1):
         try:
             move = chess.Move.from_uci(uci)
@@ -170,6 +184,7 @@ def _material_delta_over_pv(board, pv_uci):
             break  # ligne désynchronisée -- on s'arrête sur ce qu'on a pu valider
         mover_is_me = tmp.turn == my_side
         captured = tmp.piece_at(move.to_square)
+        is_capture_move = captured is not None or tmp.is_en_passant(move)
         if captured is not None:
             value = PIECE_VALUES.get(captured.piece_type, 0)
             gain += value if mover_is_me else -value
@@ -179,8 +194,22 @@ def _material_delta_over_pv(board, pv_uci):
             promo_gain = PIECE_VALUES.get(move.promotion, 0) - 1
             gain += promo_gain if mover_is_me else -promo_gain
         tmp.push(move)
+        last_ply = ply
+        last_was_opponent_capture_sq = move.to_square if (is_capture_move and not mover_is_me) else None
         if gain < 0 and sacrifice_ply is None:
             sacrifice_ply = ply
+
+    # Garde d'horizon (voir docstring) : déficit surgi UNIQUEMENT au dernier
+    # demi-coup, sur une prise adverse que je peux reprendre -> reprise
+    # coupée par la troncature de la PV, pas un vrai sacrifice.
+    if (gain < 0 and sacrifice_ply == last_ply
+            and last_was_opponent_capture_sq is not None
+            and tmp.attackers(my_side, last_was_opponent_capture_sq)):
+        recapture_value = PIECE_VALUES.get(
+            tmp.piece_type_at(last_was_opponent_capture_sq), 0)
+        if gain + recapture_value >= 0:
+            return gain + recapture_value, None  # rendu après reprise -> pas un sacrifice
+
     return gain, sacrifice_ply
 
 
