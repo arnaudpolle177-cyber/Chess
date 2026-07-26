@@ -33,21 +33,27 @@ jobs:
       - name: Compiler CoachEchecs.exe
         run: pyinstaller coach.spec
 
-      - name: Télécharger Stockfish (dernière version Windows)
+      - name: Télécharger Berserk (dernière version Windows, renommé en stockfish.exe)
         shell: bash
+        # Le moteur "principal" (profils popular/creative, voir web_bridge.py)
+        # est Berserk, pas Stockfish -- le code interne (stockfish_path,
+        # resolve_stockfish_path, etc.) reste nommé d'après Stockfish pour
+        # rester compatible avec n'importe quel moteur UCI (voir
+        # engine_analysis.ChessCoachEngine, wrapper générique), mais le
+        # binaire réellement embarqué dans le package est Berserk, renommé
+        # stockfish.exe pour correspondre à ce que le code attend par défaut.
+        # Build "avx2" (sans "-pext") : compatible avec la quasi-totalité des
+        # CPU récents, même choix de compromis compatibilité/vitesse que
+        # l'ancien téléchargement Stockfish qu'on remplace ici.
         run: |
           set -e
-          api_url="https://api.github.com/repos/official-stockfish/Stockfish/releases/latest"
+          api_url="https://api.github.com/repos/jhonnold/berserk/releases/latest"
           asset_url=$(curl -s "$api_url" \
-            | grep "browser_download_url.*windows-x86-64-avx2.zip" \
+            | grep "browser_download_url.*berserk-.*-avx2.exe\"" \
             | head -n1 \
             | cut -d '"' -f4)
           echo "Téléchargement: $asset_url"
-          curl -L -o stockfish.zip "$asset_url"
-          mkdir stockfish_extracted
-          unzip -q stockfish.zip -d stockfish_extracted
-          # Le zip officiel contient un dossier stockfish/ avec l'exe dedans
-          find stockfish_extracted -iname "stockfish*.exe" -exec cp {} dist/stockfish.exe \;
+          curl -L -o dist/stockfish.exe "$asset_url"
 
       - name: Préparer le package final
         shell: bash
@@ -88,6 +94,21 @@ jobs:
             echo "Token Lichess inclus dans le package."
           else
             echo "Pas de secret LICHESS_API_TOKEN configuré -- package sans repli Lichess (livre local + base ECO locale uniquement)."
+          fi
+          # lc0 (profil "classical", voir web_bridge.py) : binaire + poids +
+          # DLL commités dans le dépôt (engines/lc0/, pas téléchargés à la
+          # volée comme Stockfish/Berserk ci-dessus) -- copié en préservant
+          # le même chemin relatif "engines/lc0/..." qu'en dev
+          # (app_paths.get_base_dir() pointe sur le dossier de l'exe une
+          # fois compilé), pour que resolve_lc0_path (main.py) trouve les
+          # fichiers sans code différent entre dev et .exe packagé.
+          # Optionnel : absent -> "classical" retombe sur Stockfish/Berserk
+          # (voir _start_lc0_engine).
+          if [ -d engines/lc0 ]; then
+            cp -r engines package/CoachEchecs/
+            echo "lc0 inclus dans le package."
+          else
+            echo "Pas de engines/lc0/ trouvé -- package sans lc0 (\"classical\" utilisera Stockfish/Berserk)."
           fi
           cd package
           7z a -r CoachEchecs-windows.zip CoachEchecs

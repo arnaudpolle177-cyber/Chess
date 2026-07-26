@@ -51,7 +51,7 @@ class ChessCoachEngine:
         else:
             print("ℹ Ce moteur ne fournit pas de statistiques Win/Draw/Loss -- le profil \"populaire\" s'appuiera uniquement sur la perte d'éval.")
 
-    def analyze_candidates(self, fen, multipv=4, depth=18, safe_mode=False, is_stale=None):
+    def analyze_candidates(self, fen, multipv=4, depth=18, safe_mode=False, is_stale=None, movetime_s=None):
         """
         Retourne jusqu'à `multipv` coups candidats objectivement bons,
         triés du meilleur au moins bon, chacun avec sa perte d'éval
@@ -73,6 +73,17 @@ class ChessCoachEngine:
           web_bridge.py, _main_engine_degraded). Inutile de payer ce coût
           de vitesse pour toutes les positions alors que la grande
           majorité n'a jamais posé de problème.
+
+        `movetime_s` (optionnel) : borne la recherche native en TEMPS
+        (chess.engine.Limit(time=...)) plutôt qu'en profondeur -- utilisé
+        pour lc0 (voir web_bridge.py, LC0_MOVETIME_S). Pour un moteur MCTS,
+        "depth" n'est PAS un budget de calcul prévisible comme pour
+        Stockfish (alpha-beta) : avec multipv>1, chaque ligne doit
+        atteindre la profondeur cible indépendamment, ce qui peut
+        multiplier le temps de recherche de façon imprévisible (observé en
+        pratique : une recherche depth=10/multipv=3 restée bloquée plus de
+        70s sur une seule position). Ignoré si safe_mode=True (mode de
+        secours Stockfish, jamais utilisé par lc0).
         """
         board = chess.Board(fen)
         if board.is_game_over():
@@ -86,7 +97,8 @@ class ChessCoachEngine:
             if info_list is None:
                 return {"stale": True}, board
         else:
-            info_list = self.engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multipv)
+            limit = chess.engine.Limit(time=movetime_s) if movetime_s is not None else chess.engine.Limit(depth=depth)
+            info_list = self.engine.analyse(board, limit, multipv=multipv)
             if isinstance(info_list, dict):
                 info_list = [info_list]
 

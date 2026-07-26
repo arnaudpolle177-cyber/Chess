@@ -78,7 +78,10 @@
     // formant une "cible" au lieu que l'une masque les autres.
     popular:   { color: "#89dceb", width: 9, opacity: 0.45 }, // bleu : coup pragmatique, bonnes chances de gain
     creative:  { color: "#f38ba8", width: 5, opacity: 0.75 }, // rose : coup tactique/sacrificiel
-    classical: { color: "#f5f5f5", width: 2, opacity: 1.0 },  // blanc : coup textbook, sensible à la phase de partie
+    // blanc : coup textbook, sensible à la phase de partie. Servi par lc0
+    // côté serveur (pas Stockfish comme popular/creative) quand lc0 est
+    // disponible -- voir web_bridge.BridgeState._start_lc0_engine.
+    classical: { color: "#f5f5f5", width: 2, opacity: 1.0 },
   };
   // Style dédié à la flèche "coup théorique" (livre polyglot local en
   // priorité, base ECO nommée en repli, Lichess en dernier recours --
@@ -385,8 +388,19 @@
       const rank = parseInt(sq[1], 10); // 1-8
       return { row: 8 - rank, col: file - 1 };
     }
-    // Repli : certaines versions positionnent le highlight en style
-    // translate %, comme les pièces -- non géré ici (renvoie null -> diff).
+    // Repli : certaines versions du plateau ne mettent pas data-square sur
+    // le highlight, mais portent la MÊME classe "square-NN" que les pièces
+    // (voir readGridChessCom) -- même encodage, même décodage. Sans ce
+    // repli, le surlignage était illisible en permanence sur ces plateaux
+    // -> retombait à CHAQUE coup sur la déduction par diff (inferMoverColor,
+    // moins fiable, cause du bouton "Corriger le trait" à répétition).
+    const classes = node.className.split(/\s+/);
+    const squareClass = classes.find((c) => /^square-\d\d$/.test(c));
+    if (squareClass) {
+      const file = parseInt(squareClass[7], 10);
+      const rank = parseInt(squareClass[8], 10);
+      return { row: 8 - rank, col: file - 1 };
+    }
     return null;
   }
 
@@ -471,18 +485,37 @@
   }
 
   function inferMoverColor(oldGrid, newGrid) {
+    // Compte les cases qui avaient une pièce AVANT et ont changé depuis
+    // (départ d'un coup, ou capture) -- un coup normal en vide 1 (case de
+    // départ), une capture/roque/prise en passant en vide 2. Si on en
+    // trouve PLUS de 2, c'est le signe qu'AU MOINS 2 coups se sont
+    // enchaînés depuis la dernière position stable (adversaire qui répond
+    // très vite, avant que TON coup n'ait eu le temps de se stabiliser --
+    // voir STABLE_READS_REQUIRED) : dans ce cas, prendre la 1re case
+    // trouvée serait arbitraire (elle peut appartenir à N'IMPORTE LEQUEL
+    // des 2 coups) -- mieux vaut ne pas trancher (null) et laisser le
+    // surlignage (relu à CHAQUE tick, voir turnFromLastMoveSquares) reprendre
+    // la main dès qu'il redevient lisible, plutôt que de figer une valeur
+    // potentiellement fausse jusqu'au prochain "Corriger le trait" manuel.
+    // NOTE : n'élimine pas toute ambiguïté (2 coups tranquilles enchaînés ne
+    // vident aussi que 2 cases, indistinguable ici d'une simple capture) --
+    // couvre seulement les enchaînements avec capture/roque/en passant.
+    let firstMover = null;
+    let changedCount = 0;
     for (let r = 0; r < 8; r++) {
       for (let c = 0; c < 8; c++) {
         const oldPiece = oldGrid[r][c];
         if (oldPiece !== "." && oldPiece !== newGrid[r][c]) {
-          // Cette case avait une pièce avant, et n'a plus la même
-          // maintenant (déplacée ou capturée depuis ici) -> sa couleur est
-          // celle du camp qui vient de jouer.
-          return oldPiece === oldPiece.toUpperCase() ? "white" : "black";
+          changedCount++;
+          if (!firstMover) firstMover = oldPiece;
         }
       }
     }
-    return null; // aucune case n'a "perdu" de pièce -> déduction impossible
+    if (changedCount === 0 || changedCount > 2) return null;
+    // Cette case avait une pièce avant, et n'a plus la même maintenant
+    // (déplacée ou capturée depuis ici) -> sa couleur est celle du camp qui
+    // vient de jouer.
+    return firstMover === firstMover.toUpperCase() ? "white" : "black";
   }
 
   // Correction manuelle du trait : posée par le bouton flottant "⇄ Corriger

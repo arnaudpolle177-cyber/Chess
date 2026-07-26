@@ -6,10 +6,8 @@ côté Python.
 
 Fonctionnement :
 - Le JS de ta page fait, à chaque coup joué (le sien ou celui de
-  l'adversaire), un POST http://127.0.0.1:8765/fen : d'abord un aperçu
-  rapide {"fen": ..., "quick": true} (depth QUICK_DEPTH, quasi instantané), puis une
-  requête par profil de jeu {"fen": ..., "profile": "popular"|...} au niveau
-  Elo choisi.
+  l'adversaire), une requête par profil de jeu {"fen": ...,
+  "profile": "popular"|...} au niveau Elo choisi.
 - Chaque requête est indépendante et se termine (et met à jour sa flèche)
   dès qu'elle est prête, sans dépendre d'un streaming au fil de l'eau côté
   navigateur -- voir handle_single_profile.
@@ -29,8 +27,10 @@ import json
 import os
 import glob
 import threading
+import time
 import copy
 from collections import deque
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import chess
@@ -50,13 +50,6 @@ import variation_narrator
 import lichess_explorer
 
 DEFAULT_PORT = 8765
-# Aperçu rapide (depth QUICK_DEPTH, quasi instantané) : calculé UNE fois pour les 4
-# profils d'un coup (comme le cache principal), affiché immédiatement côté
-# navigateur pendant que la vraie analyse (au niveau Elo choisi, plus
-# profonde) tourne derrière et vient remplacer l'affichage dès qu'elle est
-# prête. Voir handle_quick_take() plus bas.
-QUICK_DEPTH = 18
-QUICK_MULTIPV = 3
 # Fallback réseau (Lichess Opening Explorer, voir lichess_explorer.py) :
 # DÉSACTIVÉ par défaut. Depuis l'ajout de la couverture ECO locale
 # (opening_identity.covered_positions, ~7500 positions) + des livres
@@ -72,6 +65,20 @@ LICHESS_EXPLORER_ENABLED = False
 # mat en N demi-coups. Un vrai avantage matériel ne dépasse jamais ça (une
 # dame vaut ~900cp), donc le seuil départage sans ambiguïté.
 _MATE_CP_THRESHOLD = 90000
+
+# Budget de recherche EN TEMPS pour lc0 (profil "classical", voir
+# BridgeState) -- PAS en profondeur (voir engine_analysis.analyze_candidates,
+# movetime_s) : pour un moteur MCTS, une limite de profondeur avec
+# multipv>1 n'est pas bornée dans le temps de façon prévisible (observé en
+# pratique : une recherche depth=10/multipv=3 restée bloquée >70s sur une
+# seule position, le processus lc0 continuant de tourner en arrière-plan
+# même après que la requête HTTP soit retombée en "stale"). Un budget temps
+# fixe garantit une latence prévisible quelle que soit la position, au prix
+# d'un nombre de nœuds variable (donc d'une force de jeu qui varie un peu
+# d'une position à l'autre) -- acceptable ici, contrairement à un temps de
+# réponse qui explose. ponytail : valeur empirique (build GPU onnx-dml sur
+# RTX 3070) -- ajuster si trop lent (autre GPU) ou trop faible.
+LC0_MOVETIME_S = 2.0
 
 
 def _objective_eval_white(top_candidate, board):
@@ -112,11 +119,40 @@ class BridgeState:
 
     def __init__(self, stockfish_path, explain_mode="local", on_update=None,
                  on_profile_update=None, threads=None,
-                 hash_mb=1024):
+                 hash_mb=1024, lc0_path=None):
         self.stockfish_path = stockfish_path
+        if threads is None:
+            # ChessCoachEngine réserverait cpu_count-1 par défaut (1 coeur
+            # pour "le reste du programme") -- mais scenario_engine
+            # ci-dessous tourne maintenant EN PARALLÈLE (plus derrière le
+            # même verrou) avec son propre thread. Sans ce -2, les deux
+            # moteurs actifs en même temps saturent TOUS les coeurs, ce qui
+            # peut ralentir le calcul de `main` lui-même par contention CPU
+            # -- pas juste l'attente sur le verrou (voir [engine-timing]).
+            cpu_count = os.cpu_count() or 4
+            threads = max(1, cpu_count - 2)
         self.threads = threads
         self.hash_mb = hash_mb
         self.engine = ChessCoachEngine(stockfish_path, threads=threads, hash_mb=hash_mb)
+        # Moteur DÉDIÉ, léger (1 thread), pour le scénario différé (voir
+        # _attach_scenario_async) : ce calcul tourne en tâche de fond APRÈS
+        # que la flèche principale est déjà affichée, mais utilisait avant
+        # le même engine_lock que l'analyse principale -- donc pouvait
+        # retarder jusqu'à ~3s la flèche du COUP SUIVANT si le scénario du
+        # coup précédent tournait encore (mesuré en pratique via
+        # [engine-timing]). Isolé ici pour ne plus jamais bloquer `main`.
+        self.scenario_engine_lock = threading.Lock()
+        self.scenario_engine = ChessCoachEngine(stockfish_path, threads=1, hash_mb=128)
+        # --- Second moteur (lc0) pour le profil "classical" (voir
+        # human_profile.py) -- diversifie la flèche blanche par rapport à
+        # popular/creative (Stockfish). Verrou ET cache de candidats
+        # SÉPARÉS de ceux de Stockfish ci-dessus/dessous : lc0 doit pouvoir
+        # tourner EN PARALLÈLE de Stockfish, jamais attendre derrière le
+        # même verrou (voir handle_single_profile).
+        self.lc0_engine_lock = threading.Lock()
+        self._lc0_candidates_cache_key = None
+        self._lc0_candidates_cache_value = None
+        self.lc0_engine = self._start_lc0_engine(lc0_path)
         # Livre(s) d'ouvertures (optionnel) : cherchés à côté de l'exécutable
         # (même dossier que stockfish.exe), motif "opening_book*.bin" --
         # couvre le fichier historique "opening_book.bin" ET d'éventuels
@@ -148,20 +184,6 @@ class BridgeState:
         # fois (le moteur ne supporte qu'une recherche à la fois).
         self.engine_lock = threading.Lock()
         self.last_fen = None
-        # Séparé de self.last_fen : dernière position vue par
-        # handle_single_profile SPÉCIFIQUEMENT (pas mise à jour par
-        # handle_quick_take). BUG RÉEL corrigé ici : handle_quick_take met
-        # self.last_fen à jour AVANT que les vraies requêtes de profil
-        # n'arrivent (l'aperçu rapide part toujours en premier, par
-        # design -- voir chess_coach_bridge.user.js). Si is_new_position
-        # dans handle_single_profile comparait à self.last_fen, il ne
-        # voyait alors quasiment plus JAMAIS une position comme "nouvelle"
-        # (déjà marquée par l'aperçu rapide entre-temps) -- cassant en
-        # silence le message "au tour de l'adversaire" ET le suivi d'éval
-        # pour le coaching. self.last_fen reste utilisé tel quel pour les
-        # vérifications de péremption (staleness), où on veut justement la
-        # position la plus récente vue par N'IMPORTE QUEL gestionnaire.
-        self._last_profile_fen = None
         # Historique des coups joués depuis le début de la partie actuelle
         # (SAN), déduit position par position par comparaison de FEN
         # successifs -- le script JS n'envoie jamais le coup joué
@@ -207,12 +229,6 @@ class BridgeState:
         # écrit hors de ce verrou).
         self._candidates_cache_key = None      # (fen, elo_tier_id)
         self._candidates_cache_value = None    # (result_dict, board)
-        # Cache SÉPARÉ pour l'aperçu rapide (depth QUICK_DEPTH) -- ne doit surtout
-        # pas se mélanger avec le cache principal ci-dessus (qui est à la
-        # profondeur du niveau Elo choisi) : sinon la "vraie" requête
-        # pourrait par erreur réutiliser le résultat rapide et peu profond.
-        self._quick_cache_key = None           # fen
-        self._quick_cache_value = None         # liste de candidats (depth QUICK_DEPTH)
         # Même principe pour le moteur PRINCIPAL (analyse multi-candidats) :
         # certaines positions très tactiques/déséquilibrées font planter la
         # recherche multi-lignes de Stockfish de façon reproductible (crash
@@ -222,7 +238,10 @@ class BridgeState:
         # réduite) au lieu de retenter la même config qui replanterait --
         # les 3 profils partagent alors le même coup pour cette position
         # précise, plutôt que de rester bloqués sans rien afficher.
-        self._main_engine_degraded = set()
+        # Persisté sur disque (voir _save_degraded_positions) pour ne pas
+        # revivre le même crash à chaque redémarrage du process.
+        self._degraded_path = os.path.join(app_paths.get_base_dir(), "engine_degraded.json")
+        self._main_engine_degraded = self._load_degraded_positions()
 
         # --- Coaching : mémoire d'éval avant/après (voir theme_detector.py) ---
         # Compteur incrémenté à CHAQUE nouvelle position (mon tour OU celui
@@ -276,6 +295,40 @@ class BridgeState:
         # par profil -- voir _attach_scenario_async.
         self._scenario_cache = {}
 
+    @contextmanager
+    def _timed_engine_lock(self, label, lock=None):
+        """
+        Mesure le temps d'attente + le temps de tenue (= temps de calcul
+        moteur) par tâche. `lock` par défaut à self.engine_lock (moteur
+        principal) ; passer self.scenario_engine_lock pour le moteur dédié
+        au scénario différé.
+        """
+        lock = lock if lock is not None else self.engine_lock
+        t0 = time.perf_counter()
+        lock.acquire()
+        wait_ms = (time.perf_counter() - t0) * 1000
+        t1 = time.perf_counter()
+        try:
+            yield
+        finally:
+            lock.release()
+            hold_ms = (time.perf_counter() - t1) * 1000
+            print(f"[engine-timing] {label} wait={wait_ms:.0f}ms hold={hold_ms:.0f}ms")
+
+    def _load_degraded_positions(self):
+        try:
+            with open(self._degraded_path) as f:
+                return set(json.load(f))
+        except Exception:
+            return set()  # fichier absent/corrompu -- on repart simplement à zéro
+
+    def _save_degraded_positions(self):
+        try:
+            with open(self._degraded_path, "w") as f:
+                json.dump(list(self._main_engine_degraded), f)
+        except Exception:
+            pass  # best-effort -- ne doit jamais casser l'analyse principale
+
     def _track_opponent_eval(self, fen, board, position_seq):
         """
         Appelé quand c'est le tour de l'ADVERSAIRE (voir handle_single_profile,
@@ -295,7 +348,7 @@ class BridgeState:
         __init__.
         """
         try:
-            with self.engine_lock:
+            with self._timed_engine_lock("opponent"):
                 result, _ = self.engine.analyze_candidates(fen, multipv=1, depth=12)
             if result.get("candidates"):
                 top = result["candidates"][0]
@@ -455,6 +508,68 @@ class BridgeState:
         with self.lock:
             self.elo_tier_id = tier_id
 
+    def _start_lc0_engine(self, lc0_path):
+        """
+        Démarre lc0 pour le profil "classical" (voir __init__). `lc0_path`
+        (résolu par main.resolve_lc0_path) pointe par défaut sur le build
+        GPU (engines/lc0/gpu/lc0.exe, backend onnx-dml -- environ 500x plus
+        de nœuds/seconde que le build CPU sur une RTX 3070, et ne mange pas
+        les cœurs CPU dont Stockfish a besoin). Si ce chemin échoue (pas de
+        GPU compatible DirectX12, fichier absent...), repli automatique sur
+        engines/lc0/cpu/lc0.exe (backend blas). Chaque build garde ses
+        propres DLL dans son propre dossier -- ne JAMAIS mettre les deux
+        exe dans le même dossier, leurs mimalloc-*.dll ne sont pas
+        interchangeables. Best-effort de bout en bout : si les deux
+        échouent, retourne None et "classical" retombe sur Stockfish (voir
+        handle_single_profile) -- ne doit jamais empêcher le pont de
+        démarrer.
+
+        Le réseau (weights.pb.gz) est partagé entre les 2 builds, un
+        niveau au-dessus (engines/lc0/weights.pb.gz) -- pas besoin d'une
+        copie par dossier cpu/gpu, WeightsFile est un chemin, pas une DLL
+        chargée automatiquement par Windows.
+        """
+        cpu_fallback = os.path.join(app_paths.get_base_dir(), "engines", "lc0", "cpu", "lc0.exe")
+        candidates = [p for p in (lc0_path, cpu_fallback) if p]
+        seen = set()
+        for path in candidates:
+            if path in seen or not os.path.isfile(path):
+                continue
+            seen.add(path)
+            # engines/lc0/{cpu,gpu}/lc0.exe -> engines/lc0/weights.pb.gz
+            weights_path = os.path.join(os.path.dirname(os.path.dirname(path)), "weights.pb.gz")
+            try:
+                # threads=1/hash_mb=1 passés à ChessCoachEngine.__init__ ne
+                # sont PAS réellement appliqués : ce constructeur envoie
+                # Threads et Hash dans le MÊME configure(), qui échoue tout
+                # entier car lc0 n'a pas d'option "Hash" (voir
+                # engine_analysis.ChessCoachEngine.__init__) -- sans lc0
+                # tournait donc avec son Threads par défaut (auto, ~1 par
+                # cœur CPU), d'où ~90% d'utilisation GPU observée en
+                # pratique. Threads=1 + MinibatchSize réduit ci-dessous
+                # (envoyés séparément, donc réellement pris en compte) :
+                # ~60% d'utilisation GPU mesurée sur une RTX 3070, au prix
+                # d'environ -45% de nœuds/s dans le même budget de temps
+                # (voir LC0_MOVETIME_S) -- même latence de réponse, force un
+                # peu réduite. ponytail : valeurs empiriques sur cette
+                # carte, à réajuster si le compromis ne convient pas ou sur
+                # un autre GPU.
+                engine = ChessCoachEngine(path, threads=1, hash_mb=1)
+                try:
+                    engine.engine.configure({"Threads": 1, "MinibatchSize": 32})
+                except chess.engine.EngineError as e:
+                    print(f"⚠ Impossible de limiter Threads/MinibatchSize sur lc0 : {e}")
+                if os.path.isfile(weights_path):
+                    engine.engine.configure({"WeightsFile": weights_path})
+                else:
+                    print(f"⚠ Poids lc0 introuvables ({weights_path}) -- lc0 utilisera son réseau par défaut si disponible.")
+                print(f"ℹ lc0 démarré : {path}")
+                return engine
+            except Exception as e:
+                print(f"⚠ Échec du démarrage de lc0 ({path}) : {e}")
+        print("ℹ Aucun lc0 utilisable trouvé -- le profil \"classical\" utilisera Stockfish.")
+        return None
+
     def _restart_engine(self, reason=""):
         """
         Redémarre Stockfish après un crash (processus tué, plantage interne,
@@ -487,6 +602,28 @@ class BridgeState:
             self.stockfish_path, threads=self.threads, hash_mb=self.hash_mb
         )
         print("✅ Moteur redémarré.")
+
+    def _restart_scenario_engine(self, reason=""):
+        """
+        Équivalent de _restart_engine ci-dessus pour self.scenario_engine
+        (voir __init__) -- appelée DEPUIS L'INTÉRIEUR de
+        scenario_engine_lock (voir _attach_scenario_async), même raison de
+        fermer l'ancien moteur dans un thread séparé sans l'attendre.
+        """
+        print(f"⚠ Le moteur scénario semble avoir crashé, redémarrage... ({reason})")
+
+        old_engine = self.scenario_engine
+
+        def _cleanup_old_engine():
+            try:
+                old_engine.close()
+            except Exception:
+                pass
+
+        threading.Thread(target=_cleanup_old_engine, daemon=True).start()
+
+        self.scenario_engine = ChessCoachEngine(self.stockfish_path, threads=1, hash_mb=128)
+        print("✅ Moteur scénario redémarré.")
 
     def _get_theory_move(self, fen, board):
         """
@@ -570,98 +707,6 @@ class BridgeState:
                 return fen != self.last_fen
         return _is_stale
 
-    def handle_quick_take(self, fen):
-        """
-        Version rapide (depth QUICK_DEPTH, quasi instantanée) des 3 profils en UNE
-        seule requête -- affichée immédiatement côté navigateur pendant que
-        la vraie analyse (plus profonde, au niveau Elo choisi) tourne
-        derrière. Ne calcule PAS l'avis Elo-bridé (pour rester rapide) --
-        les profils "populaire"/"classique" s'en passent juste pour cet
-        aperçu, ils l'auront dans la vraie réponse qui suit.
-        """
-        try:
-            board = chess.Board(fen)
-        except ValueError as e:
-            return {"quick": True, "error": f"FEN invalide reçu du navigateur : {e}"}
-
-        with self.lock:
-            self.last_fen = fen  # l'aperçu rapide arrive en premier, avant les vraies requêtes profil
-            my_side = self.my_side
-            elo_tier_id = self.elo_tier_id
-
-        # Sans cet appel, self._move_history restait celui de la POSITION
-        # PRÉCÉDENTE le temps de l'aperçu rapide (seul handle_single_profile
-        # le mettait à jour, et il n'a pas encore tourné pour cette
-        # position) -- _get_theory_move plus bas (is_our_first_move) voyait
-        # donc un état périmé, décalé d'un demi-coup par rapport à la vraie
-        # position. Idempotent (voir _update_move_history) : sans effet si
-        # déjà à jour, donc sans risque même appelée 2x pour la même position
-        # (ici puis dans handle_single_profile juste après).
-        self._update_move_history(fen, board)
-
-        side_to_move = "w" if board.turn else "b"
-        if side_to_move != my_side:
-            return {"quick": True, "skip": True}
-        if board.is_game_over():
-            return {"quick": True, "game_over": True, "result": board.result()}
-
-        with self.engine_lock:
-            if self._quick_cache_key == fen:
-                candidates = self._quick_cache_value
-            else:
-                # Réutilise la même liste que l'analyse principale (voir
-                # handle_single_profile) : si cette position est déjà
-                # connue pour faire planter le mode natif, on passe direct
-                # en mode sûr (recherches successives) plutôt que de la
-                # retenter en natif pour rien.
-                is_degraded = fen in self._main_engine_degraded
-
-                def _run_quick(mpv, safe):
-                    result, brd = self.engine.analyze_candidates(
-                        fen, multipv=mpv, depth=QUICK_DEPTH, safe_mode=safe,
-                        is_stale=self._make_is_stale(fen),
-                    )
-                    return result
-
-                try:
-                    result = _run_quick(QUICK_MULTIPV, is_degraded)
-                except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
-                    self._restart_engine(reason=f"{type(e).__name__}: {e}")
-                    if fen not in self._main_engine_degraded and len(self._main_engine_degraded) < 500:
-                        self._main_engine_degraded.add(fen)
-                    try:
-                        result = _run_quick(1, True)  # repli direct sur le mode sûr après un crash
-                    except Exception as e2:
-                        return {"quick": True, "error": f"Moteur Stockfish indisponible : {e2}"}
-
-                if result.get("game_over"):
-                    return {"quick": True, "game_over": True, "result": result["result"]}
-                if result.get("stale"):
-                    # Coup joué entre-temps, cette recherche a été coupée
-                    # court (voir engine_analysis.analyze_candidates,
-                    # is_stale) plutôt que de tourner à vide jusqu'au bout
-                    # -- rien à mettre en cache, la vraie requête pour la
-                    # nouvelle position est déjà en route côté navigateur.
-                    return {"quick": True, "stale": True}
-                candidates = result["candidates"]
-                self._quick_cache_key = fen
-                self._quick_cache_value = candidates
-
-        profiles_out = {}
-        for profile_id in human_profile.PROFILE_IDS:
-            chosen = human_profile.select_move(
-                candidates, elo_tier_id, profile_id, board=board,
-            )
-            if chosen is not None:
-                profiles_out[profile_id] = {
-                    "move_uci": chosen["move_uci"],
-                    "move_san": chosen["move_san"],
-                    "score": chosen["score"],
-                    "pv_san": chosen["pv_san"],
-                }
-        theory_move = self._get_theory_move(fen, board)
-        return {"quick": True, "profiles": profiles_out, "theory_move": theory_move}
-
     def _update_move_history(self, fen, board):
         """
         Déduit le coup joué entre la dernière position CONNUE de
@@ -674,14 +719,13 @@ class BridgeState:
         une raison quelconque (ex: 1er coup de la partie, désynchronisation
         ponctuelle).
 
-        Verrouillée entièrement (self.lock) : appelée à la fois par
-        handle_quick_take (sans garde -- voir plus haut) et
-        handle_single_profile (sous garde is_new_position, mais 3 requêtes
-        parallèles par position) -- sans verrou, un appel en retard pour
-        une VIEILLE position pourrait s'entrelacer avec un appel pour la
-        position SUIVANTE et corrompre self._move_history (aucun des deux
-        appelants ne tient déjà self.lock à ce point, donc pas de risque
-        d'interblocage à l'ajouter ici).
+        Verrouillée entièrement (self.lock) : appelée par handle_single_profile
+        (sous garde is_new_position, mais 3 requêtes parallèles par
+        position) -- sans verrou, un appel en retard pour une VIEILLE
+        position pourrait s'entrelacer avec un appel pour la position
+        SUIVANTE et corrompre self._move_history (l'appelant ne tient pas
+        déjà self.lock à ce point, donc pas de risque d'interblocage à
+        l'ajouter ici).
         """
         with self.lock:
             try:
@@ -764,13 +808,17 @@ class BridgeState:
                 facts = self._scenario_cache.get(cache_key, "MISS")
 
             if facts == "MISS":
-                with self.engine_lock:
+                with self._timed_engine_lock(f"scenario:{elo_tier_id}", lock=self.scenario_engine_lock):
                     with self.lock:
                         if position_seq != self._position_seq:
                             return  # garde n°1 : dépassée pendant l'attente du verrou moteur
                     tier = human_profile.ELO_TIERS.get(elo_tier_id)
                     depth = tier.depth_max if tier is not None else variation_narrator.DEFAULT_EVAL_DEPTH
-                    facts = narration.compute_scenario_facts(chosen, board, self.engine, depth=depth)
+                    try:
+                        facts = narration.compute_scenario_facts(chosen, board, self.scenario_engine, depth=depth)
+                    except Exception as e:
+                        self._restart_scenario_engine(reason=f"{type(e).__name__}: {e}")
+                        raise
                 with self.lock:
                     # Cache borné implicitement : vidé à chaque nouvelle
                     # position (voir handle_single_profile, is_new_position),
@@ -804,9 +852,8 @@ class BridgeState:
             return {"error": f"FEN invalide reçu du navigateur : {e}", "profile": profile_id}
 
         with self.lock:
-            is_new_position = fen != self._last_profile_fen
-            self._last_profile_fen = fen
-            self.last_fen = fen  # toujours mis à jour aussi (péremption, voir plus bas)
+            is_new_position = fen != self.last_fen
+            self.last_fen = fen
             my_side = self.my_side
             elo_tier_id = self.elo_tier_id
             if is_new_position:
@@ -841,14 +888,31 @@ class BridgeState:
 
         tier = human_profile.ELO_TIERS[elo_tier_id]
 
-        with self.engine_lock:
+        # "classical" (flèche blanche) va sur lc0 s'il est disponible, pour
+        # diversifier ses propositions par rapport à popular/creative
+        # (Stockfish) -- voir _start_lc0_engine. Verrou ET cache dédiés
+        # (self.lc0_engine_lock, self._lc0_candidates_cache_*) : lc0 tourne
+        # ainsi EN PARALLÈLE de Stockfish, jamais derrière le même verrou.
+        use_lc0 = profile_id == "classical" and self.lc0_engine is not None
+        lock_to_use = self.lc0_engine_lock if use_lc0 else self.engine_lock
+        lock_label = f"lc0:{elo_tier_id}" if use_lc0 else f"main:{elo_tier_id}"
+
+        with self._timed_engine_lock(lock_label, lock=lock_to_use):
             with self.lock:
                 if fen != self.last_fen:
                     return {"stale": True, "profile": profile_id}  # position dépassée entre-temps
 
             def _run_candidates():
+                # Recalculé à CHAQUE appel (pas juste capturé de l'extérieur) :
+                # si un appel précédent (retry après crash lc0, voir plus bas)
+                # a mis self.lc0_engine à None, ce retry doit basculer sur
+                # Stockfish -- pas retenter lc0 devenu None.
+                lc0_active = use_lc0 and self.lc0_engine is not None
                 cache_key = (fen, elo_tier_id)
-                if self._candidates_cache_key == cache_key:
+                if lc0_active:
+                    if self._lc0_candidates_cache_key == cache_key:
+                        return self._lc0_candidates_cache_value
+                elif self._candidates_cache_key == cache_key:
                     # Déjà calculé pour un autre profil sur cette même
                     # position/niveau -- on réutilise, pas de nouvel appel
                     # Stockfish.
@@ -858,9 +922,9 @@ class BridgeState:
                 #    position elle-même dit si on est encore "dans la
                 #    théorie" -- aucun compteur de coups à tenir à jour, et
                 #    ça marche pareil que ce soit MON coup ou celui d'un
-                #    adversaire qui vient de jouer). Si la position n'y est
-                #    pas (ou pas de livre chargé), bascule silencieusement
-                #    sur Stockfish juste en dessous.
+                #    adversaire qui vient de jouer, indépendant du moteur).
+                #    Si la position n'y est pas (ou pas de livre chargé),
+                #    bascule silencieusement sur le moteur juste en dessous.
                 book_entries = self.opening_book.lookup(board)
                 if book_entries:
                     book_candidates = opening_book.candidates_from_book_entries(
@@ -868,10 +932,36 @@ class BridgeState:
                     )
                     if book_candidates:
                         result = {"game_over": False, "candidates": book_candidates}
-                        self._candidates_cache_value = result  # valeur avant clé, même raison que le cache de thème plus haut
-                        self._candidates_cache_key = cache_key
-                        self._update_eval_tracking_and_theme(fen, board, book_candidates, current_seq)
+                        if lc0_active:
+                            self._lc0_candidates_cache_value = result
+                            self._lc0_candidates_cache_key = cache_key
+                        else:
+                            self._candidates_cache_value = result  # valeur avant clé, même raison que le cache de thème plus haut
+                            self._candidates_cache_key = cache_key
+                            self._update_eval_tracking_and_theme(fen, board, book_candidates, current_seq)
                         return result
+
+                if lc0_active:
+                    # Pas de machinerie de redémarrage dédiée (contrairement
+                    # à Stockfish ci-dessous) : lc0 est un second moteur
+                    # optionnel -- sur erreur, on le désactive pour le reste
+                    # du process et on remonte l'erreur pour CETTE requête ;
+                    # la prochaine requête "classical" retombera proprement
+                    # sur Stockfish (self.lc0_engine devenu None).
+                    try:
+                        result, brd = self.lc0_engine.analyze_candidates(
+                            fen, multipv=tier.multipv, movetime_s=LC0_MOVETIME_S,
+                            is_stale=self._make_is_stale(fen),
+                        )
+                    except Exception as e:
+                        print(f"⚠ lc0 indisponible ({e}) -- \"classical\" repassera sur Stockfish à partir du prochain coup.")
+                        self.lc0_engine = None
+                        raise
+                    if result.get("stale"):
+                        return result
+                    self._lc0_candidates_cache_value = result
+                    self._lc0_candidates_cache_key = cache_key
+                    return result
 
                 # 2. Hors théorie (ou pas de livre) -> Stockfish comme avant.
                 is_degraded = fen in self._main_engine_degraded
@@ -886,6 +976,7 @@ class BridgeState:
                         print(f"⚠ Position basculée en mode sûr (recherches successives) pour le moteur principal (crash) : {fen}")
                         if len(self._main_engine_degraded) < 500:  # borne de sécurité
                             self._main_engine_degraded.add(fen)
+                            self._save_degraded_positions()
                     # On retente en mode SÛR (recherches successives,
                     # profondeur plus modeste) -- beaucoup moins de risque
                     # de crash que la recherche multi-lignes native qui
@@ -916,11 +1007,24 @@ class BridgeState:
             try:
                 result = _run_candidates()
             except Exception as e:  # pas seulement EngineError : python-chess peut aussi lever d'autres erreurs (ex: IllegalMoveError) sur une réponse moteur corrompue
-                self._restart_engine(reason=f"{type(e).__name__}: {e}")
-                try:
-                    result = _run_candidates()
-                except Exception as e2:
-                    return {"error": f"Moteur Stockfish indisponible : {e2}", "profile": profile_id}
+                if use_lc0 and self.lc0_engine is None:
+                    # lc0 vient de planter (voir _run_candidates, qui a déjà
+                    # mis self.lc0_engine à None). On NE retente PAS Stockfish
+                    # ici : ce bloc tient encore self.lc0_engine_lock, pas
+                    # self.engine_lock -- appeler self.engine ici pourrait
+                    # tourner EN MÊME TEMPS qu'une requête popular/creative
+                    # qui tient déjà engine_lock (Stockfish ne supporte
+                    # qu'une recherche à la fois). On abandonne juste CETTE
+                    # requête ; la suivante repassera proprement sur
+                    # Stockfish sous le bon verrou (lc0_active devient False
+                    # dès que self.lc0_engine est None).
+                    return {"error": f"lc0 indisponible : {e}", "profile": profile_id}
+                else:
+                    self._restart_engine(reason=f"{type(e).__name__}: {e}")
+                    try:
+                        result = _run_candidates()
+                    except Exception as e2:
+                        return {"error": f"Moteur Stockfish indisponible : {e2}", "profile": profile_id}
 
         with self.lock:
             stale = fen != self.last_fen
@@ -944,21 +1048,28 @@ class BridgeState:
             # Éval OBJECTIVE de la position (meilleur candidat, candidates[0]),
             # pour la barre d'avantage côté navigateur -- PAS l'éval du coup
             # "humain" choisi (qui peut être volontairement sous-optimal, voir
-            # human_profile). Identique pour les 3 profils : n'importe quelle
-            # réponse porte la même barre. Convertie du point de vue des BLANCS
-            # (candidates[0].cp est du point de vue du camp au trait -- voir
-            # engine_analysis, pov(board.turn)) pour que la barre ait un sens
-            # absolu, indépendant de qui joue. cp=None (coup de livre, pas
-            # d'éval Stockfish) -> barre laissée inchangée côté client.
-            "eval": _objective_eval_white(result["candidates"][0], board),
-            # Rebranché ici (pas seulement dans handle_quick_take) : sinon,
-            # une position jamais vue avant dans la partie ne bénéficie
-            # QUE de l'aperçu rapide pour vérifier le cache Lichess -- s'il
-            # n'est pas encore prêt à ce moment précis, la flèche théorique
-            # ne reviendrait plus jamais pour ce coup. En le recalculant
-            # ici aussi (3 requêtes supplémentaires par coup, cache-hit
-            # quasi gratuit), on laisse une vraie 2e/3e/4e chance au cache
-            # de s'être rempli entre-temps.
+            # human_profile). Censée être identique pour les 3 profils :
+            # n'importe quelle réponse porte la même barre -- donc TOUJOURS
+            # celle de Stockfish si déjà en cache pour cette position (même
+            # quand ce profil est "classical" servi par lc0, voir use_lc0
+            # ci-dessus), pour ne pas faire sauter la barre entre 2 avis
+            # différents selon quel profil répond en premier. Repli sur les
+            # candidats lc0 SEULEMENT si le cache Stockfish n'est pas encore
+            # rempli (rare : lc0 a répondu avant popular/creative).
+            # Convertie du point de vue des BLANCS (candidates[0].cp est du
+            # point de vue du camp au trait -- voir engine_analysis,
+            # pov(board.turn)) pour que la barre ait un sens absolu,
+            # indépendant de qui joue. cp=None (coup de livre, pas d'éval
+            # moteur) -> barre laissée inchangée côté client.
+            "eval": _objective_eval_white(
+                (self._candidates_cache_value["candidates"][0]
+                 if use_lc0 and self._candidates_cache_key == (fen, elo_tier_id)
+                 else result["candidates"][0]),
+                board,
+            ),
+            # Recalculé pour chacun des 3 profils (cache-hit quasi gratuit) :
+            # si le cache Lichess n'est pas encore prêt au moment du 1er
+            # appel, ça laisse une vraie 2e/3e chance de le voir rempli.
             "theory_move": self._get_theory_move(fen, board),
         }
 
@@ -1081,6 +1192,15 @@ class BridgeState:
             self.engine.close()
         except Exception:
             pass
+        try:
+            self.scenario_engine.close()
+        except Exception:
+            pass
+        try:
+            if self.lc0_engine is not None:
+                self.lc0_engine.close()
+        except Exception:
+            pass
 
 
 def _make_handler(state: BridgeState):
@@ -1116,7 +1236,6 @@ def _make_handler(state: BridgeState):
                 data = json.loads(body)
                 fen = data["fen"]
                 profile = data.get("profile")  # un seul profil "humain"
-                quick = data.get("quick", False)  # aperçu rapide (depth QUICK_DEPTH) des 3 profils d'un coup
                 side = data.get("side")  # couleur du joueur, auto-détectée par le userscript (orientation du plateau)
             except Exception:
                 self._send_single(400, {"error": "JSON invalide, champ \"fen\" attendu"})
@@ -1135,26 +1254,25 @@ def _make_handler(state: BridgeState):
                 state.set_my_side(side)
                 print(f"Coach : camp auto-détecté depuis le navigateur -> {'Blancs' if side == 'w' else 'Noirs'}")
 
-            if quick:
-                result = state.handle_quick_take(fen)
-                self._send_single(200, result)
-            elif profile is not None:
+            if profile is not None:
                 result = state.handle_single_profile(fen, profile)
                 self._send_single(200, result)
             else:
-                # Requête "brute" (sans 'profile' ni 'quick') : ne devrait
-                # plus jamais arriver avec le .user.js à jour. Typiquement le
-                # signe qu'un ancien script (chess_coach_bridge.js) est encore
-                # chargé sur la page en plus du .user.js Tampermonkey. On log
-                # un avertissement explicite pour le repérer facilement plutôt
-                # que de traiter la requête.
+                # Requête "brute" (sans 'profile') : ne devrait plus jamais
+                # arriver avec le .user.js à jour. Typiquement le signe
+                # qu'un ancien script (chess_coach_bridge.js, ou un
+                # .user.js d'avant la suppression de l'aperçu rapide) est
+                # encore chargé sur la page en plus du .user.js actuel. On
+                # log un avertissement explicite pour le repérer facilement
+                # plutôt que de traiter la requête.
                 print(
-                    "⚠ Requête /fen reçue SANS champ 'profile' ni 'quick' -- "
-                    "vérifie qu'un ancien script (chess_coach_bridge.js) n'est "
-                    "pas encore chargé sur la page en plus du .user.js Tampermonkey."
+                    "⚠ Requête /fen reçue SANS champ 'profile' -- vérifie "
+                    "qu'un ancien script (chess_coach_bridge.js ou .user.js "
+                    "obsolète) n'est pas encore chargé sur la page en plus "
+                    "du .user.js Tampermonkey actuel."
                 )
                 self._send_single(409, {
-                    "error": "Requête sans 'profile' ni 'quick' -- mode non reconnu "
+                    "error": "Requête sans 'profile' -- mode non reconnu "
                              "(voir la console Python pour plus de détails)."
                 })
 
@@ -1176,7 +1294,8 @@ def _make_handler(state: BridgeState):
 
 
 def start_bridge_server(stockfish_path, explain_mode="local", on_update=None,
-                         on_profile_update=None, port=DEFAULT_PORT, threads=None, hash_mb=1024):
+                         on_profile_update=None, port=DEFAULT_PORT, threads=None, hash_mb=1024,
+                         lc0_path=None):
     """
     Démarre le serveur en tâche de fond (thread daemon) et retourne
     (server, state). Appelle state.close() pour bien fermer Stockfish
@@ -1185,7 +1304,7 @@ def start_bridge_server(stockfish_path, explain_mode="local", on_update=None,
     state = BridgeState(
         stockfish_path, explain_mode=explain_mode, on_update=on_update,
         on_profile_update=on_profile_update,
-        threads=threads, hash_mb=hash_mb,
+        threads=threads, hash_mb=hash_mb, lc0_path=lc0_path,
     )
     handler_cls = _make_handler(state)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
