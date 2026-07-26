@@ -828,6 +828,19 @@
       ? (els.board.offsetWidth || els.board.getBoundingClientRect().width || 600)
       : (els.container.offsetWidth || 688);
 
+    if (svg && svg.parentElement !== anchor) {
+      // Le site a recréé son conteneur de plateau (nouvelle partie, retour
+      // au menu, résolution de puzzle...) sans supprimer notre ancien
+      // calque -- il reste attaché à un noeud désormais détaché/masqué,
+      // donc invisible, alors que getElementById continue de le retrouver
+      // tant qu'il traîne dans le document. On le rattache au NOUVEL
+      // ancre plutôt que d'en garder un orphelin : sinon les flèches
+      // restent invisibles jusqu'au prochain rechargement complet (et
+      // parfois même après, si le site recrée son board dès le chargement).
+      svg.remove();
+      svg = null;
+    }
+
     if (!svg) {
       svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
       svg.id = "chess-coach-arrows";
@@ -914,8 +927,17 @@
     updateEvalBar();
 
     const inTheory = !!(currentTheoryEntry && currentTheoryEntry.move_uci);
+    // Mat forcé annoncé (currentEval.mate, voir web_bridge.py
+    // _objective_eval_white) : sous tolérance Elo, "creative"/"classical"
+    // peuvent choisir un coup gagnant qui rate le mat le plus rapide --> 3
+    // flèches parfois divergentes qui encombraient l'affichage une fois le
+    // mat trouvé. On ne garde que le coup du profil "popular" (le plus
+    // proche de l'optimal objectif), comme pour l'exception théorie.
+    const isForcedMate = !!(currentEval && currentEval.mate !== null && currentEval.mate !== undefined);
     const profileIds = inTheory
       ? []
+      : isForcedMate
+      ? (currentProfileEntries["popular"] ? ["popular"] : [])
       : Object.keys(currentProfileEntries).sort(
           (a, b) => PROFILE_IDS.indexOf(a) - PROFILE_IDS.indexOf(b)
         );
