@@ -62,7 +62,9 @@ _make_process_dpi_aware()
 
 from webview_ui import CoachWebview
 import app_paths
+import self_update
 import update_checker
+import version
 
 
 class BrowserBridgeApp:
@@ -84,6 +86,7 @@ class BrowserBridgeApp:
             on_show_report_click=self.show_game_report,
             on_request_scenario=self.request_scenario,
             on_open_release_page=self.open_release_page,
+            on_start_update=self.start_update,
         )
         self.server = None
         self.state = None
@@ -93,6 +96,10 @@ class BrowserBridgeApp:
         self.threads = threads
         self.hash_mb = hash_mb
         self.lc0_path = lc0_path
+        # Rempli par _check_for_update_async dès qu'une mise à jour est
+        # détectée -- start_update (clic "Mettre à jour" du bandeau) le
+        # relit, pas besoin que le JS renvoie l'URL lui-même.
+        self._pending_update_info = None
 
     def trigger_refresh(self):
         if self.state:
@@ -142,12 +149,11 @@ class BrowserBridgeApp:
             threading.Thread(target=self.state.finalize_game_report, daemon=True).start()
 
     def open_release_page(self, url):
-        # Bouton "Télécharger la mise à jour" (voir update_checker.py /
-        # webview_ui.py show_update_notice) -- ouvre la page de Release
-        # GitHub dans le navigateur par défaut, ne télécharge/n'installe
-        # RIEN automatiquement (pas de remplacement de l'exe en cours
-        # d'exécution -- trop risqué en best-effort, l'utilisateur garde la
-        # main sur l'installation).
+        # Repli MANUEL uniquement : plus de fichier .zip attaché à la
+        # release (asset_url absent), ou l'auto-update a échoué (voir
+        # _apply_update_async) -- ouvre la page de Release dans le
+        # navigateur par défaut pour que l'utilisateur télécharge/installe
+        # lui-même.
         if url:
             import webbrowser
             webbrowser.open(url)
@@ -158,7 +164,47 @@ class BrowserBridgeApp:
         # rien, jamais bloquant.
         info = update_checker.check_for_update()
         if info.get("available"):
+            self._pending_update_info = info
             self.overlay.show_update_notice(info)
+
+    def start_update(self):
+        # Clic "Mettre à jour" du bandeau -- déclenché depuis le pont JS,
+        # DANS UN THREAD séparé : télécharger 100+ Mo puis réécrire des
+        # fichiers ne doit jamais geler la fenêtre coach.
+        threading.Thread(target=self._apply_update_async, daemon=True).start()
+
+    def _apply_update_async(self):
+        info = self._pending_update_info
+        if not info or not info.get("asset_url"):
+            # Release sans zip attaché (créée à la main sans build) -- pas
+            # de quoi faire un auto-update, repli manuel direct.
+            self.overlay.show_update_error(
+                "Pas de fichier de mise à jour attaché à cette release.",
+                info.get("release_url") if info else None,
+            )
+            return
+        try:
+            self.overlay.show_update_progress("Téléchargement... 0%")
+            zip_path = update_checker.download_update(
+                info["asset_url"],
+                progress_cb=lambda frac: self.overlay.show_update_progress(
+                    f"Téléchargement... {int(frac * 100)}%"),
+            )
+            self.overlay.show_update_progress("Installation...")
+            extracted = update_checker.extract_update(zip_path)
+            self.overlay.show_update_progress("Redémarrage...")
+            # Ne retourne JAMAIS normalement pour un build packagé (termine
+            # le process, voir self_update.py) -- ce qui suit ne s'exécute
+            # que si ce n'est PAS un build packagé (dev).
+            applied = self_update.apply_update_and_restart(extracted)
+            if not applied:
+                self.overlay.show_update_error(
+                    "Mode développement : impossible de remplacer un exe qui n'existe pas.",
+                    info.get("release_url"),
+                )
+        except Exception as e:
+            self.overlay.show_update_error(
+                f"Échec de la mise à jour automatique : {e}", info.get("release_url"))
 
     def run(self):
         from web_bridge import start_bridge_server
@@ -178,6 +224,10 @@ class BrowserBridgeApp:
             f"est bien activé dans Tampermonkey sur ta page de jeu (port {self.port})."
         )
         threading.Thread(target=self._check_for_update_async, daemon=True).start()
+        threading.Thread(
+            target=lambda: self.overlay.set_version_badge(version.get_local_version() or "dev"),
+            daemon=True,
+        ).start()
         try:
             self.overlay.run()
         finally:

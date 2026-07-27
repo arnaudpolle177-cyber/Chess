@@ -5,7 +5,9 @@ urlopen et version.get_local_version sont monkeypatchés.
 """
 import io
 import json
+import os
 import sys
+import zipfile
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -84,7 +86,7 @@ def test_different_tag_means_update_available():
         result = update_checker.check_for_update()
         check(result["available"] is True, "tag différent -> mise à jour disponible")
         check(result["latest_version"] == "V2LCO", "latest_version = tag distant")
-        check(result["download_url"] == "https://x/zip", "download_url = asset .zip trouvé")
+        check(result["asset_url"] == "https://x/zip", "asset_url = asset .zip trouvé")
     finally:
         version.get_local_version = orig_local
         update_checker.urllib.request.urlopen = orig_urlopen
@@ -107,12 +109,90 @@ def test_network_error_never_raises():
         update_checker.urllib.request.urlopen = orig_urlopen
 
 
+class _FakeStreamResponse:
+    """Simule une réponse HTTP en streaming (voir update_checker.download_update -- .read(size) par chunks, pas .read() d'un coup)."""
+
+    def __init__(self, payload_bytes, content_length=True):
+        self._buf = io.BytesIO(payload_bytes)
+        self.headers = {"Content-Length": str(len(payload_bytes))} if content_length else {}
+
+    def read(self, size=-1):
+        return self._buf.read(size)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_download_update_writes_bytes_and_reports_progress():
+    orig_urlopen = update_checker.urllib.request.urlopen
+    payload = os.urandom(update_checker._CHUNK_SIZE + 100)  # >1 chunk, force plusieurs tours de boucle
+    update_checker.urllib.request.urlopen = lambda *a, **kw: _FakeStreamResponse(payload)
+    progress_values = []
+    try:
+        tmp_path = update_checker.download_update("https://x/fake.zip", progress_cb=progress_values.append)
+        try:
+            with open(tmp_path, "rb") as f:
+                written = f.read()
+            check(written == payload, "le fichier téléchargé contient exactement les octets envoyés")
+            check(len(progress_values) >= 2, "progress_cb appelé plusieurs fois (plusieurs chunks)")
+            check(abs(progress_values[-1] - 1.0) < 1e-6, "dernière valeur de progression = 100%")
+        finally:
+            os.remove(tmp_path)
+    finally:
+        update_checker.urllib.request.urlopen = orig_urlopen
+
+
+def test_download_update_cleans_up_temp_file_on_error():
+    orig_urlopen = update_checker.urllib.request.urlopen
+
+    class _Boom:
+        def __enter__(self):
+            raise OSError("connexion coupée")
+
+        def __exit__(self, *a):
+            return False
+
+    update_checker.urllib.request.urlopen = lambda *a, **kw: _Boom()
+    raised = False
+    try:
+        update_checker.download_update("https://x/fake.zip")
+    except OSError:
+        raised = True
+    finally:
+        update_checker.urllib.request.urlopen = orig_urlopen
+    check(raised, "l'erreur réseau doit être remontée (pas avalée comme check_for_update)")
+
+
+def test_extract_update_returns_coachechecs_subfolder():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("CoachEchecs/version.txt", "V9TEST")
+        zf.writestr("CoachEchecs/CoachEchecs.exe", "faux exe")
+    fd, zip_path = __import__("tempfile").mkstemp(suffix=".zip")
+    os.close(fd)
+    try:
+        with open(zip_path, "wb") as f:
+            f.write(buf.getvalue())
+        extracted = update_checker.extract_update(zip_path)
+        check(os.path.basename(extracted.rstrip("/\\")) == "CoachEchecs",
+              f"dossier extrait = sous-dossier CoachEchecs, obtenu {extracted}")
+        check(os.path.isfile(os.path.join(extracted, "version.txt")), "version.txt présent dans le dossier extrait")
+    finally:
+        os.remove(zip_path)
+
+
 def main():
     for fn in (
         test_no_local_version_never_calls_network,
         test_same_tag_means_no_update,
         test_different_tag_means_update_available,
         test_network_error_never_raises,
+        test_download_update_writes_bytes_and_reports_progress,
+        test_download_update_cleans_up_temp_file_on_error,
+        test_extract_update_returns_coachechecs_subfolder,
     ):
         try:
             fn()

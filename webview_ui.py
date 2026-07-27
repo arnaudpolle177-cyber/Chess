@@ -162,13 +162,14 @@ class _JsApi:
     """Méthodes appelables depuis le JS via window.pywebview.api.xxx()."""
 
     def __init__(self, on_elo_change, on_toggle_side, on_refresh, on_show_report, on_request_scenario,
-                 on_open_release_page):
+                 on_open_release_page, on_start_update):
         self._on_elo_change = on_elo_change
         self._on_toggle_side = on_toggle_side
         self._on_refresh = on_refresh
         self._on_show_report = on_show_report
         self._on_request_scenario = on_request_scenario
         self._on_open_release_page = on_open_release_page
+        self._on_start_update = on_start_update
 
     def set_elo(self, tier_id):
         if self._on_elo_change:
@@ -198,13 +199,18 @@ class _JsApi:
         if self._on_open_release_page:
             self._on_open_release_page(url)
 
+    def start_update(self):
+        if self._on_start_update:
+            self._on_start_update()
+
 
 class CoachWebview:
     def __init__(self, on_refresh_click=None, on_toggle_side_click=None, on_elo_change=None,
-                 on_show_report_click=None, on_request_scenario=None, on_open_release_page=None):
+                 on_show_report_click=None, on_request_scenario=None, on_open_release_page=None,
+                 on_start_update=None):
         self._window = None
         self._api = _JsApi(on_elo_change, on_toggle_side_click, on_refresh_click, on_show_report_click,
-                            on_request_scenario, on_open_release_page)
+                            on_request_scenario, on_open_release_page, on_start_update)
         self._ready = threading.Event()
 
     def _on_loaded(self):
@@ -265,7 +271,7 @@ class CoachWebview:
     def show_update_notice(self, info):
         """
         info : voir update_checker.check_for_update -- {"available": True,
-        "latest_version", "release_url", "download_url"}. Appelée depuis un
+        "latest_version", "release_url", "asset_url"}. Appelée depuis un
         thread de fond (voir main.py, _check_for_update_async) démarré
         AVANT que webview.start() (bloquant) n'ait fini de créer la
         fenêtre -- on attend qu'elle soit chargée (self._ready, posé par
@@ -274,6 +280,24 @@ class CoachWebview:
         if not self._ready.wait(timeout=15):
             return  # fenêtre jamais chargée (fermée entre-temps ?) -- best-effort, on abandonne
         self._eval_js(f"window.showUpdateNotice({json.dumps(info)})")
+
+    def show_update_progress(self, text):
+        """Étape de l'auto-update en cours (Téléchargement/Installation/Redémarrage, voir main.py _apply_update_async)."""
+        self._eval_js(f"window.showUpdateProgress({json.dumps(text)})")
+
+    def show_update_error(self, text, release_url):
+        """Auto-update ratée -- affiche l'erreur + un repli manuel (release_url, peut être None)."""
+        self._eval_js(f"window.showUpdateError({json.dumps(text)}, {json.dumps(release_url)})")
+
+    def set_version_badge(self, version_str):
+        """
+        Affiché en permanence en bas à droite de la fenêtre coach. Appelée
+        depuis un thread de fond démarré avant que la fenêtre soit prête
+        (même raison que show_update_notice ci-dessus).
+        """
+        if not self._ready.wait(timeout=15):
+            return
+        self._eval_js(f"window.setVersion({json.dumps(version_str)})")
 
 
 # ---------------------------------------------------------------------
@@ -318,12 +342,19 @@ _HTML = r"""
     padding: 7px 10px; font-size: 12px; margin: -2px 0 -6px 0;
   }
   #updateBannerText { flex: 1; color: var(--text); }
-  #updateBannerDownload {
+  #updateBannerApply, #updateBannerManualLink {
     cursor: pointer; font-weight: 700; color: var(--warn); white-space: nowrap;
   }
-  #updateBannerDownload:hover { text-decoration: underline; }
+  #updateBannerApply:hover, #updateBannerManualLink:hover { text-decoration: underline; }
+  #updateBanner.updating #updateBannerApply { pointer-events: none; opacity: 0.5; }
   #updateBannerDismiss { cursor: pointer; color: var(--text-faint); font-size: 16px; line-height: 1; }
   #updateBannerDismiss:hover { color: var(--text); }
+
+  /* --- badge de version (bas droite, toujours visible) --- */
+  #versionBadge {
+    position: fixed; right: 8px; bottom: 4px; font-size: 10px;
+    color: var(--text-faint); pointer-events: none; z-index: 9999;
+  }
 
   /* --- en-tête : niveau + camp --- */
   #header { display: flex; flex-direction: column; gap: 8px; }
@@ -435,7 +466,8 @@ _HTML = r"""
 
   <div id="updateBanner" style="display:none">
     <span id="updateBannerText"></span>
-    <span id="updateBannerDownload" onclick="onDownloadUpdate()">Télécharger</span>
+    <span id="updateBannerApply" onclick="onStartUpdate()">Mettre à jour</span>
+    <span id="updateBannerManualLink" onclick="onOpenReleasePage()" style="display:none">Ouvrir la page</span>
     <span id="updateBannerDismiss" onclick="onDismissUpdate()" title="Plus tard">&times;</span>
   </div>
 
@@ -491,6 +523,8 @@ _HTML = r"""
 
 </div>
 
+<div id="versionBadge"></div>
+
 <div id="reportOverlay" style="display:none">
   <div id="reportPanel">
     <div id="reportHeader">
@@ -538,10 +572,19 @@ _HTML = r"""
     if (window.pywebview) window.pywebview.api.request_report();
   }
 
-  let _pendingUpdateReleaseUrl = null;
-  function onDownloadUpdate() {
-    if (window.pywebview && _pendingUpdateReleaseUrl) {
-      window.pywebview.api.open_release_page(_pendingUpdateReleaseUrl);
+  let _pendingReleaseUrl = null;   // repli manuel (voir window.showUpdateError)
+  function onStartUpdate() {
+    if (!window.pywebview) return;
+    const banner = document.getElementById("updateBanner");
+    banner.classList.add("updating");
+    document.getElementById("updateBannerManualLink").style.display = "none";
+    document.getElementById("updateBannerDismiss").style.display = "none";
+    document.getElementById("updateBannerText").textContent = "Téléchargement...";
+    window.pywebview.api.start_update();
+  }
+  function onOpenReleasePage() {
+    if (window.pywebview && _pendingReleaseUrl) {
+      window.pywebview.api.open_release_page(_pendingReleaseUrl);
     }
   }
   function onDismissUpdate() {
@@ -806,16 +849,43 @@ _HTML = r"""
   // --- Appelées depuis Python (voir webview_ui.py, _eval_js) ---
   window.showUpdateNotice = function(info) {
     // info : voir update_checker.check_for_update -- {"available": true,
-    // "latest_version", "release_url", "download_url"}. Bandeau persistant
-    // (pas de fermeture automatique) mais dismissable -- pas un blocage
-    // dur de l'appli (voir main.py, open_release_page : aucun
-    // téléchargement/remplacement automatique de l'exe, l'utilisateur
-    // garde la main).
+    // "latest_version", "release_url", "asset_url"}. Bandeau persistant
+    // (pas de fermeture automatique) mais dismissable AVANT de cliquer
+    // "Mettre à jour" -- une fois l'auto-update lancée (voir onStartUpdate/
+    // main.py _apply_update_async), plus de repli en arrière tant que ce
+    // n'est pas fini (le process va se terminer de toute façon).
     if (!info || !info.available) return;
-    _pendingUpdateReleaseUrl = info.download_url || info.release_url;
+    _pendingReleaseUrl = info.release_url;
+    const banner = document.getElementById("updateBanner");
+    banner.classList.remove("updating");
+    document.getElementById("updateBannerApply").style.display = "";
+    document.getElementById("updateBannerManualLink").style.display = "none";
+    document.getElementById("updateBannerDismiss").style.display = "";
     document.getElementById("updateBannerText").textContent =
       "Nouvelle version disponible : " + (info.latest_version || "?");
-    document.getElementById("updateBanner").style.display = "flex";
+    banner.style.display = "flex";
+  };
+  window.showUpdateProgress = function(text) {
+    const banner = document.getElementById("updateBanner");
+    banner.classList.add("updating");
+    document.getElementById("updateBannerApply").style.display = "none";
+    document.getElementById("updateBannerManualLink").style.display = "none";
+    document.getElementById("updateBannerDismiss").style.display = "none";
+    document.getElementById("updateBannerText").textContent = text;
+    banner.style.display = "flex";
+  };
+  window.showUpdateError = function(text, releaseUrl) {
+    _pendingReleaseUrl = releaseUrl;
+    const banner = document.getElementById("updateBanner");
+    banner.classList.remove("updating");
+    document.getElementById("updateBannerText").textContent = text;
+    document.getElementById("updateBannerApply").style.display = "none";
+    document.getElementById("updateBannerManualLink").style.display = releaseUrl ? "" : "none";
+    document.getElementById("updateBannerDismiss").style.display = "";
+    banner.style.display = "flex";
+  };
+  window.setVersion = function(versionStr) {
+    document.getElementById("versionBadge").textContent = versionStr ? ("v. " + versionStr) : "";
   };
   window.renderReport = function(report) {
     lastReport = report;
