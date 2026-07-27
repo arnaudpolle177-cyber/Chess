@@ -1,12 +1,18 @@
 name: Build Coach d'échecs (Windows .exe)
 
 # Se déclenche :
-# - automatiquement quand tu pousses un tag de version (ex: v1.0)
+# - automatiquement quand tu pousses un tag de version (ex: v1.0, V1.LCO,
+#   V2LCO... -- les 2 motifs "v*"/"V*" sont nécessaires car les tags sur
+#   push sont sensibles à la casse : sans "V*", tout tag commençant par une
+#   majuscule (le style utilisé jusqu'ici pour les releases "VxLCO") ne
+#   déclenchait JAMAIS le build automatiquement -- seul le bouton manuel
+#   ci-dessous fonctionnait pour ces tags-là, découvert en pratique.
 # - à la main depuis l'onglet "Actions" de GitHub (bouton "Run workflow")
 on:
   push:
     tags:
       - "v*"
+      - "V*"
   workflow_dispatch: {}
 
 permissions:
