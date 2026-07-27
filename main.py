@@ -80,6 +80,7 @@ class BrowserBridgeApp:
             on_refresh_click=self.trigger_refresh,
             on_toggle_side_click=self.toggle_side,
             on_elo_change=self.change_elo_tier,
+            on_show_report_click=self.show_game_report,
         )
         self.server = None
         self.state = None
@@ -120,6 +121,15 @@ class BrowserBridgeApp:
         if self.state.last_fen is not None:
             threading.Thread(target=self.state.refresh_last_profiles, daemon=True).start()
 
+    def show_game_report(self):
+        # Bouton manuel "Voir le rapport" (voir webview_ui.py) -- secours
+        # si la détection auto (scraping DOM game-over côté userscript, ou
+        # fin de partie déductible du FEN) n'a pas déclenché le rapport.
+        # Dans un thread séparé : appelé directement depuis le pont JS de
+        # la fenêtre coach, ne doit pas la geler pendant le calcul.
+        if self.state:
+            threading.Thread(target=self.state.finalize_game_report, daemon=True).start()
+
     def run(self):
         from web_bridge import start_bridge_server
         self.server, self.state = start_bridge_server(
@@ -127,6 +137,7 @@ class BrowserBridgeApp:
             explain_mode=self.explain_mode,
             on_update=self._on_update,
             on_profile_update=self._on_profile_update,
+            on_game_over=self._on_game_over,
             port=self.port,
             threads=self.threads,
             hash_mb=self.hash_mb,
@@ -153,6 +164,9 @@ class BrowserBridgeApp:
         # Une entrée par profil "humain" (voir human_profile.py),
         # indépendante des autres.
         self.overlay.update_profile(profile_id, entry)
+
+    def _on_game_over(self, report):
+        self.overlay.show_report(report)
 
 
 def resolve_stockfish_path(cli_path):

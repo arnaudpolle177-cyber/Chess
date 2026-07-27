@@ -1,0 +1,261 @@
+<UciProtocol (pid=20512)>: stderr >>        _
+<UciProtocol (pid=20512)>: stderr >> |   _ | |
+<UciProtocol (pid=20512)>: stderr >> |_ |_ |_| v0.32.1 built Nov 23 2025
+<UciProtocol (pid=20512)>: stderr >> Search algorithm: classic
+⚠ Impossible de configurer Hash sur ce moteur : engine does not support option Hash (available options: LogFile, ConfigFile, Ponder, SyzygyPath, Threads, MinibatchSize, CPuct, CPuctBase, CPuctFactor, TwoFoldDraws, VerboseMoveStats, FpuStrategy, FpuValue, CacheHistoryLength, MaxCollisionEvents, MaxCollisionVisits, MaxCollisionVisitsScalingStart, MaxCollisionVisitsScalingEnd, MaxCollisionVisitsScalingPower, OutOfOrderEval, MaxOutOfOrderEvalsFactor, StickyEndgames, SyzygyFastPlay, MultiPV, PerPVCounters, ScoreType, MovesLeftMaxEffect, MovesLeftThreshold, MovesLeftSlope, MovesLeftConstantFactor, MovesLeftScaledFactor, MovesLeftQuadraticFactor, MaxConcurrentSearchers, DrawScore, ContemptMode, Contempt, WDLCalibrationElo, WDLEvalObjectivity, WDLDrawRateReference, NodesPerSecondLimit, TaskWorkers, MinimumProcessingWork, MinimumPickingWork, MinimumRemainingPickingWork, MinimumPerTaskProcessing, IdlingMinimumWork, ThreadIdlingThreshold, UCI_Opponent, UCI_RatingAdv, SearchSpinBackoff, MaxPrefetch, SolidTreeThreshold, SmartPruningFactor, SmartPruningMinimumBatches, RamLimitMb, MoveOverheadMs, TimeManager, UCI_Chess960, UCI_ShowWDL, UCI_ShowMovesLeft, PolicyTemperature, HistoryFill, WeightsFile, Backend, BackendOptions, NNCacheSize)
+ℹ lc0 démarré : C:\Users\Triv\Desktop\Vivado\test\Chess-main\engines\lc0\gpu\lc0.exe
+📖 Livre d'ouvertures chargé : C:\Users\Triv\Desktop\Vivado\test\Chess-main\opening_book.bin
+📖 Livre d'ouvertures chargé : C:\Users\Triv\Desktop\Vivado\test\Chess-main\opening_book_2.bin
+📖 Livre d'ouvertures chargé : C:\Users\Triv\Desktop\Vivado\test\Chess-main\opening_book_3.bin
+📖 Livre d'ouvertures chargé : C:\Users\Triv\Desktop\Vivado\test\Chess-main\opening_book_4.bin
+📖 Livre d'ouvertures chargé : C:\Users\Triv\Desktop\Vivado\test\Chess-main\opening_book_5.bin
+📚 Base d'ouvertures chargée : 3643 entrées (C:\Users\Triv\Desktop\Vivado\test\Chess-main\eco_openings.json)
+🗺 Couverture théorie ECO : 7484 positions uniques (toutes profondeurs).
+🌉 Pont navigateur démarré : http://127.0.0.1:8765/fen
+   Colle chess_coach_bridge.user.js dans Tampermonkey pour connecter ton site.
+[engine-timing] main:2 wait=0ms hold=364ms
+<UciProtocol (pid=20512)>: stderr >> Loading weights file from: C:\Users\Triv\Desktop\Vivado\test\Chess-main\engines\lc0\weights.pb.gz
+[engine-timing] scenario:2 wait=0ms hold=324ms
+[engine-timing] lc0:2 wait=0ms hold=2977ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] lc0:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=93ms
+[engine-timing] scenario:2 wait=77ms hold=62ms
+[engine-timing] opponent wait=0ms hold=42ms
+[engine-timing] main:2 wait=0ms hold=40ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=106ms
+[engine-timing] scenario:2 wait=89ms hold=50ms
+[engine-timing] lc0:2 wait=0ms hold=1600ms
+[engine-timing] scenario:2 wait=0ms hold=338ms
+[engine-timing] opponent wait=0ms hold=12ms
+[engine-timing] main:2 wait=0ms hold=38ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=55ms
+[engine-timing] scenario:2 wait=37ms hold=65ms
+[engine-timing] lc0:2 wait=0ms hold=949ms
+[engine-timing] scenario:2 wait=0ms hold=55ms
+[engine-timing] opponent wait=0ms hold=21ms
+[engine-timing] main:2 wait=0ms hold=68ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=295ms
+[engine-timing] scenario:2 wait=273ms hold=87ms
+[engine-timing] lc0:2 wait=0ms hold=1008ms
+[engine-timing] scenario:2 wait=0ms hold=52ms
+[engine-timing] opponent wait=0ms hold=24ms
+[engine-timing] main:2 wait=0ms hold=233ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=401ms
+[engine-timing] scenario:2 wait=385ms hold=80ms
+[engine-timing] lc0:2 wait=0ms hold=1587ms
+[engine-timing] scenario:2 wait=0ms hold=58ms
+[engine-timing] opponent wait=0ms hold=22ms
+[engine-timing] main:2 wait=0ms hold=51ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=82ms
+[engine-timing] scenario:2 wait=64ms hold=53ms
+[engine-timing] lc0:2 wait=0ms hold=1728ms
+[engine-timing] scenario:2 wait=0ms hold=187ms
+[engine-timing] opponent wait=0ms hold=30ms
+[engine-timing] main:2 wait=0ms hold=160ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=275ms
+[engine-timing] scenario:2 wait=256ms hold=101ms
+[engine-timing] lc0:2 wait=0ms hold=1300ms
+[engine-timing] scenario:2 wait=0ms hold=43ms
+[engine-timing] opponent wait=0ms hold=20ms
+[engine-timing] main:2 wait=0ms hold=219ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=443ms
+[engine-timing] scenario:2 wait=426ms hold=106ms
+[engine-timing] lc0:2 wait=0ms hold=1499ms
+[engine-timing] scenario:2 wait=0ms hold=46ms
+[engine-timing] opponent wait=0ms hold=24ms
+[engine-timing] main:2 wait=0ms hold=131ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=136ms
+[engine-timing] scenario:2 wait=118ms hold=71ms
+[engine-timing] lc0:2 wait=0ms hold=1163ms
+[engine-timing] opponent wait=0ms hold=14ms
+[engine-timing] scenario:2 wait=0ms hold=446ms
+[engine-timing] main:2 wait=0ms hold=166ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=53ms
+[engine-timing] scenario:2 wait=34ms hold=294ms
+[engine-timing] lc0:2 wait=0ms hold=1050ms
+[engine-timing] opponent wait=0ms hold=25ms
+[engine-timing] main:2 wait=0ms hold=54ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=103ms
+[engine-timing] scenario:2 wait=86ms hold=45ms
+[engine-timing] lc0:2 wait=0ms hold=1176ms
+[engine-timing] opponent wait=0ms hold=20ms
+[engine-timing] main:2 wait=0ms hold=44ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=60ms
+[engine-timing] scenario:2 wait=39ms hold=122ms
+[engine-timing] lc0:2 wait=0ms hold=1129ms
+[engine-timing] opponent wait=0ms hold=23ms
+[engine-timing] main:2 wait=0ms hold=66ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=91ms
+[engine-timing] scenario:2 wait=70ms hold=98ms
+[engine-timing] opponent wait=0ms hold=33ms
+[engine-timing] lc0:2 wait=0ms hold=1720ms
+[engine-timing] main:2 wait=0ms hold=24ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=97ms
+[engine-timing] scenario:2 wait=80ms hold=55ms
+[engine-timing] lc0:2 wait=0ms hold=635ms
+[engine-timing] scenario:2 wait=0ms hold=38ms
+[engine-timing] opponent wait=0ms hold=23ms
+[engine-timing] main:2 wait=0ms hold=52ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=53ms
+[engine-timing] scenario:2 wait=34ms hold=43ms
+[engine-timing] opponent wait=0ms hold=33ms
+[engine-timing] lc0:2 wait=0ms hold=1797ms
+[engine-timing] main:2 wait=0ms hold=102ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=109ms
+[engine-timing] scenario:2 wait=93ms hold=67ms
+[engine-timing] lc0:2 wait=0ms hold=965ms
+[engine-timing] scenario:2 wait=0ms hold=39ms
+[engine-timing] opponent wait=0ms hold=23ms
+[engine-timing] main:2 wait=0ms hold=56ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=217ms
+[engine-timing] scenario:2 wait=198ms hold=79ms
+[engine-timing] lc0:2 wait=0ms hold=1022ms
+[engine-timing] scenario:2 wait=0ms hold=61ms
+[engine-timing] opponent wait=0ms hold=25ms
+[engine-timing] main:2 wait=0ms hold=35ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=142ms
+[engine-timing] scenario:2 wait=124ms hold=52ms
+[engine-timing] lc0:2 wait=0ms hold=1710ms
+[engine-timing] opponent wait=0ms hold=22ms
+[engine-timing] main:2 wait=0ms hold=54ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=75ms
+[engine-timing] scenario:2 wait=56ms hold=81ms
+[engine-timing] lc0:2 wait=0ms hold=1493ms
+[engine-timing] opponent wait=0ms hold=21ms
+[engine-timing] main:2 wait=0ms hold=37ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=154ms
+[engine-timing] scenario:2 wait=137ms hold=83ms
+[engine-timing] lc0:2 wait=0ms hold=1728ms
+[engine-timing] opponent wait=0ms hold=13ms
+[engine-timing] main:2 wait=0ms hold=50ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=97ms
+[engine-timing] scenario:2 wait=78ms hold=70ms
+[engine-timing] main:2 wait=0ms hold=121ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=321ms
+[engine-timing] lc0:2 wait=0ms hold=1675ms
+<UciProtocol (pid=20512)>: Unexpected engine output: 'error Bad fen string (pawn on back rank): 6P1/8/6K1/2k5/6P1/5P2/8/8 w - - 0 1'
+Exception parsing pv from info: 'depth 5 seldepth 7 time 5 nodes 41958 score cp 238 wdl 940 3 57 tbhits 0 pv g7g8q c5d4 g6f5 d4e3 g4g5 e3f3 g5g6', position at root: 6P1/8/6K1/2k5/6P1/5P2/8/8 w - - 0 1
+Exception parsing pv from info: 'depth 6 seldepth 8 time 7 nodes 42045 score cp 238 wdl 940 3 57 nps 85000 tbhits 0 pv g7g8q c5d4 g6f5 d4e3 g4g5 e3f3 g5g6', position at root: 6P1/8/6K1/2k5/6P1/5P2/8/8 w - - 0 1
+Exception parsing pv from info: 'depth 6 seldepth 9 time 54 nodes 43354 score cp 238 wdl 940 3 57 nps 30183 tbhits 0 pv g7g8q c5d4 g6f5 d4e3 g4g5 e3f3 g5g6', position at root: 6P1/8/6K1/2k5/6P1/5P2/8/8 w - - 0 1
+[engine-timing] scenario:2 wait=302ms hold=145ms
+Exception parsing pv from info: 'depth 6 seldepth 10 time 328 nodes 50854 score cp 237 wdl 940 3 57 nps 27798 tbhits 0 pv g7g8q c5d4 g6f5 d4e3 g4g5 e3f3 g5g6', position at root: 6P1/8/6K1/2k5/6P1/5P2/8/8 w - - 0 1
+[engine-timing] opponent wait=0ms hold=22ms
+[engine-timing] main:2 wait=0ms hold=47ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=116ms
+[engine-timing] scenario:2 wait=93ms hold=81ms
+Exception parsing pv from info: 'depth 6 seldepth 11 time 1446 nodes 79011 score cp 233 wdl 939 3 58 nps 25770 tbhits 0 pv g7g8q c5d4 g6f5 d4e3 g4g5 e3d4 g5g6 d4c3', position at root: 6P1/8/6K1/2k5/6P1/5P2/8/8 w - - 0 1
+Exception parsing pv from info: 'depth 6 seldepth 12 time 1626 nodes 84267 score cp 232 wdl 938 4 58 nps 26151 tbhits 0 pv g7g8q c5d4 g6f5 d4e3 g4g5 e3d4 g5g6 d4c3', position at root: 6P1/8/6K1/2k5/6P1/5P2/8/8 w - - 0 1
+Exception parsing pv from info: 'depth 6 seldepth 12 time 1679 nodes 85721 score cp 231 wdl 938 4 58 nps 26192 tbhits 0 pv g7g8q c5d4 g6f5 d4e3 g4g5 e3d4 g5g6 d4c3', position at root: 6P1/8/6K1/2k5/6P1/5P2/8/8 w - - 0 1
+UciAnalysisCommand failed after returning preliminary result (<Future finished result=<chess.engine...00000057B60D0>>)
+protocol: <UciProtocol (pid=20512)>
+transport: <_WindowsSubprocessTransport pid=20512 running stdin=<_ProactorWritePipeTransport fd=760 read=<_OverlappedFuture pending cb=[_ProactorWritePipeTransport._pipe_closed()]>> stdout=<_ProactorReadPipeTransport fd=764 read=<_OverlappedFuture pending cb=[_ProactorReadPipeTransport._loop_reading()]>> stderr=<_ProactorReadPipeTransport fd=772 read=<_OverlappedFuture pending cb=[_ProactorReadPipeTransport._loop_reading()]>>>
+Traceback (most recent call last):
+  File "C:\Users\Triv\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\chess\engine.py", line 1900, in _parse_uci_bestmove
+    move = board.push_uci(tokens[0].lower())
+  File "C:\Users\Triv\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\chess\__init__.py", line 3284, in push_uci
+    move = self.parse_uci(uci)
+  File "C:\Users\Triv\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\chess\__init__.py", line 3267, in parse_uci
+    raise IllegalMoveError(f"illegal uci: {uci!r} in {self.fen()}")
+chess.IllegalMoveError: illegal uci: 'g7g8q' in 6P1/8/6K1/2k5/6P1/5P2/8/8 w - - 0 1
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\Triv\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\chess\engine.py", line 1294, in _line_received
+    self.line_received(line)
+    ~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\Triv\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\chess\engine.py", line 1738, in line_received
+    self._bestmove(remaining)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "C:\Users\Triv\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\chess\engine.py", line 1761, in _bestmove
+    best = _parse_uci_bestmove(self.engine.board, arg)
+  File "C:\Users\Triv\AppData\Local\Python\pythoncore-3.14-64\Lib\site-packages\chess\engine.py", line 1902, in _parse_uci_bestmove
+    raise EngineError(err)
+chess.engine.EngineError: illegal uci: 'g7g8q' in 6P1/8/6K1/2k5/6P1/5P2/8/8 w - - 0 1
+[engine-timing] opponent wait=0ms hold=13ms
+[engine-timing] main:2 wait=0ms hold=34ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=70ms
+[engine-timing] scenario:2 wait=54ms hold=50ms
+[engine-timing] opponent wait=0ms hold=21ms
+[engine-timing] main:2 wait=0ms hold=28ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=53ms
+[engine-timing] scenario:2 wait=34ms hold=52ms
+[engine-timing] opponent wait=0ms hold=21ms
+[engine-timing] main:2 wait=0ms hold=42ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=60ms
+[engine-timing] scenario:2 wait=41ms hold=40ms
+[engine-timing] opponent wait=0ms hold=16ms
+⚠ lc0 indisponible () -- "classical" repassera sur Stockfish à partir du prochain coup.
+[engine-timing] lc0:2 wait=300ms hold=12009ms
+[engine-timing] lc0:2 wait=10971ms hold=0ms
+[engine-timing] lc0:2 wait=8397ms hold=0ms
+[engine-timing] lc0:2 wait=5109ms hold=0ms[engine-timing] lc0:2 wait=1892ms hold=0ms
+
+[engine-timing] main:2 wait=0ms hold=33ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=61ms
+[engine-timing] scenario:2 wait=40ms hold=58ms
+[engine-timing] scenario:2 wait=76ms hold=48ms
+[engine-timing] opponent wait=0ms hold=20ms
+[engine-timing] main:2 wait=0ms hold=29ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=52ms
+[engine-timing] scenario:2 wait=32ms hold=43ms
+[engine-timing] scenario:2 wait=55ms hold=50ms
+[engine-timing] opponent wait=0ms hold=14ms
+[engine-timing] main:2 wait=0ms hold=21ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=58ms
+[engine-timing] scenario:2 wait=39ms hold=42ms
+[engine-timing] scenario:2 wait=60ms hold=42ms
+[engine-timing] opponent wait=0ms hold=18ms
+[engine-timing] main:2 wait=0ms hold=23ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=51ms
+[engine-timing] scenario:2 wait=31ms hold=32ms
+[engine-timing] scenario:2 wait=43ms hold=47ms
+[engine-timing] opponent wait=0ms hold=13ms
+[engine-timing] main:2 wait=0ms hold=20ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=40ms
+[engine-timing] scenario:2 wait=23ms hold=26ms
+[engine-timing] scenario:2 wait=31ms hold=16ms
+[engine-timing] opponent wait=0ms hold=10ms
+[engine-timing] main:2 wait=0ms hold=12ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=9ms
+[engine-timing] main:2 wait=0ms hold=0ms
+[engine-timing] scenario:2 wait=0ms hold=9ms
+[engine-timing] opponent wait=0ms hold=0ms

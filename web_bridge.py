@@ -48,6 +48,7 @@ import narration_v2
 import opening_identity
 import variation_narrator
 import lichess_explorer
+import game_report
 
 DEFAULT_PORT = 8765
 # Fallback réseau (Lichess Opening Explorer, voir lichess_explorer.py) :
@@ -118,19 +119,21 @@ class BridgeState:
     """État partagé entre le serveur HTTP et le reste du programme."""
 
     def __init__(self, stockfish_path, explain_mode="local", on_update=None,
-                 on_profile_update=None, threads=None,
+                 on_profile_update=None, on_game_over=None, threads=None,
                  hash_mb=1024, lc0_path=None):
         self.stockfish_path = stockfish_path
         if threads is None:
             # ChessCoachEngine réserverait cpu_count-1 par défaut (1 coeur
-            # pour "le reste du programme") -- mais scenario_engine
-            # ci-dessous tourne maintenant EN PARALLÈLE (plus derrière le
-            # même verrou) avec son propre thread. Sans ce -2, les deux
-            # moteurs actifs en même temps saturent TOUS les coeurs, ce qui
-            # peut ralentir le calcul de `main` lui-même par contention CPU
-            # -- pas juste l'attente sur le verrou (voir [engine-timing]).
+            # pour "le reste du programme") -- mais scenario_engine ET
+            # lc0_engine (voir plus bas) tournent maintenant EN PARALLÈLE
+            # (plus derrière le même verrou), chacun avec son propre thread.
+            # Sans ce -3, les 3 moteurs actifs en même temps saturent TOUS
+            # les coeurs, ce qui ralentit `main` lui-même par contention CPU
+            # -- pas juste l'attente sur le verrou (voir [engine-timing] :
+            # régression observée après l'ajout de lc0, qui n'était pas
+            # compté ici -- seuls main+scenario l'étaient).
             cpu_count = os.cpu_count() or 4
-            threads = max(1, cpu_count - 2)
+            threads = max(1, cpu_count - 3)
         self.threads = threads
         self.hash_mb = hash_mb
         self.engine = ChessCoachEngine(stockfish_path, threads=threads, hash_mb=hash_mb)
@@ -176,6 +179,7 @@ class BridgeState:
         self.explain_mode = explain_mode
         self.on_update = on_update            # callback(lines, explanation) -> messages ponctuels (skip/erreur/fin de partie)
         self.on_profile_update = on_profile_update  # callback(profile_id, entry) -> coach "humain"
+        self.on_game_over = on_game_over      # callback(report) -> voir finalize_game_report/game_report.build_report
         # self.lock protège UNIQUEMENT les petites variables d'état
         # ci-dessous (jamais tenu pendant le calcul Stockfish ou l'écriture
         # réseau, contrairement à avant).
@@ -193,6 +197,22 @@ class BridgeState:
         # position de départ (voir _update_move_history ci-dessous).
         self._move_history = []
         self._move_history_board = None  # dernière position connue de l'historique (chess.Board)
+        self._move_history_fen = None    # fen exact correspondant à _move_history_board
+        # Historique complet par ply (voir game_report.py) : un dict par
+        # coup déjà joué, complété en 2 temps -- eval_before_cp/
+        # best_move_uci/is_book connus immédiatement (voir
+        # _record_pending_ply_eval), eval_after_cp rempli en backfill dès
+        # que le ply SUIVANT est détecté (même position, vue de l'autre
+        # côté -- voir _update_move_history). Reset aux mêmes points que
+        # _move_history (nouvelle partie).
+        self._ply_log = []
+        # Dernière position analysée en profondeur (mon tour, voir
+        # _update_eval_tracking_and_theme) OU en léger (tour adverse, voir
+        # _track_opponent_eval) -- consommée par _update_move_history dès
+        # qu'un nouveau coup est détecté depuis cette position. Écrasée à
+        # chaque nouvelle position analysée, comme self.last_fen.
+        # {fen, best_move_uci, cp, is_book} | None.
+        self._pending_ply_eval = None
         # Historique GLISSANT des évals "à mon tour" (voir theme_detector.py,
         # INITIATIVE_SHIFT) -- toujours du point de vue de my_side, jamais
         # remis à zéro par position_seq (contrairement à _opponent_turn_eval,
@@ -353,8 +373,30 @@ class BridgeState:
             if result.get("candidates"):
                 top = result["candidates"][0]
                 self._opponent_turn_eval = (position_seq, top["cp"], top.get("move_san"))
+                # ponytail: is_book toujours False ici -- cette éval légère
+                # interroge directement Stockfish (pas opening_book.lookup
+                # d'abord, contrairement à _run_candidates), donc un coup
+                # adverse "de livre" ne sera pas tagué Book dans le rapport
+                # de fin de partie (voir game_report.py). Acceptable : ça ne
+                # concerne que la classification rétrospective, pas
+                # l'affichage en direct.
+                self._record_pending_ply_eval(fen, top.get("move_uci"), top.get("cp"))
         except Exception:
             pass  # cosmétique (juste pour la narration) -- jamais bloquant
+
+    def _record_pending_ply_eval(self, fen, best_move_uci, cp, is_book=False, second_best_cp=None):
+        """
+        Mémorise l'éval/meilleur coup de `fen` juste AVANT qu'un coup y soit
+        joué -- consommée par _update_move_history pour remplir
+        eval_before_cp/best_move_uci/is_book/second_best_cp du ply
+        correspondant dans _ply_log (voir game_report.py -- second_best_cp
+        sert à la détection heuristique "Great" : coup optimal ET unique).
+        Best-effort, jamais bloquant.
+        """
+        self._pending_ply_eval = {
+            "fen": fen, "best_move_uci": best_move_uci, "cp": cp, "is_book": is_book,
+            "second_best_cp": second_best_cp,
+        }
 
     def _update_eval_tracking_and_theme(self, fen, board, candidates, current_seq):
         """
@@ -381,7 +423,15 @@ class BridgeState:
         try:
             if not candidates:
                 return
-            current_eval = candidates[0]["cp"]  # point de vue de mon camp
+            top = candidates[0]
+            # cp est None précisément pour un coup issu du livre d'ouvertures
+            # (voir opening_book.candidates_from_book_entries) -- signal
+            # fiable pour is_book, pas besoin d'un second lookup ici.
+            second_best_cp = candidates[1]["cp"] if len(candidates) > 1 else None
+            self._record_pending_ply_eval(
+                fen, top.get("move_uci"), top.get("cp"), is_book=(top.get("cp") is None),
+                second_best_cp=second_best_cp)
+            current_eval = top["cp"]  # point de vue de mon camp
             if current_eval is None:
                 # Coup de livre (voir opening_book.py) -- pas de vraie éval
                 # ici, donc pas de swing_cp fiable à calculer non plus. On
@@ -704,6 +754,32 @@ class BridgeState:
                 return fen != self.last_fen
         return _is_stale
 
+    def finalize_game_report(self):
+        """
+        Construit le rapport de fin de partie (voir game_report.py) à
+        partir de ce qui a déjà été loggé dans _ply_log, et le pousse à
+        l'UI via on_game_over. Appelée automatiquement dès qu'une fin de
+        partie DÉDUCTIBLE DU FEN est détectée (échec et mat/pat/matériel
+        insuffisant, voir handle_single_profile), ET manuellement (endpoint
+        /game_over : résignation/temps/nulle par accord détectés côté
+        userscript, ou bouton "Voir le rapport" de la fenêtre coach).
+        Recalcul cheap (O(n) sur _ply_log déjà peuplé, voir game_report.
+        build_report) -- appelable plusieurs fois sans souci si plusieurs
+        chemins se déclenchent pour la même fin de partie.
+        """
+        with self.lock:
+            ply_log_snapshot = list(self._ply_log)
+            my_side = self.my_side
+        if not ply_log_snapshot:
+            return
+        try:
+            report = game_report.build_report(ply_log_snapshot, my_side)
+        except Exception as e:
+            print(f"⚠ Rapport de fin de partie indisponible : {e}")
+            return
+        if self.on_game_over:
+            self.on_game_over(report)
+
     def _update_move_history(self, fen, board):
         """
         Déduit le coup joué entre la dernière position CONNUE de
@@ -736,6 +812,9 @@ class BridgeState:
                     if self._move_history:
                         self._move_history = []
                     self._move_history_board = None
+                    self._move_history_fen = None
+                    self._ply_log = []
+                    self._pending_ply_eval = None
                     self._initiative_history.clear()
                     self._initiative_last_seq = None  # cohérent avec le clear (voir set_my_side)
                     return
@@ -746,15 +825,49 @@ class BridgeState:
                     # initialise juste le point de départ, sans coup à
                     # déduire encore.
                     self._move_history_board = board.copy()
+                    self._move_history_fen = fen
                     return
 
                 old_board = self._move_history_board
+                fen_before = self._move_history_fen
                 for legal_move in old_board.legal_moves:
                     test_board = old_board.copy()
                     test_board.push(legal_move)
                     if test_board.board_fen() == board_part_new:
-                        self._move_history.append(old_board.san(legal_move))
+                        san = old_board.san(legal_move)
+                        self._move_history.append(san)
+
+                        # --- _ply_log (voir game_report.py) ---
+                        entry = {
+                            "ply": len(self._ply_log),
+                            "side": "w" if old_board.turn else "b",
+                            "san": san,
+                            "fen_before": fen_before,
+                            "fen_after": fen,
+                            "played_move_uci": legal_move.uci(),
+                            "best_move_uci": None,
+                            "eval_before_cp": None,
+                            "eval_after_cp": None,
+                            "is_book": False,
+                            "second_best_cp": None,
+                        }
+                        pending = self._pending_ply_eval
+                        if pending is not None and pending["fen"] == fen_before:
+                            entry["best_move_uci"] = pending["best_move_uci"]
+                            entry["eval_before_cp"] = pending["cp"]
+                            entry["is_book"] = pending["is_book"]
+                            entry["second_best_cp"] = pending.get("second_best_cp")
+                        # Backfill du ply précédent : sa position "après" est
+                        # CETTE position (fen_before), mais vue du point de
+                        # vue de l'autre camp (celui qui vient de jouer,
+                        # pas celui qui va jouer) -> signe inversé.
+                        if (self._ply_log and self._ply_log[-1]["eval_after_cp"] is None
+                                and entry["eval_before_cp"] is not None):
+                            self._ply_log[-1]["eval_after_cp"] = -entry["eval_before_cp"]
+                        self._ply_log.append(entry)
+
                         self._move_history_board = test_board
+                        self._move_history_fen = fen
                         return
 
                 # Aucun coup légal ne mène à cette position --
@@ -879,8 +992,10 @@ class BridgeState:
             return {"skip": True, "profile": profile_id}
 
         if board.is_game_over():
-            if is_new_position and self.on_update:
-                self.on_update(None, f"Partie terminée : {board.result()}")
+            if is_new_position:
+                if self.on_update:
+                    self.on_update(None, f"Partie terminée : {board.result()}")
+                self.finalize_game_report()
             return {"game_over": True, "result": board.result(), "profile": profile_id}
 
         tier = human_profile.ELO_TIERS[elo_tier_id]
@@ -946,9 +1061,22 @@ class BridgeState:
                     # la prochaine requête "classical" retombera proprement
                     # sur Stockfish (self.lc0_engine devenu None).
                     try:
+                        # multipv=1 volontairement (pas tier.multipv comme
+                        # popular/creative) : avec les restrictions déjà
+                        # imposées à lc0 pour ce profil (Threads=1,
+                        # MinibatchSize réduit, voir _start_lc0_engine), lui
+                        # laisser choisir parmi plusieurs coups n'apportait
+                        # pas grand-chose d'utile -- juste le meilleur coup
+                        # qu'il trouve, sans quoi le style "classical" perd
+                        # trop de force avec ces restrictions.
+                        # enrich_if_few=False : sans ça, engine_analysis
+                        # relance automatiquement une analyse à multipv=6 dès
+                        # qu'il y a moins de 3 candidats uniques (voir
+                        # ChessCoachEngine.analyze_candidates) -- exactement
+                        # ce qu'on veut éviter ici.
                         result, brd = self.lc0_engine.analyze_candidates(
-                            fen, multipv=tier.multipv, movetime_s=LC0_MOVETIME_S,
-                            is_stale=self._make_is_stale(fen),
+                            fen, multipv=1, movetime_s=LC0_MOVETIME_S,
+                            is_stale=self._make_is_stale(fen), enrich_if_few=False,
                         )
                     except Exception as e:
                         print(f"⚠ lc0 indisponible ({e}) -- \"classical\" repassera sur Stockfish à partir du prochain coup.")
@@ -1221,6 +1349,17 @@ def _make_handler(state: BridgeState):
             self.end_headers()
 
         def do_POST(self):
+            if self.path == "/game_over":
+                # Signalé par le userscript (résignation/temps/nulle par
+                # accord -- voir chess_coach_bridge.user.js,
+                # detectGameOverModal) OU par le bouton manuel "Voir le
+                # rapport" côté fenêtre Python (voir webview_ui.py). Corps
+                # optionnel, rien à en extraire -- state.finalize_game_report
+                # construit le rapport à partir de ce qui a déjà été loggé.
+                state.finalize_game_report()
+                self._send_single(200, {"ok": True})
+                return
+
             if self.path != "/fen":
                 self.send_response(404)
                 self._cors_headers()
@@ -1291,8 +1430,8 @@ def _make_handler(state: BridgeState):
 
 
 def start_bridge_server(stockfish_path, explain_mode="local", on_update=None,
-                         on_profile_update=None, port=DEFAULT_PORT, threads=None, hash_mb=1024,
-                         lc0_path=None):
+                         on_profile_update=None, on_game_over=None, port=DEFAULT_PORT,
+                         threads=None, hash_mb=1024, lc0_path=None):
     """
     Démarre le serveur en tâche de fond (thread daemon) et retourne
     (server, state). Appelle state.close() pour bien fermer Stockfish
@@ -1300,7 +1439,7 @@ def start_bridge_server(stockfish_path, explain_mode="local", on_update=None,
     """
     state = BridgeState(
         stockfish_path, explain_mode=explain_mode, on_update=on_update,
-        on_profile_update=on_profile_update,
+        on_profile_update=on_profile_update, on_game_over=on_game_over,
         threads=threads, hash_mb=hash_mb, lc0_path=lc0_path,
     )
     handler_cls = _make_handler(state)
