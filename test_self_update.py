@@ -24,6 +24,10 @@ def check(cond, msg):
 def test_bat_script_contains_pid_wait_and_paths():
     bat = self_update._build_bat_script(1234, r"C:\extracted\CoachEchecs", r"C:\install\CoachEchecs", r"C:\install\CoachEchecs\CoachEchecs.exe")
     check('"PID eq 1234"' in bat, "le script attend la fin du PID donné")
+    check("coachechecs_update_log.txt" in bat, "le script journalise dans un fichier (diagnostic possible après coup)")
+    check('if exist "C:\\install\\CoachEchecs\\CoachEchecs.exe"' in bat,
+          "vérifie que l'exe existe avant de tenter de le relancer")
+    check("_tries" in bat, "boucle d'attente plafonnée, pas une attente infinie")
     check(r'"C:\extracted\CoachEchecs" "C:\install\CoachEchecs"' in bat, "robocopy copie du dossier extrait vers l'install")
     check(r'start "" "C:\install\CoachEchecs\CoachEchecs.exe"' in bat, "relance le bon exe")
     check("del \"%~f0\"" in bat, "le script se supprime lui-même à la fin")

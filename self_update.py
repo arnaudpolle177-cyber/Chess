@@ -30,15 +30,40 @@ import app_paths
 # (5 tentatives, 1s d'attente -- CoachEchecs.exe peut rester verrouillé
 # une fraction de seconde de plus après la fin du process, antivirus qui
 # scanne le nouveau binaire, etc.).
+#
+# Journalisé dans %TEMP%\\coachechecs_update_log.txt (PAS supprimé, seul le
+# script .bat l'est à la fin) : ce script tourne en tâche DÉTACHÉE, sans
+# fenêtre -- avant ce journal, un échec (copie ratée, exe introuvable après
+# coup) était totalement invisible, ni erreur ni trace nulle part. Boucle
+# d'attente plafonnée à 30s (pas une attente infinie) : si le process
+# Python ne s'est jamais vraiment terminé pour une raison quelconque, on
+# tente quand même la copie plutôt que de rester bloqué pour toujours.
 _BAT_TEMPLATE = """@echo off
+set "LOG=%TEMP%\\coachechecs_update_log.txt"
+echo ==== %date% %time% : debut mise a jour (attente PID {pid}) ==== > "%LOG%"
+set /a _tries=0
 :wait_loop
 tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL
 if not errorlevel 1 (
+    set /a _tries+=1
+    if %_tries% GEQ 30 (
+        echo [%time%] Abandon de l'attente apres 30s, le process semble toujours actif. >> "%LOG%"
+        goto do_copy
+    )
     timeout /t 1 /nobreak >nul
     goto wait_loop
 )
-robocopy "{src}" "{dst}" /E /IS /IT /R:5 /W:1 >NUL
-start "" "{exe}"
+:do_copy
+echo [%time%] Process termine, copie de "{src}" vers "{dst}"... >> "%LOG%"
+robocopy "{src}" "{dst}" /E /IS /IT /R:5 /W:1 >> "%LOG%" 2>&1
+echo [%time%] Code retour robocopy: %errorlevel% >> "%LOG%"
+if exist "{exe}" (
+    echo [%time%] Relance de "{exe}" >> "%LOG%"
+    start "" "{exe}"
+) else (
+    echo [%time%] ERREUR : "{exe}" introuvable apres la copie -- mise a jour incomplete. >> "%LOG%"
+)
+echo ==== %time% : fin du script ==== >> "%LOG%"
 del "%~f0"
 """
 
