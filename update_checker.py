@@ -73,7 +73,13 @@ def check_for_update(timeout_s=_TIMEOUT_S):
             "release_url": data.get("html_url"),
             "asset_url": asset_url,
         }
-    except Exception:
+    except Exception as e:
+        # Toujours best-effort (jamais bloquant, voir docstring), mais
+        # visible dans la console (console=True, voir coach.spec) --
+        # échec totalement silencieux avant ce print : un rate limit API
+        # GitHub (ou tout autre souci réseau) faisait disparaître la
+        # vérification sans aucune trace, impossible à diagnostiquer.
+        print(f"⚠ Vérification de mise à jour indisponible : {e}")
         return {"available": False}
 
 
