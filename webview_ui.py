@@ -161,12 +161,14 @@ def _build_report_payload(report):
 class _JsApi:
     """Méthodes appelables depuis le JS via window.pywebview.api.xxx()."""
 
-    def __init__(self, on_elo_change, on_toggle_side, on_refresh, on_show_report, on_request_scenario):
+    def __init__(self, on_elo_change, on_toggle_side, on_refresh, on_show_report, on_request_scenario,
+                 on_open_release_page):
         self._on_elo_change = on_elo_change
         self._on_toggle_side = on_toggle_side
         self._on_refresh = on_refresh
         self._on_show_report = on_show_report
         self._on_request_scenario = on_request_scenario
+        self._on_open_release_page = on_open_release_page
 
     def set_elo(self, tier_id):
         if self._on_elo_change:
@@ -192,13 +194,17 @@ class _JsApi:
         if self._on_request_scenario:
             self._on_request_scenario(profile_id)
 
+    def open_release_page(self, url):
+        if self._on_open_release_page:
+            self._on_open_release_page(url)
+
 
 class CoachWebview:
     def __init__(self, on_refresh_click=None, on_toggle_side_click=None, on_elo_change=None,
-                 on_show_report_click=None, on_request_scenario=None):
+                 on_show_report_click=None, on_request_scenario=None, on_open_release_page=None):
         self._window = None
         self._api = _JsApi(on_elo_change, on_toggle_side_click, on_refresh_click, on_show_report_click,
-                            on_request_scenario)
+                            on_request_scenario, on_open_release_page)
         self._ready = threading.Event()
 
     def _on_loaded(self):
@@ -256,6 +262,19 @@ class CoachWebview:
         payload = _build_report_payload(report)
         self._eval_js(f"window.renderReport({json.dumps(payload)})")
 
+    def show_update_notice(self, info):
+        """
+        info : voir update_checker.check_for_update -- {"available": True,
+        "latest_version", "release_url", "download_url"}. Appelée depuis un
+        thread de fond (voir main.py, _check_for_update_async) démarré
+        AVANT que webview.start() (bloquant) n'ait fini de créer la
+        fenêtre -- on attend qu'elle soit chargée (self._ready, posé par
+        _on_loaded) plutôt que d'appeler evaluate_js() dans le vide.
+        """
+        if not self._ready.wait(timeout=15):
+            return  # fenêtre jamais chargée (fermée entre-temps ?) -- best-effort, on abandonne
+        self._eval_js(f"window.showUpdateNotice({json.dumps(info)})")
+
 
 # ---------------------------------------------------------------------
 # Template HTML/CSS/JS -- aucune ressource externe (tout doit marcher
@@ -291,6 +310,20 @@ _HTML = r"""
     user-select: none;
   }
   #app { display: flex; flex-direction: column; height: 100%; padding: 16px; gap: 14px; }
+
+  /* --- bandeau mise à jour disponible --- */
+  #updateBanner {
+    display: flex; align-items: center; gap: 10px;
+    background: #45475a; border: 1px solid var(--warn); border-radius: 8px;
+    padding: 7px 10px; font-size: 12px; margin: -2px 0 -6px 0;
+  }
+  #updateBannerText { flex: 1; color: var(--text); }
+  #updateBannerDownload {
+    cursor: pointer; font-weight: 700; color: var(--warn); white-space: nowrap;
+  }
+  #updateBannerDownload:hover { text-decoration: underline; }
+  #updateBannerDismiss { cursor: pointer; color: var(--text-faint); font-size: 16px; line-height: 1; }
+  #updateBannerDismiss:hover { color: var(--text); }
 
   /* --- en-tête : niveau + camp --- */
   #header { display: flex; flex-direction: column; gap: 8px; }
@@ -400,6 +433,12 @@ _HTML = r"""
 <body>
 <div id="app">
 
+  <div id="updateBanner" style="display:none">
+    <span id="updateBannerText"></span>
+    <span id="updateBannerDownload" onclick="onDownloadUpdate()">Télécharger</span>
+    <span id="updateBannerDismiss" onclick="onDismissUpdate()" title="Plus tard">&times;</span>
+  </div>
+
   <div id="header">
     <div id="elo-row">
       <span id="elo-label">Niveau : 2300-2700 Elo</span>
@@ -497,6 +536,16 @@ _HTML = r"""
   }
   function onRequestReport() {
     if (window.pywebview) window.pywebview.api.request_report();
+  }
+
+  let _pendingUpdateReleaseUrl = null;
+  function onDownloadUpdate() {
+    if (window.pywebview && _pendingUpdateReleaseUrl) {
+      window.pywebview.api.open_release_page(_pendingUpdateReleaseUrl);
+    }
+  }
+  function onDismissUpdate() {
+    document.getElementById("updateBanner").style.display = "none";
   }
 
   function selectProfile(id) {
@@ -755,6 +804,19 @@ _HTML = r"""
   }
 
   // --- Appelées depuis Python (voir webview_ui.py, _eval_js) ---
+  window.showUpdateNotice = function(info) {
+    // info : voir update_checker.check_for_update -- {"available": true,
+    // "latest_version", "release_url", "download_url"}. Bandeau persistant
+    // (pas de fermeture automatique) mais dismissable -- pas un blocage
+    // dur de l'appli (voir main.py, open_release_page : aucun
+    // téléchargement/remplacement automatique de l'exe, l'utilisateur
+    // garde la main).
+    if (!info || !info.available) return;
+    _pendingUpdateReleaseUrl = info.download_url || info.release_url;
+    document.getElementById("updateBannerText").textContent =
+      "Nouvelle version disponible : " + (info.latest_version || "?");
+    document.getElementById("updateBanner").style.display = "flex";
+  };
   window.renderReport = function(report) {
     lastReport = report;
     document.getElementById("reportOverlay").style.display = "flex";

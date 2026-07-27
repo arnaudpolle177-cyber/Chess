@@ -62,6 +62,7 @@ _make_process_dpi_aware()
 
 from webview_ui import CoachWebview
 import app_paths
+import update_checker
 
 
 class BrowserBridgeApp:
@@ -82,6 +83,7 @@ class BrowserBridgeApp:
             on_elo_change=self.change_elo_tier,
             on_show_report_click=self.show_game_report,
             on_request_scenario=self.request_scenario,
+            on_open_release_page=self.open_release_page,
         )
         self.server = None
         self.state = None
@@ -139,6 +141,25 @@ class BrowserBridgeApp:
         if self.state:
             threading.Thread(target=self.state.finalize_game_report, daemon=True).start()
 
+    def open_release_page(self, url):
+        # Bouton "Télécharger la mise à jour" (voir update_checker.py /
+        # webview_ui.py show_update_notice) -- ouvre la page de Release
+        # GitHub dans le navigateur par défaut, ne télécharge/n'installe
+        # RIEN automatiquement (pas de remplacement de l'exe en cours
+        # d'exécution -- trop risqué en best-effort, l'utilisateur garde la
+        # main sur l'installation).
+        if url:
+            import webbrowser
+            webbrowser.open(url)
+
+    def _check_for_update_async(self):
+        # Best-effort total (voir update_checker.check_for_update) : hors
+        # ligne ou build dev (pas de version.txt) -> ne montre simplement
+        # rien, jamais bloquant.
+        info = update_checker.check_for_update()
+        if info.get("available"):
+            self.overlay.show_update_notice(info)
+
     def run(self):
         from web_bridge import start_bridge_server
         self.server, self.state = start_bridge_server(
@@ -156,6 +177,7 @@ class BrowserBridgeApp:
             f"En attente de ton site... vérifie que chess_coach_bridge.user.js "
             f"est bien activé dans Tampermonkey sur ta page de jeu (port {self.port})."
         )
+        threading.Thread(target=self._check_for_update_async, daemon=True).start()
         try:
             self.overlay.run()
         finally:

@@ -62,6 +62,16 @@ jobs:
           mkdir -p package/CoachEchecs
           cp dist/CoachEchecs.exe package/CoachEchecs/
           cp dist/stockfish.exe package/CoachEchecs/
+          # Version embarquée (voir version.py / update_checker.py) : le TAG
+          # GIT exact de cette release (ex: "V2LCO"), pour que le coach
+          # compilé puisse se comparer à la dernière Release GitHub au
+          # démarrage et prévenir l'utilisateur d'une mise à jour
+          # disponible. github.ref_name est le nom du tag pour un
+          # déclenchement par tag (push tags: v*) ; pour un lancement manuel
+          # (workflow_dispatch, pas de vrai tag) c'est le nom de la branche
+          # choisie -- suffisant pour un build de test, pas une vraie
+          # version publiée.
+          echo -n "${{ github.ref_name }}" > package/CoachEchecs/version.txt
           cp README_UTILISATEUR.md package/CoachEchecs/LISEZ-MOI.md
           # Base ECO locale (noms d'ouverture + pros_cons, voir
           # opening_identity.py) : committée au repo, donc copiée SANS
