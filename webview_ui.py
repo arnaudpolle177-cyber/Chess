@@ -23,16 +23,150 @@ Le pont Python <-> JS :
 import json
 import threading
 
+import chess
+import chess.svg
 import webview
+
+import game_report
+
+# Labels (voir game_report.py, ALL_LABELS) pour lesquels on pré-génère un
+# échiquier SVG cliquable (mode puzzle) -- se limite aux VRAIES erreurs,
+# pas à tous les coups (Book/Best/Excellent/Good ne sont pas des choses à
+# corriger).
+_PUZZLE_LABELS = {"Inaccuracy", "Mistake", "Miss", "Blunder"}
+# Taille fixe utilisée à la fois pour le rendu SVG et le mapping clic->case
+# côté JS (voir window.PUZZLE_SIZE) -- coordinates=False (pas de marge de
+# coordonnées autour du plateau) pour que ce mapping reste une simple
+# division entière, sans cas particulier.
+_PUZZLE_SVG_SIZE = 360
+_MISTAKE_ARROW_COLOR = "#e64553"
+
+
+def _played_move_arrow_svg(move, size):
+    """
+    Flèche fine dessinée à la main (chess.svg.Arrow n'expose pas de largeur
+    réglable -- sa tête est fixée à 0.75*taille_case, bien trop grosse ici).
+    Reproduit juste la formule de coordonnées de chess.svg.board (orientation
+    Blancs, coordinates=False -> board_offset=0, voir chess.svg source) pour
+    rester aligné avec les cases du plateau déjà généré.
+    """
+    square_size = size / 8
+    tail_file, tail_rank = chess.square_file(move.from_square), chess.square_rank(move.from_square)
+    head_file, head_rank = chess.square_file(move.to_square), chess.square_rank(move.to_square)
+    xtail = (tail_file + 0.5) * square_size
+    ytail = (7.5 - tail_rank) * square_size
+    xhead = (head_file + 0.5) * square_size
+    yhead = (7.5 - head_rank) * square_size
+    return (
+        '<defs><marker id="mistakeArrowHead" markerWidth="6" markerHeight="6" '
+        f'refX="4.2" refY="3" orient="auto"><polygon points="0 0, 6 3, 0 6" '
+        f'fill="{_MISTAKE_ARROW_COLOR}" /></marker></defs>'
+        f'<line x1="{xtail:.2f}" y1="{ytail:.2f}" x2="{xhead:.2f}" y2="{yhead:.2f}" '
+        f'stroke="{_MISTAKE_ARROW_COLOR}" stroke-width="3.5" stroke-linecap="round" '
+        'marker-end="url(#mistakeArrowHead)" />'
+    )
+
+
+_EVAL_CURVE_WIDTH = 280
+_EVAL_CURVE_HEIGHT = 40
+
+
+def _build_eval_curve_svg(points_cp):
+    """
+    Petit graphe de tendance (une polyligne, pas d'axes/labels -- juste la
+    silhouette) à partir de game_report.build_eval_curve, DÉJÀ du point de
+    vue de l'utilisateur (my_side, pas toujours Blancs -- voir
+    game_report.build_report) : convertit chaque point en win% (game_report.
+    win_percent, même formule que l'accuracy -- cohérent avec le reste du
+    rapport) puis en position Y (haut = TOI mieux, bas = l'adversaire mieux,
+    quel que soit ton camp). None si moins de 2 points (rien à tracer --
+    une partie d'un seul coup).
+    """
+    if not points_cp or len(points_cp) < 2:
+        return None
+    win_pcts = [game_report.win_percent(cp) for cp in points_cp]
+    n = len(win_pcts)
+    xs = [i * _EVAL_CURVE_WIDTH / (n - 1) for i in range(n)]
+    ys = [_EVAL_CURVE_HEIGHT - (wp / 100) * _EVAL_CURVE_HEIGHT for wp in win_pcts]
+    path = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
+    mid_y = _EVAL_CURVE_HEIGHT / 2
+    return (
+        f'<svg viewBox="0 0 {_EVAL_CURVE_WIDTH} {_EVAL_CURVE_HEIGHT}" '
+        f'width="{_EVAL_CURVE_WIDTH}" height="{_EVAL_CURVE_HEIGHT}" '
+        'xmlns="http://www.w3.org/2000/svg">'
+        f'<line x1="0" y1="{mid_y}" x2="{_EVAL_CURVE_WIDTH}" y2="{mid_y}" '
+        'stroke="#3a3a4d" stroke-width="1" stroke-dasharray="2,2" />'
+        f'<polyline points="{path}" fill="none" stroke="#89dceb" '
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />'
+        '</svg>'
+    )
+
+
+def _build_report_payload(report):
+    """
+    Convertit un rapport game_report.build_report(...) en JSON prêt pour
+    window.renderReport -- ajoute un rendu chess.svg PRÉ-GÉNÉRÉ pour chaque
+    coup cliquable (voir _PUZZLE_LABELS), pour ne pas avoir besoin d'un
+    aller-retour JS -> Python supplémentaire à l'ouverture d'un puzzle.
+    Orientation TOUJOURS du point de vue des Blancs (même pour les erreurs
+    des Noirs) -- plus simple pour l'utilisateur (un seul sens de lecture)
+    et pour le mapping clic->case côté JS (une seule formule, pas de cas
+    "camp adverse" à gérer).
+    """
+    payload = {}
+    for side in ("w", "b"):
+        data = report[side]
+        moves_payload = []
+        for m in data["moves"]:
+            item = {"ply": m.get("ply"), "san": m.get("san"), "label": m.get("label")}
+            if (m.get("label") in _PUZZLE_LABELS
+                    and m.get("fen_before") and m.get("best_move_uci")):
+                try:
+                    board = chess.Board(m["fen_before"])
+                    svg_kwargs = {"size": _PUZZLE_SVG_SIZE, "coordinates": False}
+                    # Coup RÉELLEMENT joué (celui à éviter) mis en évidence
+                    # directement sur le plateau -- surlignage standard
+                    # "dernier coup" (lastmove) + flèche ROUGE distincte de
+                    # toute couleur déjà utilisée ailleurs dans l'app (bleu/
+                    # rose/blanc pour les profils), pour qu'il n'y ait aucune
+                    # ambiguïté "c'est CE coup qui a perdu de l'éval, trouve
+                    # mieux" avant même de lire le titre du puzzle.
+                    played_move = None
+                    if m.get("played_move_uci"):
+                        try:
+                            played_move = chess.Move.from_uci(m["played_move_uci"])
+                        except ValueError:
+                            played_move = None
+                    if played_move:
+                        svg_kwargs["lastmove"] = played_move
+                    svg = chess.svg.board(board, **svg_kwargs)
+                    if played_move:
+                        svg = svg.replace(
+                            "</svg>", _played_move_arrow_svg(played_move, _PUZZLE_SVG_SIZE) + "</svg>")
+                    item["puzzle_svg"] = svg
+                    item["best_move_uci"] = m["best_move_uci"]
+                except Exception:
+                    pass  # best-effort : le coup reste affiché, juste pas cliquable
+            moves_payload.append(item)
+        payload[side] = {
+            "accuracy": data["accuracy"], "estimated_elo": data.get("estimated_elo"),
+            "counts": data["counts"], "moves": moves_payload,
+        }
+    payload["eval_curve_svg"] = _build_eval_curve_svg(report.get("eval_curve"))
+    payload["opening"] = report.get("opening")
+    payload["final_phase"] = report.get("final_phase")
+    return payload
 
 
 class _JsApi:
     """Méthodes appelables depuis le JS via window.pywebview.api.xxx()."""
 
-    def __init__(self, on_elo_change, on_toggle_side, on_refresh):
+    def __init__(self, on_elo_change, on_toggle_side, on_refresh, on_show_report, on_request_scenario):
         self._on_elo_change = on_elo_change
         self._on_toggle_side = on_toggle_side
         self._on_refresh = on_refresh
+        self._on_show_report = on_show_report
+        self._on_request_scenario = on_request_scenario
 
     def set_elo(self, tier_id):
         if self._on_elo_change:
@@ -46,11 +180,25 @@ class _JsApi:
         if self._on_refresh:
             self._on_refresh()
 
+    def request_report(self):
+        if self._on_show_report:
+            self._on_show_report()
+
+    def request_scenario(self, profile_id):
+        # Déclenché quand l'utilisateur sélectionne effectivement une carte
+        # de profil (voir web_bridge.BridgeState.request_scenario) -- le
+        # scénario ("Suite envisagée") n'est plus calculé automatiquement
+        # pour les 3 profils à chaque coup.
+        if self._on_request_scenario:
+            self._on_request_scenario(profile_id)
+
 
 class CoachWebview:
-    def __init__(self, on_refresh_click=None, on_toggle_side_click=None, on_elo_change=None):
+    def __init__(self, on_refresh_click=None, on_toggle_side_click=None, on_elo_change=None,
+                 on_show_report_click=None, on_request_scenario=None):
         self._window = None
-        self._api = _JsApi(on_elo_change, on_toggle_side_click, on_refresh_click)
+        self._api = _JsApi(on_elo_change, on_toggle_side_click, on_refresh_click, on_show_report_click,
+                            on_request_scenario)
         self._ready = threading.Event()
 
     def _on_loaded(self):
@@ -98,6 +246,16 @@ class CoachWebview:
     def set_elo_tier(self, tier_id):
         self._eval_js(f"window.setEloTier({int(tier_id)})")
 
+    def show_report(self, report):
+        """
+        Pousse le rapport de fin de partie (voir game_report.build_report)
+        à l'UI, avec un rendu chess.svg pré-généré pour chaque coup
+        cliquable (voir _build_report_payload) -- ouvre directement
+        l'overlay rapport côté JS.
+        """
+        payload = _build_report_payload(report)
+        self._eval_js(f"window.renderReport({json.dumps(payload)})")
+
 
 # ---------------------------------------------------------------------
 # Template HTML/CSS/JS -- aucune ressource externe (tout doit marcher
@@ -125,7 +283,7 @@ _HTML = r"""
   }
   * { box-sizing: border-box; }
   html, body {
-    margin: 0; padding: 0; height: 100%;
+    margin: 0; padding: 0; height: 100%; position: relative;
     background: var(--bg); color: var(--text);
     font-family: -apple-system, "Segoe UI", Arial, sans-serif;
     font-size: 14px;
@@ -136,9 +294,9 @@ _HTML = r"""
 
   /* --- en-tête : niveau + camp --- */
   #header { display: flex; flex-direction: column; gap: 8px; }
-  #elo-row { display: flex; align-items: center; justify-content: space-between; }
+  #elo-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
   #elo-label { font-size: 12px; font-weight: 600; color: var(--warn); letter-spacing: .02em; }
-  #camp-btn {
+  #camp-btn, #report-btn {
     display: flex; align-items: center; gap: 6px;
     background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px;
     padding: 5px 12px; cursor: pointer; font-size: 12px; color: var(--text-dim);
@@ -146,6 +304,8 @@ _HTML = r"""
   }
   #camp-btn:hover { border-color: var(--accent-tactical); color: var(--text); }
   #camp-btn svg { width: 13px; height: 13px; }
+  #report-btn:hover { border-color: var(--warn); color: var(--text); }
+  #report-btn svg { width: 13px; height: 13px; }
 
   #elo-slider {
     -webkit-appearance: none; width: 100%; height: 4px; border-radius: 2px;
@@ -194,6 +354,47 @@ _HTML = r"""
   #detail-opening-tag .eco { font-weight: 600; color: var(--text); }
   #detail-opening-tag .variation { font-style: italic; }
   #status-line { font-size: 12.5px; color: var(--text-faint); margin: 0; }
+
+  /* --- rapport de fin de partie + puzzle --- */
+  #reportOverlay {
+    position: absolute; inset: 0; background: var(--bg);
+    display: flex; flex-direction: column; padding: 16px; gap: 12px;
+  }
+  #reportPanel { display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; }
+  #reportHeader { display: flex; align-items: center; justify-content: space-between; }
+  #reportTitle, #puzzleTitle { font-weight: 600; font-size: 14px; }
+  #reportClose { cursor: pointer; font-size: 20px; color: var(--text-dim); line-height: 1; }
+  #reportClose:hover { color: var(--text); }
+  #puzzleBack { cursor: pointer; font-size: 12px; color: var(--accent-popular); }
+  #reportHint { font-size: 11.5px; color: var(--text-faint); margin: 0; }
+  #reportSubtitle { font-size: 11.5px; color: var(--text-dim); margin: 0; }
+  #evalCurveWrap { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  #evalCurveSvgHolder svg { display: block; }
+  .eval-curve-legend { font-size: 10.5px; color: var(--text-faint); }
+  #puzzleLegend { font-size: 11.5px; color: var(--text-dim); margin: 0; display: flex; align-items: center; gap: 6px; }
+  #puzzleLegend .legend-dot { width: 10px; height: 10px; border-radius: 50%; background: #e64553; flex-shrink: 0; }
+
+  #reportTable { flex: 1; overflow-y: auto; }
+  #reportTable table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  #reportTable th, #reportTable td { padding: 5px 6px; text-align: center; }
+  #reportTable th { color: var(--text-dim); font-weight: 600; font-size: 11px; }
+  #reportTable td.label-cell { text-align: left; color: var(--text-dim); }
+  #reportTable tr.accuracy-row td { font-weight: 700; font-size: 14px; }
+  #reportTable tr.elo-row td { font-weight: 600; font-size: 12px; color: var(--text-dim); border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  #reportTable tr.clickable td { cursor: pointer; }
+  #reportTable tr.clickable:hover td { background: var(--surface-2); }
+  #reportTable tr.count-zero td.count-cell { color: var(--text-faint); }
+
+  #puzzlePanel { flex: 1; display: flex; flex-direction: column; gap: 10px; }
+  #puzzleBoardWrap { position: relative; width: 100%; max-width: 360px; margin: 0 auto; }
+  #puzzleBoard svg { width: 100%; height: auto; display: block; }
+  #puzzleHighlight {
+    position: absolute; border: 3px solid var(--warn); box-sizing: border-box;
+    pointer-events: none;
+  }
+  #puzzleFeedback { text-align: center; font-size: 13px; font-weight: 600; min-height: 18px; margin: 0; }
+  #puzzleFeedback.correct { color: #a6e3a1; }
+  #puzzleFeedback.wrong { color: var(--accent-tactical); }
 </style>
 </head>
 <body>
@@ -205,6 +406,10 @@ _HTML = r"""
       <div id="camp-btn" onclick="onToggleSide()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 7h11l-3-3M17 17H6l3 3"/></svg>
         <span id="camp-label">Blancs</span>
+      </div>
+      <div id="report-btn" onclick="onRequestReport()" title="Rapport de la partie en cours">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17V9M12 17V5M15 17v-4"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+        <span>Rapport</span>
       </div>
     </div>
     <input id="elo-slider" type="range" min="1" max="3" step="1" value="2" oninput="onEloInput(this.value)">
@@ -247,6 +452,35 @@ _HTML = r"""
 
 </div>
 
+<div id="reportOverlay" style="display:none">
+  <div id="reportPanel">
+    <div id="reportHeader">
+      <span id="reportTitle">Rapport de partie</span>
+      <span id="reportClose" onclick="closeReport()" title="Fermer">&times;</span>
+    </div>
+    <p id="reportSubtitle"></p>
+    <div id="evalCurveWrap" style="display:none">
+      <span class="eval-curve-legend">Toi mieux &uarr;</span>
+      <div id="evalCurveSvgHolder"></div>
+      <span class="eval-curve-legend">Adversaire mieux &darr;</span>
+    </div>
+    <div id="reportTable"></div>
+    <p id="reportHint">Clique une Imprécision / Faute / Occasion manquée / Gaffe pour t'entraîner sur ce coup.</p>
+  </div>
+  <div id="puzzlePanel" style="display:none">
+    <div id="reportHeader">
+      <span id="puzzleTitle">Retrouve le meilleur coup</span>
+      <span id="puzzleBack" onclick="closePuzzle()" title="Retour au rapport">&larr; Retour</span>
+    </div>
+    <p id="puzzleLegend"><span class="legend-dot"></span> = le coup joué (à éviter) -- trouve mieux !</p>
+    <div id="puzzleBoardWrap">
+      <div id="puzzleBoard"></div>
+      <div id="puzzleHighlight" style="display:none"></div>
+    </div>
+    <p id="puzzleFeedback"></p>
+  </div>
+</div>
+
 <script>
   const PROFILE_DATA = {}; // profile_id -> dernière entry reçue
   let activeProfile = "popular";
@@ -261,6 +495,9 @@ _HTML = r"""
   function onToggleSide() {
     if (window.pywebview) window.pywebview.api.toggle_side();
   }
+  function onRequestReport() {
+    if (window.pywebview) window.pywebview.api.request_report();
+  }
 
   function selectProfile(id) {
     activeProfile = id;
@@ -268,6 +505,21 @@ _HTML = r"""
       c.dataset.active = (c.dataset.profile === id) ? "true" : "false";
     });
     renderDetail();
+    maybeRequestScenario(id);
+  }
+
+  // "Suite envisagée" (voir web_bridge.py, request_scenario) : plus calculée
+  // automatiquement pour les 3 profils à chaque coup (appel moteur, coûteux
+  // pour un résultat qu'on ne regarde pas forcément) -- demandée seulement
+  // pour la carte réellement affichée. _scenarioRequested marqué directement
+  // sur l'objet entry (recréé à chaque nouveau coup, voir updateProfile) :
+  // évite de redemander en boucle tant qu'on reste sur la même position.
+  function maybeRequestScenario(id) {
+    const entry = PROFILE_DATA[id];
+    if (!entry || entry._scenarioRequested) return;
+    if (entry.narration && entry.narration.suite) return; // déjà présente
+    entry._scenarioRequested = true;
+    if (window.pywebview) window.pywebview.api.request_scenario(id);
   }
 
   function renderDetail() {
@@ -352,10 +604,172 @@ _HTML = r"""
     return d.innerHTML;
   }
 
+  // --- Rapport de fin de partie + mode puzzle (voir game_report.py) ---
+  const REPORT_LABEL_ORDER = [
+    "Brilliant", "Great", "Book", "Best", "Excellent", "Good",
+    "Inaccuracy", "Mistake", "Miss", "Blunder",
+  ];
+  const REPORT_LABEL_FR = {
+    Brilliant: "Brillant", Great: "Génial", Book: "Théorie", Best: "Meilleur",
+    Excellent: "Excellent", Good: "Bon", Inaccuracy: "Imprécision",
+    Mistake: "Faute", Miss: "Occasion manquée", Blunder: "Gaffe",
+  };
+  const PUZZLE_CLICKABLE_LABELS = ["Inaccuracy", "Mistake", "Miss", "Blunder"];
+  const PUZZLE_SIZE = 360;       // doit rester cohérent avec _PUZZLE_SVG_SIZE (webview_ui.py)
+  const PUZZLE_SQUARE = PUZZLE_SIZE / 8;
+  let lastReport = null;         // dernier payload reçu, pour retrouver le coup cliqué
+  let puzzleFromSquare = null;
+
+  function renderReportTable(report) {
+    const el = document.getElementById("reportTable");
+    let html = '<table>';
+    html += '<tr class="accuracy-row"><td class="label-cell">Accuracy</td>' +
+      '<td>' + (report.w.accuracy ?? "—") + '</td>' +
+      '<td>' + (report.b.accuracy ?? "—") + '</td></tr>';
+    html += '<tr class="elo-row"><td class="label-cell">Elo estimé</td>' +
+      '<td>' + (report.w.estimated_elo ?? "—") + '</td>' +
+      '<td>' + (report.b.estimated_elo ?? "—") + '</td></tr>';
+    html += '<tr><th></th><th>Blancs</th><th>Noirs</th></tr>';
+    REPORT_LABEL_ORDER.forEach(label => {
+      const wCount = report.w.counts[label] || 0;
+      const bCount = report.b.counts[label] || 0;
+      const clickable = PUZZLE_CLICKABLE_LABELS.includes(label) && (wCount > 0 || bCount > 0);
+      const rowClass = (clickable ? "clickable " : "") + ((wCount + bCount) === 0 ? "count-zero" : "");
+      html += `<tr class="${rowClass}" data-label="${label}">` +
+        `<td class="label-cell">${REPORT_LABEL_FR[label] || label}</td>` +
+        `<td class="count-cell">${wCount}</td><td class="count-cell">${bCount}</td></tr>`;
+    });
+    html += '</table>';
+    el.innerHTML = html;
+
+    el.querySelectorAll("tr.clickable").forEach(row => {
+      row.onclick = () => openFirstPuzzleForLabel(row.dataset.label);
+    });
+  }
+
+  function openFirstPuzzleForLabel(label) {
+    // Ouvre le PREMIER coup de ce label trouvé (Blancs d'abord) -- un
+    // sélecteur "quel coup précisément" serait plus riche mais pas
+    // demandé ici ; l'utilisateur peut relancer sur le même label pour
+    // s'entraîner sur cette catégorie, un coup à la fois.
+    for (const side of ["w", "b"]) {
+      const moves = (lastReport[side].moves || []).filter(m => m.label === label && m.puzzle_svg);
+      if (moves.length > 0) {
+        openPuzzle(moves[Math.floor(Math.random() * moves.length)]);
+        return;
+      }
+    }
+  }
+
+  function openPuzzle(moveData) {
+    document.getElementById("reportPanel").style.display = "none";
+    document.getElementById("puzzlePanel").style.display = "flex";
+    document.getElementById("puzzleTitle").textContent =
+      "Retrouve le meilleur coup (au lieu de " + (moveData.san || "?") + ")";
+    document.getElementById("puzzleBoard").innerHTML = moveData.puzzle_svg;
+    document.getElementById("puzzleFeedback").textContent = "";
+    document.getElementById("puzzleFeedback").className = "";
+    document.getElementById("puzzleHighlight").style.display = "none";
+    puzzleFromSquare = null;
+
+    const boardEl = document.getElementById("puzzleBoard");
+    boardEl.onclick = (ev) => onPuzzleBoardClick(ev, moveData);
+  }
+
+  function squareFromClick(ev, boardEl) {
+    // coordinates=False côté chess.svg.board (voir _PUZZLE_SVG_SIZE) : le
+    // SVG est une grille 8x8 pleine, sans marge -- mapping direct, aucun
+    // cas particulier à gérer. Orientation TOUJOURS Blancs (voir
+    // _build_report_payload) : file 0 = colonne a, rang du haut = 8.
+    const rect = boardEl.getBoundingClientRect();
+    const scale = PUZZLE_SIZE / rect.width;
+    const x = (ev.clientX - rect.left) * scale;
+    const y = (ev.clientY - rect.top) * scale;
+    const file = Math.min(7, Math.max(0, Math.floor(x / PUZZLE_SQUARE)));
+    const rankFromTop = Math.min(7, Math.max(0, Math.floor(y / PUZZLE_SQUARE)));
+    const square = "abcdefgh"[file] + (8 - rankFromTop);
+    return { square, file, rankFromTop, rectWidth: rect.width };
+  }
+
+  function onPuzzleBoardClick(ev, moveData) {
+    const boardEl = document.getElementById("puzzleBoard");
+    const { square, file, rankFromTop, rectWidth } = squareFromClick(ev, boardEl);
+    const highlight = document.getElementById("puzzleHighlight");
+    const px = rectWidth / 8;
+    highlight.style.display = "block";
+    highlight.style.width = px + "px";
+    highlight.style.height = px + "px";
+    highlight.style.left = (file * px) + "px";
+    highlight.style.top = (rankFromTop * px) + "px";
+
+    if (puzzleFromSquare === null) {
+      puzzleFromSquare = square;
+      return;
+    }
+    const guess = puzzleFromSquare + square;
+    puzzleFromSquare = null;
+    highlight.style.display = "none";
+    // Promotion : auto-dame par défaut (voir game_report.py -- ponytail,
+    // pas de sélecteur de promotion pour du contenu d'entraînement).
+    const isCorrect = guess === moveData.best_move_uci || (guess + "q") === moveData.best_move_uci;
+    const feedback = document.getElementById("puzzleFeedback");
+    feedback.className = isCorrect ? "correct" : "wrong";
+    feedback.textContent = isCorrect
+      ? "Bien vu !"
+      : "Pas encore -- réessaie (clique la case de départ).";
+  }
+
+  function closePuzzle() {
+    document.getElementById("puzzlePanel").style.display = "none";
+    document.getElementById("reportPanel").style.display = "flex";
+  }
+
+  function closeReport() {
+    document.getElementById("reportOverlay").style.display = "none";
+  }
+
+  const PHASE_FR = { opening: "ouverture", middlegame: "milieu de partie", endgame: "finale" };
+
+  function renderReportSubtitle(report) {
+    const el = document.getElementById("reportSubtitle");
+    const parts = [];
+    if (report.opening && report.opening.name) {
+      parts.push(report.opening.eco ? `${report.opening.name} (${report.opening.eco})` : report.opening.name);
+    }
+    if (report.final_phase) {
+      parts.push("terminée en " + (PHASE_FR[report.final_phase] || report.final_phase));
+    }
+    el.textContent = parts.join(" — ");
+  }
+
+  function renderEvalCurve(report) {
+    const wrap = document.getElementById("evalCurveWrap");
+    const holder = document.getElementById("evalCurveSvgHolder");
+    if (report.eval_curve_svg) {
+      holder.innerHTML = report.eval_curve_svg;
+      wrap.style.display = "flex";
+    } else {
+      holder.innerHTML = "";
+      wrap.style.display = "none";
+    }
+  }
+
   // --- Appelées depuis Python (voir webview_ui.py, _eval_js) ---
+  window.renderReport = function(report) {
+    lastReport = report;
+    document.getElementById("reportOverlay").style.display = "flex";
+    document.getElementById("reportPanel").style.display = "flex";
+    document.getElementById("puzzlePanel").style.display = "none";
+    renderReportSubtitle(report);
+    renderEvalCurve(report);
+    renderReportTable(report);
+  };
   window.updateProfile = function(profileId, entry) {
     PROFILE_DATA[profileId] = entry;
-    if (profileId === activeProfile) renderDetail();
+    if (profileId === activeProfile) {
+      renderDetail();
+      maybeRequestScenario(profileId);
+    }
   };
   window.showStatus = function(message) {
     document.getElementById("detail-theme").querySelector("svg").innerHTML = THEME_ICON_PATHS["info"];

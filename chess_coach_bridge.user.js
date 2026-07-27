@@ -66,6 +66,14 @@
  */
 (function () {
   const COACH_ENDPOINT = "http://127.0.0.1:8765/fen";
+  // Signalé quand une fin de partie n'est PAS déductible du FEN seul
+  // (résignation, temps écoulé, nulle par accord -- voir
+  // detectGameOverModal) : le serveur construit alors le rapport de fin de
+  // partie à partir de ce qu'il a déjà loggé (voir web_bridge.py,
+  // finalize_game_report). Les fins de partie déductibles du FEN (échec et
+  // mat/pat/matériel insuffisant) sont déjà gérées côté serveur sans avoir
+  // besoin de ce signal (voir handle_single_profile, board.is_game_over()).
+  const GAME_OVER_ENDPOINT = "http://127.0.0.1:8765/game_over";
   // 3 profils de jeu "humains" (voir human_profile.py côté serveur) --
   // l'ordre ici doit rester cohérent avec human_profile.PROFILE_IDS.
   // Le niveau Elo (slider dans la fenêtre Python) ne change PAS ces
@@ -138,6 +146,7 @@
   // Clé (position des pièces + trait) de la dernière position VERROUILLÉE
   // après un envoi réussi -- format "boardPart:turn". Inclure le trait est ce
   // qui débloque le cas "skip puis trait corrigé" (voir onBoardChanged).
+  let gameOverAlreadySignaled = false; // voir detectGameOverModal/resetTrackingState
   let lastSentKey = null;
   // Position actuellement en cours d'envoi (requête pas encore résolue).
   // Sans ça, comme lastSentKey n'est plus verrouillé tant que la
@@ -332,6 +341,90 @@
   // (Si ton site expose le trait directement, le hook window.chessCoachGetTurn
   // reste prioritaire sur tout ceci -- voir getSideToMove.)
   // -----------------------------------------------------------------
+
+  // Nombre de DEMI-COUPS (ply) déjà affichés dans le panneau de notation --
+  // signal TEXTE structurel, indépendant de toute lecture de pixels
+  // (contrairement au surlignage/diff ci-dessous) : pair -> aux Blancs de
+  // jouer, impair -> aux Noirs.
+  //
+  // PAS de sélecteur CSS fixe par site : vérifié en pratique (2024) que le
+  // panneau de coups lichess (interface "round") utilise des noms de
+  // balises MINIFIÉS/générés (ex: <z7yx>e3</z7yx>, <qzm>1</qzm>, tous deux
+  // enfants directs d'un <app> sans classe ni id) -- quasi certainement
+  // instables d'un déploiement à l'autre, un sélecteur figé y serait donc
+  // caduc en quelques semaines. Détection BASÉE SUR LE CONTENU à la place :
+  // repère, dans TOUTE la page, le conteneur dont le plus de FEUILLES ont un
+  // texte ressemblant à un coup SAN (voir SAN_MOVE_REGEX) -- ce conteneur
+  // EST le panneau de notation, quel que soit le nom de ses balises, sur
+  // chess.com comme sur lichess. Un widget annexe (mini-partie en cours
+  // dans la barre latérale, etc.) n'a jamais plus de coups reconnus que la
+  // vraie partie en cours -- le "plus grand groupe" gagne naturellement.
+  const SAN_MOVE_REGEX = /^(O-O-O|O-O|[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8](=[NBRQ])?)[+#]?$/;
+  let _moveListContainerCache = null; // reconnu une fois, réutilisé (voir plus bas -- évite un scan complet de la page à chaque tick)
+  // Garde-fou perf : le scan complet (document.querySelectorAll("body *"))
+  // ne doit jamais tourner plus d'une fois par seconde, même si le
+  // conteneur repéré devient instable (site qui reconstruit son DOM à
+  // répétition) -- sans ça, un scan complet à CHAQUE tick de poll (jusqu'à
+  // 10/s, voir POLL_INTERVAL_MS) sur une page lourde pourrait suffire à
+  // rendre tout le site perceptiblement lent. Entre 2 scans autorisés, on
+  // retombe simplement sur null (l'appelant utilise alors highlight/diff).
+  let _lastFullScanAt = 0;
+  const FULL_SCAN_MIN_INTERVAL_MS = 1000;
+
+  function _countSanLeafChildren(parent) {
+    let n = 0;
+    for (const child of parent.children) {
+      if (child.children.length === 0 && SAN_MOVE_REGEX.test(child.textContent.trim())) n++;
+    }
+    return n;
+  }
+
+  function readPlyCountFromMoveList() {
+    try {
+      // Repli rapide (pas de scan complet) : le conteneur déjà repéré est
+      // toujours dans le document ET contient encore des coups -> on se
+      // contente de recompter ses enfants. S'il a disparu/été vidé (nouvelle
+      // partie, re-render complet du site), on le laisse tomber et on
+      // rescanne toute la page une fois, comme au premier appel.
+      if (_moveListContainerCache && _moveListContainerCache.isConnected) {
+        const n = _countSanLeafChildren(_moveListContainerCache);
+        if (n > 0) return n;
+        _moveListContainerCache = null;
+      }
+
+      const now = Date.now();
+      if (now - _lastFullScanAt < FULL_SCAN_MIN_INTERVAL_MS) return null;
+      _lastFullScanAt = now;
+
+      const _t0 = performance.now(); // instrumentation temporaire -- voir le console.warn plus bas
+      const allEls = document.querySelectorAll("body *");
+      const counted = new Map(); // parent -> nb d'enfants reconnus comme coup
+      let bestParent = null, bestCount = 0;
+      for (const el of allEls) {
+        if (el.children.length !== 0) continue; // feuille seulement
+        const txt = el.textContent.trim();
+        if (txt.length === 0 || txt.length > 8 || !SAN_MOVE_REGEX.test(txt)) continue;
+        const parent = el.parentElement;
+        if (!parent || counted.has(parent)) continue;
+        const n = _countSanLeafChildren(parent);
+        counted.set(parent, n);
+        if (n > bestCount) { bestCount = n; bestParent = parent; }
+      }
+      const _elapsed = performance.now() - _t0;
+      if (_elapsed > 100) {
+        console.warn(`♟ Coach d'échecs [perf] : scan liste de coups lent (${_elapsed.toFixed(0)}ms, ${allEls.length} éléments scannés).`);
+      }
+      // Moins de 2 coups reconnus : trop peu fiable pour distinguer un vrai
+      // panneau de notation d'un faux positif isolé (une seule case
+      // mentionnée quelque part sur la page par coïncidence).
+      if (bestCount < 2) return null;
+      _moveListContainerCache = bestParent;
+      return bestCount;
+    } catch (e) {
+      if (DEBUG) console.warn("Coach d'échecs [debug] : lecture de la liste de coups échouée.", e);
+      return null;
+    }
+  }
 
   // Lit les cases du DERNIER coup (surlignage du site) et les renvoie sous
   // forme [{row, col}] (0 à 2 entrées). Lecture DOM isolée + try/catch : les
@@ -532,6 +625,18 @@
   let forcedTurnValue = null;       // "w" / "b" / null
   let forcedTurnBoardPart = null;   // position des pièces au moment de la correction
 
+  // Cache par position DES PIÈCES (voir getSideToMove) : tant que le
+  // plateau ne change pas (l'adversaire ou toi réfléchissez), inutile de
+  // refaire toute la chaîne highlight -> diff -> scan de secours à CHAQUE
+  // tick de poll (~100ms, voir POLL_INTERVAL_MS) -- observé en pratique
+  // jusqu'à 179 recalculs identiques pendant un seul temps de réflexion
+  // (voir aussi les logs [perf] ajoutés pour repli 2). Invalidé dès que
+  // boardPart change (un vrai coup a été joué) ou par une correction
+  // manuelle explicite (forcedTurnValue, qui doit pouvoir écraser le cache
+  // sans attendre un changement de position).
+  let _lastTurnBoardPart = null;
+  let _lastTurnValue = null;
+
   function getSideToMove(newGrid, lastMoveSquares, boardPart) {
     if (window.chessCoachGetTurn) {
       try {
@@ -554,24 +659,47 @@
       forcedTurnValue = null;
       forcedTurnBoardPart = null;
     }
-    // Source PRIORITAIRE (sans historique, robuste aux coups rapides) : le
-    // surlignage du dernier coup joué (cases déjà lues une fois ce tick, voir
-    // onBoardChanged / readLastMoveSquares).
-    const fromHighlight = turnFromLastMoveSquares(lastMoveSquares, newGrid);
-    if (fromHighlight) {
-      localTurnToggle = fromHighlight;
-      return fromHighlight;
+    // Position DES PIÈCES déjà traitée à un tick précédent (aucun coup joué
+    // depuis) -> on réutilise le trait déjà déduit plutôt que de refaire
+    // toute la chaîne ci-dessous (voir _lastTurnBoardPart ci-dessus).
+    if (boardPart === _lastTurnBoardPart) {
+      localTurnToggle = _lastTurnValue;
+      return _lastTurnValue;
     }
-    // Repli 1 : déduction par diff avec la position stable précédente.
+
+    function _resolveAndCache(value) {
+      _lastTurnBoardPart = boardPart;
+      _lastTurnValue = value;
+      localTurnToggle = value;
+      return value;
+    }
+
+    // Source PRIORITAIRE (texte structurel, indépendant de toute lecture de
+    // pixels) : parité du nombre de demi-coups déjà affichés dans le
+    // panneau de notation -- confirmé plus fiable que highlight/diff en
+    // pratique. Sûr en priorité maintenant : grâce au cache ci-dessus, ce
+    // scan ne tourne plus qu'AU PLUS UNE FOIS par position (plus à chaque
+    // tick de poll comme lors du premier essai, qui causait le vrai
+    // ralentissement -- voir readPlyCountFromMoveList pour le throttle
+    // restant, gardé par prudence).
+    const plyCount = readPlyCountFromMoveList();
+    if (plyCount !== null) return _resolveAndCache(plyCount % 2 === 0 ? "w" : "b");
+
+    // Repli 1 : le surlignage du dernier coup joué (cases déjà lues une fois
+    // ce tick, voir onBoardChanged / readLastMoveSquares).
+    const fromHighlight = turnFromLastMoveSquares(lastMoveSquares, newGrid);
+    if (fromHighlight) return _resolveAndCache(fromHighlight);
+
+    // Repli 2 : déduction par diff avec la position stable précédente.
     if (lastStableGrid) {
       const moverColor = inferMoverColor(lastStableGrid, newGrid);
-      if (moverColor) {
-        localTurnToggle = moverColor === "white" ? "b" : "w";
-        return localTurnToggle;
-      }
+      if (moverColor) return _resolveAndCache(moverColor === "white" ? "b" : "w");
     }
-    // Repli 2 : toute première position jamais lue (pas de comparaison
-    // possible), ou déduction non concluante (très rare).
+
+    // Repli 3 : toute première position jamais lue (pas de comparaison
+    // possible), ou déduction non concluante (très rare) -- PAS mis en
+    // cache (localTurnToggle peut légitimement changer entre 2 tentatives
+    // si une autre méthode débloque la situation au tick suivant).
     return localTurnToggle;
   }
 
@@ -730,19 +858,23 @@
           handleCoachPayload(payload, boardPart, turn);
           resolve(true);
         },
-        onerror: () => {
+        onerror: (err) => {
           inFlightRequests.delete(handle);
           updateStatusIndicator({ serverOk: false });
           console.warn(
             `Coach d'échecs : impossible de contacter le serveur local (port 8765) pour le profil ${profileId}. ` +
-            "Vérifie que le programme Python tourne bien (option 'Mode navigateur')."
+            "Vérifie que le programme Python tourne bien (option 'Mode navigateur').",
+            // Détail brut remonté par GM_xmlhttpRequest (readyState/status/
+            // error/finalUrl selon le gestionnaire d'extensions) -- pas de
+            // message générique cette fois, pour identifier la vraie cause.
+            err
           );
           resolve(false);
         },
-        ontimeout: () => {
+        ontimeout: (err) => {
           inFlightRequests.delete(handle);
           updateStatusIndicator({ serverOk: false });
-          console.warn(`Coach d'échecs : le serveur local met trop de temps à répondre pour le profil ${profileId}.`);
+          console.warn(`Coach d'échecs : le serveur local met trop de temps à répondre pour le profil ${profileId}.`, err);
           resolve(false);
         },
         onabort: () => {
@@ -1072,8 +1204,15 @@
     }
     const cp = evalData.cp;
     if (cp === null || cp === undefined) return 0.5;
-    // 1 / (1 + 10^(-cp/400)) -- même familles de courbes que les sites d'échecs.
-    const frac = 1 / (1 + Math.pow(10, -cp / 400));
+    // Formule win% publique (lichess), MÊME formule que game_report.
+    // win_percent côté Python (rapport de fin de partie) -- calibrée sur de
+    // vraies statistiques d'issues de parties, pas une courbe ad hoc.
+    // Remplace l'ancienne 1/(1+10^(-cp/400)), sensiblement trop "confiante"
+    // (ex: +4 pions y affichait ~91% de barre blanche contre ~81% avec
+    // cette formule -- et surtout, incohérente avec le % d'accuracy du
+    // rapport qui, lui, utilisait déjà cette formule-ci).
+    const winPct = 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * cp)) - 1);
+    const frac = winPct / 100;
     return Math.max(0.02, Math.min(0.98, frac)); // garde un filet visible pour le camp perdant
   }
 
@@ -1235,7 +1374,52 @@
     pendingStableCount = 0;
     forcedTurnValue = null;      // une correction manuelle ne survit pas à une nouvelle partie
     forcedTurnBoardPart = null;
+    _lastTurnBoardPart = null;
+    _lastTurnValue = null;
+    gameOverAlreadySignaled = false;
     clearArrows();
+  }
+
+  // Sélecteurs des modales "fin de partie" -- ponytail: DOM tiers NON
+  // VERSIONNÉ, à VÉRIFIER/AJUSTER EN PRATIQUE (redesigns fréquents côté
+  // chess.com en particulier). Best-effort total, protégé par try/catch :
+  // si ça ne matche plus rien, ça ne casse RIEN d'autre -- juste pas de
+  // rapport automatique pour une résignation/temps écoulé/nulle par accord
+  // (le bouton manuel "Rapport" de la fenêtre coach reste le filet de
+  // sécurité, voir webview_ui.py). Ne couvre QUE ces cas-là : échec et
+  // mat/pat/matériel insuffisant sont déjà détectés côté serveur à partir
+  // du FEN seul (voir web_bridge.py, board.is_game_over()), sans scraping.
+  function detectGameOverModal(els) {
+    try {
+      if (els.type === "chesscom") {
+        const el = document.querySelector(
+          '[data-cy="game-over-modal-content"], .game-over-modal-content, .board-modal-container .game-over-buttons-component'
+        );
+        return !!(el && el.offsetParent !== null);
+      }
+      // lichess : modale de fin de partie sous #modal-wrap, ou le bloc
+      // ".follow-up" (boutons "Revanche"/"Nouvelle partie") qui n'apparaît
+      // qu'une fois la partie terminée.
+      const el = document.querySelector("#modal-wrap .game-over, .follow-up");
+      return !!(el && el.offsetParent !== null);
+    } catch (e) {
+      if (DEBUG) console.warn("Coach d'échecs [debug] : détection fin de partie (DOM) échouée.", e);
+      return false;
+    }
+  }
+
+  function sendGameOverSignal() {
+    if (gameOverAlreadySignaled) return;
+    gameOverAlreadySignaled = true;
+    GM_xmlhttpRequest({
+      method: "POST",
+      url: GAME_OVER_ENDPOINT,
+      headers: { "Content-Type": "application/json" },
+      data: "{}",
+      timeout: 5000,
+      onerror: () => { gameOverAlreadySignaled = false; }, // retentera au prochain tick
+      ontimeout: () => { gameOverAlreadySignaled = false; },
+    });
   }
 
   function onBoardChanged() {
@@ -1509,6 +1693,14 @@
     // avec l'ancienne approche basée sur les mutations DOM).
     setInterval(onBoardChanged, POLL_INTERVAL_MS);
     onBoardChanged(); // première tentative immédiate
+
+    // Détection de fin de partie NON déductible du FEN (résignation/temps
+    // écoulé/nulle par accord, voir detectGameOverModal) -- fréquence bien
+    // plus basse que le poll de plateau (une modale n'apparaît pas à 100ms
+    // près, pas la peine de scanner le DOM aussi souvent pour ça).
+    setInterval(() => {
+      if (detectGameOverModal(els)) sendGameOverSignal();
+    }, 1000);
 
     // Les navigateurs ralentissent fortement setInterval() sur un onglet en
     // arrière-plan (throttling, pour économiser la batterie) -- c'est une

@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+coach_run.log
+engine_degraded.json
