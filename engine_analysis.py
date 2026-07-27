@@ -29,10 +29,14 @@ class ChessCoachEngine:
         if threads is None:
             cpu_count = os.cpu_count() or 4
             threads = max(1, cpu_count - 1)  # laisse un coeur libre pour le reste du programme
-        try:
-            self.engine.configure({"Threads": threads, "Hash": hash_mb})
-        except chess.engine.EngineError as e:
-            print(f"⚠ Impossible de configurer Threads/Hash sur ce Stockfish : {e}")
+        # Configurées séparément (pas dans un seul configure({...})) : un
+        # moteur qui n'a pas l'une des deux options (ex. lc0 n'a pas
+        # "Hash") ferait échouer configure() pour les deux d'un coup sinon.
+        for option, value in (("Threads", threads), ("Hash", hash_mb)):
+            try:
+                self.engine.configure({option: value})
+            except chess.engine.EngineError as e:
+                print(f"⚠ Impossible de configurer {option} sur ce moteur : {e}")
 
         # UCI_ShowWDL (Win/Draw/Loss en pour-mille) : option UCI standard
         # (pas propre à un moteur en particulier, contrairement à
@@ -189,6 +193,7 @@ class ChessCoachEngine:
         # une seule fois : le rappel passe déjà multipv=6, qui est le
         # plafond, donc pas de boucle infinie.
         if not safe_mode and len(candidates) < 3 and multipv < 6:
+            assert multipv <= 6, "plafond multipv dépassé avant le rappel récursif -- risque de boucle infinie"
             return self.analyze_candidates(fen, multipv=6, depth=depth, safe_mode=False)
 
         return {"game_over": False, "candidates": candidates}, board

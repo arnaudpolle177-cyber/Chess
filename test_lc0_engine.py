@@ -21,7 +21,10 @@ STARTPOS_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
 
 def demo():
-    assert os.path.isfile(LC0_GPU_PATH), f"binaire lc0 (GPU) introuvable : {LC0_GPU_PATH}"
+    if not os.path.isfile(LC0_GPU_PATH):
+        print(f"SKIP - binaire lc0 (GPU) introuvable : {LC0_GPU_PATH} "
+              "(dépôt cloné sans les binaires lc0 ?)")
+        return
 
     # BridgeState.__init__ exige un moteur "principal" valide (Stockfish/
     # Berserk) -- on réutilise lc0 lui-même à cette place ici, il parle UCI

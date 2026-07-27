@@ -539,16 +539,13 @@ class BridgeState:
             # engines/lc0/{cpu,gpu}/lc0.exe -> engines/lc0/weights.pb.gz
             weights_path = os.path.join(os.path.dirname(os.path.dirname(path)), "weights.pb.gz")
             try:
-                # threads=1/hash_mb=1 passés à ChessCoachEngine.__init__ ne
-                # sont PAS réellement appliqués : ce constructeur envoie
-                # Threads et Hash dans le MÊME configure(), qui échoue tout
-                # entier car lc0 n'a pas d'option "Hash" (voir
-                # engine_analysis.ChessCoachEngine.__init__) -- sans lc0
-                # tournait donc avec son Threads par défaut (auto, ~1 par
-                # cœur CPU), d'où ~90% d'utilisation GPU observée en
-                # pratique. Threads=1 + MinibatchSize réduit ci-dessous
-                # (envoyés séparément, donc réellement pris en compte) :
-                # ~60% d'utilisation GPU mesurée sur une RTX 3070, au prix
+                # threads=1/hash_mb=1 passés à ChessCoachEngine.__init__ sont
+                # appliqués séparément par ce constructeur (voir
+                # engine_analysis.ChessCoachEngine.__init__) -- Threads=1
+                # passe même si lc0 n'a pas d'option "Hash". MinibatchSize
+                # reste configuré ici séparément (ChessCoachEngine ne le
+                # connaît pas). Threads=1 + MinibatchSize réduit : ~60%
+                # d'utilisation GPU mesurée sur une RTX 3070, au prix
                 # d'environ -45% de nœuds/s dans le même budget de temps
                 # (voir LC0_MOVETIME_S) -- même latence de réponse, force un
                 # peu réduite. ponytail : valeurs empiriques sur cette
@@ -556,9 +553,9 @@ class BridgeState:
                 # un autre GPU.
                 engine = ChessCoachEngine(path, threads=1, hash_mb=1)
                 try:
-                    engine.engine.configure({"Threads": 1, "MinibatchSize": 32})
+                    engine.engine.configure({"MinibatchSize": 32})
                 except chess.engine.EngineError as e:
-                    print(f"⚠ Impossible de limiter Threads/MinibatchSize sur lc0 : {e}")
+                    print(f"⚠ Impossible de limiter MinibatchSize sur lc0 : {e}")
                 if os.path.isfile(weights_path):
                     engine.engine.configure({"WeightsFile": weights_path})
                 else:
