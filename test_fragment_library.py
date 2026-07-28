@@ -326,6 +326,31 @@ def test_fragments_calmes_nomment_le_coup():
                   f"[{voice}] {uci} : contrat de clause, pas de point final")
 
 
+def test_reposition_isole():
+    # Cavalier DEJA developpe (c3, hors rangee de fond) qui saute vers une
+    # case vide e4 : pas de capture, pas d'echec, pas de colonne ouverte en
+    # jeu (piece = cavalier, la branche ROOK_FILE ne s'applique qu'aux
+    # tours/dames). C'est le seul chemin de la cascade qui reste : REPOSITION.
+    import chess, move_intent
+    board = chess.Board("4k3/8/8/8/8/2N5/8/4K3 w - - 0 1")
+    intent = move_intent.detect_move_intent(
+        board, {"move_uci": "c3e4", "pv_uci": ["c3e4"]})
+    check(intent.kind == move_intent.REPOSITION,
+          f"position mal choisie : attendu REPOSITION, obtenu {intent.kind}")
+    if intent.kind != move_intent.REPOSITION:
+        return  # les verifications suivantes n'ont de sens que sur REPOSITION
+    for voice in ("popular", "creative", "classical"):
+        frag = fragment_library.fragments_for_intent(intent, voice)
+        check(frag is not None, f"[{voice}] REPOSITION doit avoir un fragment, pas None")
+        blob = " ".join(v for v in frag.values() if v)
+        check(blob.strip() != "", f"[{voice}] REPOSITION : fragment vide")
+        check("e4" in blob, f"[{voice}] le texte doit citer la case e4, obtenu {blob!r}")
+        check(blob[0].islower() or blob[0].isdigit(),
+              f"[{voice}] contrat de clause, minuscule initiale")
+        check(not blob.rstrip().endswith("."),
+              f"[{voice}] contrat de clause, pas de point final")
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
