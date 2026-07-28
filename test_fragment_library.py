@@ -399,6 +399,83 @@ def test_reposition_isole():
                   f"[{voice}] l'observation ne doit pas comparer les cases (terme {terme!r}) -> {frag['observation']!r}")
 
 
+def test_rook_file_dame_ne_parle_pas_de_tour():
+    # ROOK_FILE se declenche pour une tour OU une dame arrivant sur une
+    # colonne ouverte/semi-ouverte (voir move_intent.ROOK_FILE). Defaut
+    # constate en pratique : le plan disait "les tours aiment les colonnes
+    # ouvertes" meme quand c'est une DAME qui a joue -- fait invente sur une
+    # piece qui n'a pas bouge. Ici la dame joue d1-d5 sur colonne d ouverte :
+    # aucune voix ne doit mentionner "tour" dans le fragment.
+    import chess, move_intent
+    board = chess.Board("4k3/ppp2ppp/8/8/8/8/PPP2PPP/3QK3 w - - 0 1")
+    intent = move_intent.detect_move_intent(
+        board, {"move_uci": "d1d5", "pv_uci": ["d1d5"]})
+    check(intent.kind == move_intent.ROOK_FILE,
+          f"setup : attendu rook_file, obtenu {intent.kind}")
+    if intent.kind != move_intent.ROOK_FILE:
+        return
+    for voice in ("popular", "creative", "classical"):
+        frag = fragment_library.fragments_for_intent(intent, voice)
+        check(frag is not None, f"[{voice}] ROOK_FILE doit avoir un fragment")
+        blob = " ".join(v for v in frag.values() if v)
+        check("tour" not in blob.lower(),
+              f"[{voice}] la dame a joue, aucun texte ne doit parler de 'tour' -> {blob!r}")
+        check("dame" in blob.lower(),
+              f"[{voice}] la piece reellement jouee (dame) doit etre nommee -> {blob!r}")
+        check("d5" in blob, f"[{voice}] la case d'arrivee doit etre citee -> {blob!r}")
+
+
+def test_rook_file_tour_conseille_bien_doubler():
+    # Cas miroir : une TOUR sur colonne ouverte -- le conseil legitime de
+    # doubler les tours doit rester present, on ne doit pas avoir tout
+    # neutralise en corrigeant le cas dame.
+    import chess, move_intent
+    board = chess.Board("4k3/ppp2ppp/8/8/8/8/PPP2PPP/3RK3 w - - 0 1")
+    intent = move_intent.detect_move_intent(
+        board, {"move_uci": "d1d5", "pv_uci": ["d1d5"]})
+    check(intent.kind == move_intent.ROOK_FILE,
+          f"setup : attendu rook_file, obtenu {intent.kind}")
+    if intent.kind != move_intent.ROOK_FILE:
+        return
+    for voice in ("popular", "creative", "classical"):
+        frag = fragment_library.fragments_for_intent(intent, voice)
+        blob = " ".join(v for v in frag.values() if v)
+        check("dame" not in blob.lower(),
+              f"[{voice}] la tour a joue, aucun texte ne doit parler de 'dame' -> {blob!r}")
+        check("tour" in blob.lower(),
+              f"[{voice}] la piece reellement jouee (tour) doit etre nommee -> {blob!r}")
+
+
+def test_rook_file_a_plusieurs_formulations():
+    # Meme audit : rook_file n'avait AUCUNE variante alors que la tour prend
+    # souvent plusieurs colonnes successives dans une partie. On verifie que
+    # _pick_variant fait bien varier le texte via recent_kinds (comme pour
+    # develop/reposition), de facon deterministe.
+    import chess, move_intent
+    board = chess.Board("4k3/ppp2ppp/8/8/8/8/PPP2PPP/3RK3 w - - 0 1")
+    intent = move_intent.detect_move_intent(
+        board, {"move_uci": "d1d5", "pv_uci": ["d1d5"]})
+    if intent.kind != move_intent.ROOK_FILE:
+        return
+    def ctx_avec_historique(kinds):
+        ctx = FragmentContext()
+        ctx.recent_kinds = tuple(kinds)
+        return ctx
+
+    for voice in ("popular", "creative", "classical"):
+        frag_frais = fragment_library.fragments_for_intent(
+            intent, voice, ctx_avec_historique(()))
+        frag_repete = fragment_library.fragments_for_intent(
+            intent, voice, ctx_avec_historique((intent.kind,)))
+        check(frag_frais != frag_repete,
+              f"[{voice}] rook_file doit varier sa formulation via _pick_variant")
+        # determinisme : deux appels avec le meme historique -> meme texte
+        frag_repete_bis = fragment_library.fragments_for_intent(
+            intent, voice, ctx_avec_historique((intent.kind,)))
+        check(frag_repete == frag_repete_bis,
+              f"[{voice}] meme historique -> doit redonner le meme texte")
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

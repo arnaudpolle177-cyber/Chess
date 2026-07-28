@@ -949,18 +949,68 @@ def _frag_castle(intent, voice, ctx):
 
 def _frag_rook_file(intent, voice, ctx):
     # Tour/dame arrivant sur une colonne ouverte ou semi-ouverte (fait calcule
-    # par why_detector._open_file_status, voir move_intent).
+    # par why_detector._open_file_status, voir move_intent). Le plan doit
+    # s'accorder a la piece REELLEMENT jouee (intent.moved_piece) : une tour
+    # sur colonne ouverte appelle a doubler les tours, une dame sur colonne
+    # ouverte est plus exposee et sert plutot d'appui a une autre piece --
+    # les deux plans ne sont pas interchangeables (voir audit, "les tours
+    # aiment les colonnes ouvertes" affirme a tort sur une dame). Au moins
+    # 2 formulations par voix, choisies via _pick_variant (ce coup revient
+    # plusieurs fois par partie, une tour prenant souvent des colonnes
+    # successives).
     dest = _sq(intent.to_square)
     par = _piece_with_article(intent.moved_piece)
     where = f"en {dest}" if dest else ""
+    is_queen = intent.moved_piece == chess.QUEEN
+
     if voice == CREATIVE:
-        return _f(f"{par} prend la colonne {where}".replace("  ", " ").rstrip(),
-                  "une colonne ouverte, c'est une autoroute : occupe-la avant lui", None)
-    if voice == CLASSICAL:
-        return _f(f"{par} occupe la colonne ouverte {where}".replace("  ", " ").rstrip(),
-                  "double ensuite sur la colonne pour en tirer profit", None)
-    return _f(f"{par} se poste sur la colonne ouverte {where}".replace("  ", " ").rstrip(),
-              "les tours aiment les colonnes ouvertes, garde-la", None)
+        if is_queen:
+            options = [
+                (f"{par} prend la colonne {where}".replace("  ", " ").rstrip(),
+                 "reste vigilant, une dame avancée sur une colonne ouverte est une cible facile"),
+                (f"{par} s'installe sur la colonne ouverte {where}".replace("  ", " ").rstrip(),
+                 "prépare plutôt une autre pièce à profiter de cette colonne derrière la dame"),
+            ]
+        else:
+            options = [
+                (f"{par} prend la colonne {where}".replace("  ", " ").rstrip(),
+                 "une colonne ouverte, c'est une autoroute : occupe-la avant lui"),
+                (f"{par} s'installe sur la colonne ouverte {where}".replace("  ", " ").rstrip(),
+                 "amène ta seconde tour derrière, la colonne devient une vraie autoroute"),
+            ]
+    elif voice == CLASSICAL:
+        if is_queen:
+            options = [
+                (f"{par} occupe la colonne ouverte {where}".replace("  ", " ").rstrip(),
+                 "la dame y est exposée, prévois de la soutenir ou de la retirer si l'adversaire la conteste"),
+                (f"{par} vient s'établir sur la colonne ouverte {where}".replace("  ", " ").rstrip(),
+                 "utilise cette colonne pour amener une autre pièce, la dame n'y reste pas seule longtemps"),
+            ]
+        else:
+            options = [
+                (f"{par} occupe la colonne ouverte {where}".replace("  ", " ").rstrip(),
+                 "double ensuite sur la colonne pour en tirer profit"),
+                (f"{par} vient s'établir sur la colonne ouverte {where}".replace("  ", " ").rstrip(),
+                 "amène l'autre tour sur la même colonne avant de poursuivre"),
+            ]
+    else:
+        if is_queen:
+            options = [
+                (f"{par} se poste sur la colonne ouverte {where}".replace("  ", " ").rstrip(),
+                 "surveille cette dame avancée, elle peut vite être attaquée"),
+                (f"{par} se met sur la colonne ouverte {where}".replace("  ", " ").rstrip(),
+                 "sers-t'en comme appui, mais ne la laisse pas avancer seule trop loin"),
+            ]
+        else:
+            options = [
+                (f"{par} se poste sur la colonne ouverte {where}".replace("  ", " ").rstrip(),
+                 "les tours aiment les colonnes ouvertes, garde-la"),
+                (f"{par} se met sur la colonne ouverte {where}".replace("  ", " ").rstrip(),
+                 "double tes tours sur cette colonne, c'est un bon plan"),
+            ]
+
+    obs, plan = _pick_variant(options, intent, ctx)
+    return _f(obs, plan, None)
 
 
 def _frag_reposition(intent, voice, ctx):
