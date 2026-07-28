@@ -159,6 +159,20 @@ def test_malformed():
     check(mi.detect_move_intent(board, chosen("e7e5")) is None, "malformed: coup illégal (mauvais camp) -> None")
 
 
+# --- 7bis. tags : l'échec d'une prise n'est plus perdu ---------------------
+def test_prise_qui_donne_echec_porte_le_tag():
+    # Fou blanc prend en b5 AVEC echec (roi noir en e8, diagonale a4-e8).
+    board = chess.Board("4k3/8/8/1p6/8/8/8/4K2B w - - 0 1")
+    board.set_piece_at(chess.A4, chess.Piece(chess.BISHOP, chess.WHITE))
+    board.remove_piece_at(chess.H1)
+    intent = mi.detect_move_intent(
+        board, chosen("a4b5"))
+    check(intent.kind == mi.CAPTURE_FREE,
+          f"reste classe comme une prise, obtenu {intent.kind}")
+    check("gives_check" in intent.tags,
+          "l'echec ne doit pas etre perdu : tag gives_check attendu")
+
+
 # --- 8. Porte de cohérence géométrique (narration_v2) ----------------------
 def _pawn_structure_brick(weak_square):
     return td.ThemeCandidate(
@@ -216,7 +230,8 @@ def test_render_forcing_end_to_end():
 def main():
     for fn in (test_check_escape, test_capture_free, test_capture_free_defended_but_winning,
                test_sacrifice, test_promotion, test_mate_prime_sur_tout,
-               test_gives_check, test_quiet, test_malformed, test_coherence_gate,
+               test_gives_check, test_quiet, test_malformed,
+               test_prise_qui_donne_echec_porte_le_tag, test_coherence_gate,
                test_render_forcing_end_to_end):
         try:
             fn()

@@ -164,6 +164,16 @@ def test_two_supports_max_flow():
     check(2 <= n <= 4, f"paragraphe attendu 2..4 phrases, obtenu {n} -> {res['text']!r}")
 
 
+def test_echec_secondaire_apparait_dans_le_texte():
+    import move_intent
+    board = chess.Board("4k3/8/8/1p6/B7/8/8/4K3 w - - 0 1")
+    intent = move_intent.detect_move_intent(
+        board, {"move_uci": "a4b5", "pv_uci": ["a4b5"]})
+    out = nw.weave_intent(intent, None, "popular")
+    check("échec" in out["text"].lower(),
+          f"l'echec du coup doit apparaitre, texte obtenu : {out['text']!r}")
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

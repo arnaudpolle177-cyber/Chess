@@ -285,6 +285,12 @@ def weave_intent(intent, kept_support, voice, ctx=None, caution_text=None):
     if intent_frag is None:
         return {"text": "", "lead": header, "supports": [], "voice": voice, "caution": caution_text}
 
+    # Un fait secondaire vrai du même coup (voir MoveIntent.tags) : on
+    # l'accroche à l'observation plutôt que d'en faire une phrase, pour ne pas
+    # diluer l'idée principale.
+    if "gives_check" in getattr(intent, "tags", frozenset()):
+        intent_frag["observation"] = f"{intent_frag['observation']}, avec échec"
+
     # Le secondaire (thème de position gardé) est tissé inline s'il a une
     # relation forte avec la FAMILLE de l'intention, sinon en phrase à part.
     # La famille de l'intention est celle de son thème d'en-tête (tactics /

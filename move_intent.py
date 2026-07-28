@@ -122,6 +122,11 @@ class MoveIntent:
                   (jamais de bilan matériel) quand ni capture_undefended ni
                   capture_line_gain ne prouvent un gain -- voir
                   fragment_library._frag_capture_free.
+    tags        : faits SECONDAIRES du même coup, à mentionner sans changer de
+                  catégorie. Aujourd'hui : "gives_check" quand le coup donne
+                  échec alors que son kind principal est autre chose (une
+                  prise, un sacrifice) -- sans ce champ, l'échec était
+                  purement et simplement perdu (observé sur Fxb5+).
     """
     kind: str
     forcing: bool
@@ -135,6 +140,7 @@ class MoveIntent:
     capture_undefended: bool = False   # la case d'arrivée n'a AUCUN défenseur adverse
     capture_line_gain: bool = False    # bilan de ligne positif, PV avec réponse adverse
     why_motif: Optional[str] = None    # motif why_detector reporté tel quel (repli descriptif)
+    tags: frozenset = frozenset()      # faits secondaires vrais, ex. "gives_check" (voir docstring)
 
 
 def _immediate_material_delta(board, move):
@@ -300,7 +306,13 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     gives_check = board.gives_check(move)
     was_in_check = board.is_check()
 
-    def _mk(kind, forcing, delta, capture_undefended=False, capture_line_gain=False):
+    # Faits secondaires : vrais mais non structurants pour le classement.
+    # (kind != MATE / GIVES_CHECK ici, où l'échec est déjà le sujet principal
+    # -- ces deux-là retournent avant ou sans passer par _mk.)
+    tags = frozenset({"gives_check"}) if gives_check else frozenset()
+
+    def _mk(kind, forcing, delta, capture_undefended=False, capture_line_gain=False,
+            move_tags=tags):
         return MoveIntent(
             kind=kind, forcing=forcing,
             from_square=move.from_square, to_square=move.to_square,
@@ -309,6 +321,7 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
             capture_undefended=capture_undefended,
             capture_line_gain=capture_line_gain,
             why_motif=why_motif,
+            tags=move_tags,
         )
 
     # 1. Sortir d'un échec prime sur tout : c'est le BUT du coup, aucune
@@ -341,9 +354,10 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
                    capture_undefended=not board.attackers(not board.turn, move.to_square),
                    capture_line_gain=line_delta > 0 and len(pv_uci) >= 2)
 
-    # 5. Le coup donne échec (sans être une prise nette déjà traitée).
+    # 5. Le coup donne échec (sans être une prise nette déjà traitée). L'échec
+    #    est déjà le sujet ici -> pas de tag "gives_check" redondant.
     if gives_check:
-        return _mk(GIVES_CHECK, True, immediate_delta)
+        return _mk(GIVES_CHECK, True, immediate_delta, move_tags=frozenset())
 
     # 6. Capture "ordinaire" (échange) : forçant léger -- on décrit la prise
     #    plutôt que de rester sur le thème de position, mais sans dramatiser.
