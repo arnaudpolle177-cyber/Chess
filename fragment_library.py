@@ -984,7 +984,7 @@ def _frag_reposition(intent, voice, ctx):
         options = [
             (f"{par} se replace {where}".replace("  ", " ").rstrip(),
              "améliore la pièce la moins active avant de forcer le jeu"),
-            (f"{par} se redeploie {where}".replace("  ", " ").rstrip(),
+            (f"{par} se redéploie {where}".replace("  ", " ").rstrip(),
              "réoriente les pièces mal placées avant d'ouvrir les hostilités"),
         ]
     else:

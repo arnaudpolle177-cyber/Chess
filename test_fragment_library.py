@@ -42,6 +42,46 @@ def check(cond, msg):
         _failures.append(msg)
 
 
+def test_texte_affiche_toujours_accentue():
+    """
+    Garde de non-régression : tout texte AFFICHÉ doit être en français
+    correctement accentué. Défaut constaté en pratique -- les fragments
+    d'intention ont été écrits sans accents (« Developpe, puis roque », « roi
+    a l'abri », « se redeploie ») parce que la consigne « messages de commit
+    sans accent » avait été appliquée par erreur au texte de l'interface.
+    L'écran mélangeait alors « la partie est gagnée » et « Developpe ».
+
+    On inspecte les chaînes littérales des fonctions _frag_* du module (source
+    AST, pas exécution : couvre AUSSI les branches jamais empruntées par les
+    autres tests, c'était justement le cas de « se redeploie »).
+    """
+    import ast
+    import re
+
+    source = open(fragment_library.__file__, encoding="utf-8").read()
+    # Formes NUES de mots qui portent toujours un accent en français. On liste
+    # la forme fautive, pas la correcte : une occurrence = un oubli.
+    nues = re.compile(
+        r"\b("
+        r"apres|acheve|activite|ameliore|amelioration|arrivee|cle|connectee|"
+        r"deja|depart|deplace|deploie|developpe|developpement|echange|"
+        r"element|forcee|hostilites|idee|idees|materiel|menacee|operation|"
+        r"piece|pieces|placee|placees|redeploie|reoriente|securite|securise|"
+        r"strategie|verifie"
+        r")\b"
+    )
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("_frag_")):
+            continue
+        for sub in ast.walk(node):
+            if not (isinstance(sub, ast.Constant) and isinstance(sub.value, str)):
+                continue
+            for mot in sorted(set(nues.findall(sub.value))):
+                check(False,
+                      f"{node.name} (ligne {sub.lineno}) : « {mot} » sans accent "
+                      f"dans un texte affiché -- {sub.value!r}")
+
+
 def brick(theme, **fields):
     return ThemeCandidate(theme, 1.0, dict(fields))
 
