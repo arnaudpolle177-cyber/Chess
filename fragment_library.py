@@ -846,6 +846,66 @@ def _frag_mate(intent, voice, ctx):
     return _f(obs, plan, None)
 
 
+def _frag_develop(intent, voice, ctx):
+    # Une mineure sort de la rangee de fond. Fait verifiable : la piece et sa
+    # case d'arrivee, lues sur l'intent.
+    dest = _sq(intent.to_square)
+    par = _piece_with_article(intent.moved_piece)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        return _f(f"{par} entre dans la partie {where}".replace("  ", " ").rstrip(),
+                  "sors tes pieces d'abord, les idees viendront apres", None)
+    if voice == CLASSICAL:
+        return _f(f"{par} se developpe {where}".replace("  ", " ").rstrip(),
+                  "termine ton developpement avant d'ouvrir le jeu", None)
+    return _f(f"{par} sort {where}".replace("  ", " ").rstrip(),
+              "developpe, puis roque", None)
+
+
+def _frag_castle(intent, voice, ctx):
+    # Le roque : deux effets reels et simultanes (roi a l'abri, tour reliee).
+    if voice == CREATIVE:
+        return _f("ton roi se met a l'abri et ta tour rejoint le jeu",
+                  "mets-toi en securite, tu attaqueras plus librement ensuite", None)
+    if voice == CLASSICAL:
+        return _f("le roque met le roi en securite et active la tour",
+                  "securise le roi avant d'entamer une operation au centre", None)
+    return _f("tu roques : roi a l'abri, tour connectee",
+              "roque maintenant, c'est le bon moment", None)
+
+
+def _frag_rook_file(intent, voice, ctx):
+    # Tour/dame arrivant sur une colonne ouverte ou semi-ouverte (fait calcule
+    # par why_detector._open_file_status, voir move_intent).
+    dest = _sq(intent.to_square)
+    par = _piece_with_article(intent.moved_piece)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        return _f(f"{par} prend la colonne {where}".replace("  ", " ").rstrip(),
+                  "une colonne ouverte, c'est une autoroute : occupe-la avant lui", None)
+    if voice == CLASSICAL:
+        return _f(f"{par} occupe la colonne ouverte {where}".replace("  ", " ").rstrip(),
+                  "double ensuite sur la colonne pour en tirer profit", None)
+    return _f(f"{par} se poste sur la colonne ouverte {where}".replace("  ", " ").rstrip(),
+              "les tours aiment les colonnes ouvertes, garde-la", None)
+
+
+def _frag_reposition(intent, voice, ctx):
+    # Piece deja developpee qui change de poste, sans capture : on ne peut pas
+    # affirmer POURQUOI sans detecteur dedie, donc on decrit le fait seul.
+    dest = _sq(intent.to_square)
+    par = _piece_with_article(intent.moved_piece)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        return _f(f"{par} va chercher mieux {where}".replace("  ", " ").rstrip(),
+                  "ameliore ta piece la moins bien placee, c'est souvent le meilleur coup", None)
+    if voice == CLASSICAL:
+        return _f(f"{par} se replace {where}".replace("  ", " ").rstrip(),
+                  "ameliore la piece la moins active avant de forcer le jeu", None)
+    return _f(f"{par} change de poste {where}".replace("  ", " ").rstrip(),
+              "repositionne, il n'y a rien de force ici", None)
+
+
 _INTENT_FUNCS = {
     "mate": _frag_mate,
     "check_escape": _frag_check_escape,
@@ -854,6 +914,10 @@ _INTENT_FUNCS = {
     "gives_check": _frag_gives_check,
     "promotion": _frag_promotion,
     "capture_trade": _frag_capture_trade,
+    "develop": _frag_develop,
+    "castle": _frag_castle,
+    "rook_file": _frag_rook_file,
+    "reposition": _frag_reposition,
 }
 
 

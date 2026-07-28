@@ -301,6 +301,31 @@ def test_fragment_mate_dans_les_3_voix():
         check("mat" in blob, f"[{voice}] le texte doit dire que c'est mat")
 
 
+def test_fragments_calmes_nomment_le_coup():
+    import chess, move_intent
+    cas = [
+        ("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1", "f1c4", "c4"),
+        ("rnbqk2r/pppp1ppp/5n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1", "e1g1", None),
+        ("4k3/ppp2ppp/8/8/8/8/PPP2PPP/3RK3 w - - 0 1", "d1d5", "d5"),
+    ]
+    for fen, uci, case in cas:
+        board = chess.Board(fen)
+        intent = move_intent.detect_move_intent(board, {"move_uci": uci, "pv_uci": [uci]})
+        for voice in ("popular", "creative", "classical"):
+            frag = fragment_library.fragments_for_intent(intent, voice)
+            check(frag is not None,
+                  f"[{voice}] {uci} ({intent.kind}) doit avoir un fragment, pas None")
+            blob = " ".join(v for v in frag.values() if v)
+            check(blob.strip() != "", f"[{voice}] {uci} : fragment vide")
+            if case:
+                check(case in blob,
+                      f"[{voice}] {uci} : le texte doit citer la case {case}, obtenu {blob!r}")
+            check(blob[0].islower() or blob[0].isdigit(),
+                  f"[{voice}] {uci} : contrat de clause, minuscule initiale")
+            check(not blob.rstrip().endswith("."),
+                  f"[{voice}] {uci} : contrat de clause, pas de point final")
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
