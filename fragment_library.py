@@ -123,8 +123,8 @@ def _sq(square):
 
 
 def _piece_name(board, square):
-    piece = board.piece_at(square) if square is not None else None
-    return PIECE_NAMES_FR.get(piece.piece_type, "pièce") if piece else "pièce"
+    pièce = board.piece_at(square) if square is not None else None
+    return PIECE_NAMES_FR.get(piece.piece_type, "pièce") if pièce else "pièce"
 
 
 def _pawns(cp):
@@ -297,7 +297,7 @@ def _frag_missed(fields, voice, ctx):
             obs = f"ton adversaire avait {san}, bien plus tranchant, et ne l'a pas joué"
         else:
             obs = "ton adversaire a choisi la continuation sage plutôt que la plus mordante"
-        plan = "sois plus incisif que lui : force la position avant qu'il ne se recentre"
+        plan = "sois plus incisif que lui : forcé la position avant qu'il ne se recentre"
         return _f(obs, plan, ampleur)
     if voice == CLASSICAL:
         if san:
@@ -814,7 +814,7 @@ def _frag_sacrifice(intent, voice, ctx):
     # Sacrifice différé : le déficit n'apparaît que plus loin dans la ligne
     # forcée, pas sur ce coup.
     if voice == CREATIVE:
-        obs = f"ce coup {where} lance une séquence qui force un sacrifice dans {moves_away} coups".replace("  ", " ").rstrip()
+        obs = f"ce coup {where} lance une séquence qui forcé un sacrifice dans {moves_away} coups".replace("  ", " ").rstrip()
         plan = "engage-toi : la ligne forcée vaut le matériel qui partira plus loin"
         return _f(obs, plan, None)
     if voice == CLASSICAL:
@@ -832,7 +832,7 @@ def _frag_gives_check(intent, voice, ctx):
     dest = _sq(intent.to_square)
     where = f"en {dest}" if dest else ""
     if voice == CREATIVE:
-        obs = f"ce coup donne échec {where} et force la réponse adverse".replace("  ", " ").rstrip()
+        obs = f"ce coup donne échec {where} et forcé la réponse adverse".replace("  ", " ").rstrip()
         plan = "enchaîne les coups forçants tant que l'adversaire n'a pas le choix"
         return _f(obs, plan, None)
     if voice == CLASSICAL:
@@ -903,9 +903,9 @@ def _frag_mate(intent, voice, ctx):
 
 
 def _frag_develop(intent, voice, ctx):
-    # Une mineure sort de la rangee de fond. Fait verifiable : la piece et sa
+    # Une mineure sort de la rangee de fond. Fait verifiable : la pièce et sa
     # case d'arrivee, lues sur l'intent. Au moins 2 formulations par voix
-    # (choisies via _pick_variant) : a l'audit, 3 coups de developpement de
+    # (choisies via _pick_variant) : a l'audit, 3 coups de développement de
     # suite sortaient le meme paragraphe mot pour mot.
     dest = _sq(intent.to_square)
     par = _piece_with_article(intent.moved_piece)
@@ -913,23 +913,23 @@ def _frag_develop(intent, voice, ctx):
     if voice == CREATIVE:
         options = [
             (f"{par} entre dans la partie {where}".replace("  ", " ").rstrip(),
-             "sors tes pieces d'abord, les idees viendront apres"),
+             "sors tes pièces d'abord, les idées viendront après"),
             (f"{par} rejoint le jeu {where}".replace("  ", " ").rstrip(),
-             "chaque piece sortie ajoute une option, continue"),
+             "chaque pièce sortie ajoute une option, continue"),
         ]
     elif voice == CLASSICAL:
         options = [
-            (f"{par} se developpe {where}".replace("  ", " ").rstrip(),
-             "termine ton developpement avant d'ouvrir le jeu"),
-            (f"{par} quitte sa case de depart {where}".replace("  ", " ").rstrip(),
-             "acheve la mobilisation des pieces mineures avant tout plan"),
+            (f"{par} se développe {where}".replace("  ", " ").rstrip(),
+             "termine ton développement avant d'ouvrir le jeu"),
+            (f"{par} quitte sa case de départ {where}".replace("  ", " ").rstrip(),
+             "achève la mobilisation des pièces mineures avant tout plan"),
         ]
     else:
         options = [
             (f"{par} sort {where}".replace("  ", " ").rstrip(),
-             "developpe, puis roque"),
+             "développe, puis roque"),
             (f"{par} se met en jeu {where}".replace("  ", " ").rstrip(),
-             "sors une piece de plus avant de lancer une action"),
+             "sors une pièce de plus avant de lancer une action"),
         ]
     obs, plan = _pick_variant(options, intent, ctx)
     return _f(obs, plan, None)
@@ -939,11 +939,11 @@ def _frag_castle(intent, voice, ctx):
     # Le roque : deux effets reels et simultanes (roi a l'abri, tour reliee).
     if voice == CREATIVE:
         return _f("ton roi se met a l'abri et ta tour rejoint le jeu",
-                  "mets-toi en securite, tu attaqueras plus librement ensuite", None)
+                  "mets-toi en sécurité, tu attaqueras plus librement ensuite", None)
     if voice == CLASSICAL:
-        return _f("le roque met le roi en securite et active la tour",
-                  "securise le roi avant d'entamer une operation au centre", None)
-    return _f("tu roques : roi a l'abri, tour connectee",
+        return _f("le roque met le roi en sécurité et active la tour",
+                  "sécurise le roi avant d'entamer une opération au centre", None)
+    return _f("tu roques : roi a l'abri, tour connectée",
               "roque maintenant, c'est le bon moment", None)
 
 
@@ -976,23 +976,23 @@ def _frag_reposition(intent, voice, ctx):
     if voice == CREATIVE:
         options = [
             (f"{par} part chercher un autre poste {where}".replace("  ", " ").rstrip(),
-             "ameliore ta piece la moins bien placee, c'est souvent le bon coup"),
+             "améliore ta pièce la moins bien placée, c'est souvent le bon coup"),
             (f"{par} va voir ailleurs {where}".replace("  ", " ").rstrip(),
-             "bouge ta piece la moins utile, garde l'initiative dans le jeu"),
+             "bouge ta pièce la moins utile, garde l'initiative dans le jeu"),
         ]
     elif voice == CLASSICAL:
         options = [
             (f"{par} se replace {where}".replace("  ", " ").rstrip(),
-             "ameliore la piece la moins active avant de forcer le jeu"),
+             "améliore la pièce la moins active avant de forcer le jeu"),
             (f"{par} se redeploie {where}".replace("  ", " ").rstrip(),
-             "reoriente les pieces mal placees avant d'ouvrir les hostilites"),
+             "réoriente les pièces mal placées avant d'ouvrir les hostilités"),
         ]
     else:
         options = [
             (f"{par} change de poste {where}".replace("  ", " ").rstrip(),
-             "repositionne, il n'y a rien de force ici"),
+             "repositionne, il n'y a rien de forcé ici"),
             (f"{par} bouge de case {where}".replace("  ", " ").rstrip(),
-             "recycle cette piece, le jeu n'est pas encore force"),
+             "recycle cette pièce, le jeu n'est pas encore forcé"),
         ]
     obs, plan = _pick_variant(options, intent, ctx)
     return _f(obs, plan, None)
