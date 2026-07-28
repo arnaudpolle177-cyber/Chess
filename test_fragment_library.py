@@ -239,9 +239,12 @@ def test_capture_free_accorde_et_coherent():
 
 def test_sans_reprise_seulement_si_case_non_defendue():
     import chess, move_intent
-    # Tour en d7 DEFENDUE par le roi e8 : la prise reste gagnante mais la
-    # piece EST reprenable -> interdit d'ecrire "sans reprise".
-    board = chess.Board("4k3/3r4/8/8/8/8/8/3QK3 w - - 0 1")
+    # Dame en d7 DEFENDUE par le roi e8, prise par la tour d1 : la prise
+    # reste gagnante a l'echange (+9 -5 = +4) mais la piece EST reprenable
+    # -> interdit d'ecrire "sans reprise" (note : avec une DAME comme
+    # attaquante au lieu d'une tour, le bilan de ligne serait negatif et
+    # l'intent tomberait en SACRIFICE, pas CAPTURE_FREE -- d'ou la tour).
+    board = chess.Board("4k3/3q4/8/8/8/8/8/3RK3 w - - 0 1")
     intent = move_intent.detect_move_intent(
         board, {"move_uci": "d1d7", "pv_uci": ["d1d7", "e8d7"]})
     if intent.kind == move_intent.CAPTURE_FREE:
@@ -252,6 +255,12 @@ def test_sans_reprise_seulement_si_case_non_defendue():
             blob = " ".join(v for v in frag.values() if v)
             check("sans reprise" not in blob,
                   f"[{voice}] 'sans reprise' est faux ici : {blob!r}")
+        # "sans compensation" (voix creative) affirme la meme chose que "sans
+        # reprise" -- egalement faux sur une prise defendue mais gagnante.
+        creative_frag = fragment_library.fragments_for_intent(intent, "creative")
+        creative_blob = " ".join(v for v in creative_frag.values() if v)
+        check("sans compensation" not in creative_blob,
+              f"[creative] 'sans compensation' est faux ici : {creative_blob!r}")
 
 
 def _run():

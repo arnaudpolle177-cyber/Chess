@@ -680,7 +680,13 @@ def _frag_capture_free(intent, voice, ctx):
     prise_nu = _piece_type_name(intent.captured_piece)
     where = f"en {dest}" if dest else ""
     if voice == CREATIVE:
-        obs = f"{prise} adverse {where} tombe sans compensation".replace("  ", " ").rstrip()
+        # "sans compensation" affirme la même chose que "sans reprise" (la
+        # pièce ne peut pas revenir dans le camp adverse) -- même garde que
+        # la voix popular, même repli honnête si la case est défendue.
+        if intent.capture_undefended:
+            obs = f"{prise} adverse {where} tombe sans compensation".replace("  ", " ").rstrip()
+        else:
+            obs = f"l'échange {where} tourne largement à ton avantage".replace("  ", " ").rstrip()
         plan = f"prends {_piece_demonstrative(intent.captured_piece)}, puis enchaîne pendant que tu tiens l'avantage matériel"
         return _f(obs, plan, None)
     if voice == CLASSICAL:
