@@ -177,6 +177,25 @@ def test_selection_cache_roundtrip():
     check(cache.get(fen) is None, "invalidate -> None")
 
 
+def test_coup_calme_est_raconte_pas_la_position():
+    # Coup calme (développement de fou, non forçant) : le paragraphe doit
+    # citer la case d'arrivée du coup affiché (c4), pas uniquement le thème
+    # de position -- c'est le bug corrigé par la tâche 6 (branche
+    # `if intent.forcing` supprimée dans render()).
+    board = chess.Board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1")
+    candidates = [{
+        "move_uci": "f1c4", "move_san": "Bc4", "cp": 30, "eval_loss": 0,
+        "score": "+0.30", "pv_uci": ["f1c4"], "pv_san": ["Bc4"],
+        "is_capture": False, "is_check": False, "is_castle": False,
+        "is_king_move": False, "is_developing_minor": True,
+        "is_pawn_center_push": False, "to_square_central": False,
+        "win_prob": None, "moving_piece_value": 3, "captured_piece_value": None,
+    }]
+    out = nv2.narrate(board, candidates, "popular", chosen=candidates[0])
+    check("c4" in out["text"],
+          f"un coup calme doit citer sa case d'arrivee, obtenu {out['text']!r}")
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

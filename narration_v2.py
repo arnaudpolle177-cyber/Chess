@@ -188,29 +188,32 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
         eval_cp=selection.eval_cp,
     )
 
-    # Intention du COUP recommandé (voir move_intent) : quand le coup est
-    # FORÇANT (fuite d'échec, prise nette, sacrifice, échec, promotion), il
-    # DOIT primer sur le thème de position -- sinon on affiche "pion isolé"
-    # alors que la flèche prend une pièce ou sauve le roi (bug observé). Le
-    # thème de position n'est gardé en secondaire QUE s'il est cohérent avec le
-    # coup (porte géométrique : le coup touche la zone du thème) -- ta consigne
-    # "garder le thème positionnel quand il est cohérent avec une prise".
-    # Calculé par profil (chosen diffère selon le profil) -> différencie enfin
-    # les 3 profils et débloque le figement du thème de position.
+    # Intention du COUP recommandé (voir move_intent). Calculé par profil
+    # (chosen diffère selon le profil) -> différencie enfin les 3 profils et
+    # débloque le figement du thème de position.
     intent = None
     if board is not None and chosen is not None:
         try:
             intent = mi.detect_move_intent(board, chosen, why_motif, why_detail)
-        except Exception:
-            intent = None  # best-effort : jamais bloquant, on retombe sur le thème
+        except Exception as e:
+            # Best-effort : jamais bloquant. Mais SILENCIEUX auparavant, ce qui
+            # a rendu le diagnostic beaucoup plus long -- on journalise comme
+            # le fait déjà l'appelant (web_bridge.py, ligne 1305).
+            print(f"⚠ Intention de coup indisponible ({profile_id}) : {e}")
+            intent = None
 
-    if intent is not None and intent.forcing:
+    # Le paragraphe part TOUJOURS du coup affiché : décrire la position sans
+    # regarder la flèche produisait "le fou bouge, le texte parle du pion"
+    # (mesuré : 47% des coups, voir la spec du 2026-07-28). Le thème de
+    # position n'entre plus qu'en APPUI, et seulement s'il est géométriquement
+    # cohérent avec le coup -- garde qui existait déjà mais n'était appliquée
+    # qu'aux coups forçants.
+    if intent is not None:
         kept_theme = selection.lead if _intent_is_coherent_with_theme(intent, selection.lead) else None
         woven = nw.weave_intent(intent, kept_theme, profile_id, ctx, caution_text=caution_text)
         if woven.get("text"):
             return woven
-        # Repli : si l'intention n'a produit aucun texte (kind sans fragment),
-        # on retombe proprement sur le tissage de thème habituel ci-dessous.
+        # Repli : kind sans fragment (QUIET résiduel) -> tissage de thème.
 
     return nw.weave(selection.lead, selection.supports, profile_id, ctx, caution_text=caution_text)
 
