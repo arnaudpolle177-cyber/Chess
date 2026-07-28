@@ -289,6 +289,18 @@ def test_capture_free_sans_preuve_materielle_ne_ment_pas():
               f"[{voice}] aucune preuve de gain materiel, ne pas l'affirmer : {blob!r}")
 
 
+def test_fragment_mate_dans_les_3_voix():
+    import chess, move_intent
+    board = chess.Board("6k1/5ppp/8/8/8/8/8/3R2K1 w - - 0 1")
+    intent = move_intent.detect_move_intent(
+        board, {"move_uci": "d1d8", "pv_uci": ["d1d8"]})
+    for voice in ("popular", "creative", "classical"):
+        frag = fragment_library.fragments_for_intent(intent, voice)
+        check(frag is not None, f"[{voice}] MATE doit avoir un fragment")
+        blob = " ".join(v for v in frag.values() if v).lower()
+        check("mat" in blob, f"[{voice}] le texte doit dire que c'est mat")
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

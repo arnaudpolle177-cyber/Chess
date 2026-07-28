@@ -119,6 +119,18 @@ def test_promotion():
     check(intent.forcing, "promotion: forçant")
 
 
+# --- 4bis. MATE prime sur GIVES_CHECK --------------------------------------
+def test_mate_prime_sur_tout():
+    # Mat du couloir : Td8# -- c'est AUSSI un echec, la priorite doit
+    # neanmoins ressortir MATE, jamais gives_check.
+    board = chess.Board("6k1/5ppp/8/8/8/8/8/3R2K1 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("d1d8"))
+    check(intent is not None, "un coup de mat doit produire un intent")
+    check(intent.kind == mi.MATE,
+          f"Td8# doit etre MATE, obtenu {intent.kind}")
+    check(intent.forcing is True, "le mat est forcement forcant")
+
+
 # --- 5. GIVES_CHECK (sans prise nette) -------------------------------------
 def test_gives_check():
     # Dame blanche d1 -> d8 donne échec au roi noir e8 (rien à prendre en d8).
@@ -203,7 +215,7 @@ def test_render_forcing_end_to_end():
 
 def main():
     for fn in (test_check_escape, test_capture_free, test_capture_free_defended_but_winning,
-               test_sacrifice, test_promotion,
+               test_sacrifice, test_promotion, test_mate_prime_sur_tout,
                test_gives_check, test_quiet, test_malformed, test_coherence_gate,
                test_render_forcing_end_to_end):
         try:

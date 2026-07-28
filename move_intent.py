@@ -33,6 +33,7 @@ PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, 
 
 # --- Catégories d'intention -------------------------------------------
 # FORÇANTES (le coup fait quelque chose qui prime sur le thème de position) :
+MATE = "mate"                    # le coup fait MAT -- prime sur tout le reste
 CHECK_ESCAPE = "check_escape"    # mon roi était en échec -> le coup le met à l'abri
 CAPTURE_FREE = "capture_free"    # prise d'une pièce que l'adversaire ne peut pas reprendre (gain net)
 SACRIFICE = "sacrifice"          # on donne plus qu'on ne prend, mais le moteur recommande quand même
@@ -42,7 +43,7 @@ CAPTURE_TRADE = "capture_trade"  # prise à valeur ~équilibrée (échange) -- f
 # NON FORÇANTE :
 QUIET = "quiet"                  # coup calme / positionnel -> laisse parler le thème de position
 
-FORCING_KINDS = frozenset({CHECK_ESCAPE, CAPTURE_FREE, SACRIFICE, GIVES_CHECK, PROMOTION, CAPTURE_TRADE})
+FORCING_KINDS = frozenset({MATE, CHECK_ESCAPE, CAPTURE_FREE, SACRIFICE, GIVES_CHECK, PROMOTION, CAPTURE_TRADE})
 
 # Motifs why (why_detector.py) qui, s'ils sont présents, CONFIRMENT une prise
 # nette. Gardés comme signal d'appoint uniquement : la classification ne
@@ -251,6 +252,7 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     -- l'appelant retombe alors sur le thème de position, jamais sur un crash.
 
     Priorité de classement (du plus marquant au plus neutre) :
+      0. le coup fait MAT                     -> MATE
       1. mon roi en échec AVANT le coup      -> CHECK_ESCAPE
       2. je donne du matériel net            -> SACRIFICE
       3. promotion                            -> PROMOTION
@@ -267,6 +269,23 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
         return None
     if move not in board.legal_moves:
         return None  # désync improbable -- pas d'intent plutôt qu'un raisonnement faux
+
+    # Priorité 0 : le coup fait MAT. Rien d'autre ne mérite d'être raconté --
+    # observé en pratique, un mat sortait sous "gives_check" ("l'adversaire
+    # doit réagir tout de suite", alors qu'il ne peut plus rien).
+    board.push(move)
+    is_mate = board.is_checkmate()
+    board.pop()
+    if is_mate:
+        return MoveIntent(
+            kind=MATE, forcing=True,
+            from_square=move.from_square, to_square=move.to_square,
+            moved_piece=board.piece_type_at(move.from_square),
+            captured_piece=(board.piece_at(move.to_square).piece_type
+                            if board.piece_at(move.to_square) else None),
+            material_delta=_immediate_material_delta(board, move),
+            gives_check=True,
+        )
 
     moved = board.piece_at(move.from_square)
     moved_piece = moved.piece_type if moved else None

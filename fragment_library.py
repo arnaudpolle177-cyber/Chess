@@ -826,7 +826,28 @@ def _frag_capture_trade(intent, voice, ctx):
     return _f(obs, plan, None)
 
 
+def _frag_mate(intent, voice, ctx):
+    # Le coup fait MAT. Aucune nuance à apporter : c'est la fin de la partie,
+    # le seul message utile est "joue-le".
+    dest = _sq(intent.to_square)
+    par = _piece_with_article(intent.moved_piece)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        obs = f"{par} {where} met le roi adverse échec et mat".replace("  ", " ")
+        plan = "c'est fini, joue-le"
+        return _f(obs, plan, None)
+    if voice == CLASSICAL:
+        obs = f"{par} {where} donne mat, la partie s'arrête ici".replace("  ", " ")
+        plan = "joue ce coup, aucune autre considération n'a de valeur"
+        return _f(obs, plan, None)
+    # popular
+    obs = f"{par} {where} fait mat".replace("  ", " ")
+    plan = "joue-le, la partie est gagnée"
+    return _f(obs, plan, None)
+
+
 _INTENT_FUNCS = {
+    "mate": _frag_mate,
     "check_escape": _frag_check_escape,
     "capture_free": _frag_capture_free,
     "sacrifice": _frag_sacrifice,
