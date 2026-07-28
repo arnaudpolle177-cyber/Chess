@@ -897,7 +897,7 @@ def _frag_reposition(intent, voice, ctx):
     par = _piece_with_article(intent.moved_piece)
     where = f"en {dest}" if dest else ""
     if voice == CREATIVE:
-        return _f(f"{par} va chercher mieux {where}".replace("  ", " ").rstrip(),
+        return _f(f"{par} part chercher un autre poste {where}".replace("  ", " ").rstrip(),
                   "ameliore ta piece la moins bien placee, c'est souvent le meilleur coup", None)
     if voice == CLASSICAL:
         return _f(f"{par} se replace {where}".replace("  ", " ").rstrip(),

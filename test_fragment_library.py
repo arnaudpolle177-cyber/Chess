@@ -349,6 +349,14 @@ def test_reposition_isole():
               f"[{voice}] contrat de clause, minuscule initiale")
         check(not blob.rstrip().endswith("."),
               f"[{voice}] contrat de clause, pas de point final")
+        # Garde contre une reintroduction : sans detecteur dedie, on ne peut
+        # pas affirmer que la case d'arrivee vaut MIEUX que l'origine -- voir
+        # commentaire de _frag_reposition. Aucun terme comparatif dans le
+        # registre factuel (observation).
+        obs_lower = frag["observation"].lower()
+        for terme in ("mieux", "meilleur", "meilleure", "pire"):
+            check(terme not in obs_lower,
+                  f"[{voice}] l'observation ne doit pas comparer les cases (terme {terme!r}) -> {frag['observation']!r}")
 
 
 def _run():
