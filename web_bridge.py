@@ -304,6 +304,10 @@ class BridgeState:
         # generate_narration (façade v1) reste disponible en repli si la
         # sélection v2 manque (cache miss concurrent, cf. handle_single_profile).
         self._selection_cache = narration_v2.SelectionCache()
+        # Kinds d'intention deja racontes par profil (voir narration_v2.render,
+        # recent_kinds) -- evite de resservir la meme formulation plusieurs
+        # coups d'affilee. Borne a 4 : au-dela, la repetition ne se voit plus.
+        self._recent_intent_kinds = {}
         # Cache des FAITS de scénario (voir narration.compute_scenario_facts)
         # pour LA POSITION COURANTE UNIQUEMENT -- clé (fen, move_uci), vidé à
         # chaque nouvelle position (voir handle_single_profile,
@@ -850,6 +854,10 @@ class BridgeState:
                     self._pending_ply_eval = None
                     self._initiative_history.clear()
                     self._initiative_last_seq = None  # cohérent avec le clear (voir set_my_side)
+                    # Nouvelle partie : les formulations deja servies pour
+                    # l'ancienne partie n'ont plus de sens (voir
+                    # narration_v2.render, recent_kinds).
+                    self._recent_intent_kinds.clear()
                     return
 
                 if self._move_history_board is None:
@@ -1288,9 +1296,15 @@ class BridgeState:
                 woven = narration_v2.render(
                     selection, profile_id, chosen=chosen,
                     why_motif=why_motif, why_detail=why_detail, board=board,
+                    recent_kinds=self._recent_intent_kinds.get(profile_id, ()),
                 )
                 if woven.get("text"):
                     entry["narration"]["paragraph"] = woven["text"]
+                    kind = (woven.get("intent_kind")
+                            or (woven.get("lead") and str(woven["lead"])) or "")
+                    history = list(self._recent_intent_kinds.get(profile_id, ()))
+                    history.append(kind)
+                    self._recent_intent_kinds[profile_id] = tuple(history[-4:])
                     # Aligne l'en-tête (icône + libellé) sur le thème PRINCIPAL
                     # du paragraphe, pour que le titre colle à ce qui est écrit
                     # (le principal v2 = plus haut score, pas toujours identique

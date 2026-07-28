@@ -283,7 +283,8 @@ def weave_intent(intent, kept_support, voice, ctx=None, caution_text=None):
     intent_frag = fl.fragments_for_intent(intent, voice, ctx)
     header = _INTENT_HEADER_THEME.get(intent.kind, TACTICAL)
     if intent_frag is None:
-        return {"text": "", "lead": header, "supports": [], "voice": voice, "caution": caution_text}
+        return {"text": "", "lead": header, "supports": [], "voice": voice,
+                "caution": caution_text, "intent_kind": intent.kind}
 
     # Un fait secondaire vrai du même coup (voir MoveIntent.tags) : on
     # l'accroche à l'observation plutôt que d'en faire une phrase, pour ne pas
@@ -318,4 +319,5 @@ def weave_intent(intent, kept_support, voice, ctx=None, caution_text=None):
         "supports": [kept_support.theme] if kept_support else [],
         "voice": voice,
         "caution": caution_text,
+        "intent_kind": intent.kind,
     }

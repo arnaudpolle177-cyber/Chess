@@ -179,6 +179,21 @@ def _f(observation, plan, cause=None):
     return {"observation": observation, "cause": cause, "plan": plan}
 
 
+def _pick_variant(options, intent, ctx):
+    """
+    Choisit une formulation parmi `options` (liste non vide, de la plus
+    naturelle à la moins), en s'écartant de celle déjà servie récemment pour
+    ce même kind (voir narration_v2.render, recent_kinds). Déterministe :
+    même position + même historique -> même texte (pas de random, sinon deux
+    profils ou deux rafraîchissements donneraient des textes différents pour
+    la même position).
+    """
+    recent = getattr(ctx, "recent_kinds", ()) if ctx else ()
+    seen = sum(1 for k in recent if k == intent.kind)
+    base = (intent.to_square or 0) % len(options)
+    return options[(base + seen) % len(options)]
+
+
 # ---------------------------------------------------------------------
 # Fragments par thème.
 # Chaque fonction : (fields: dict, voice: str, ctx: FragmentContext) -> dict
@@ -686,39 +701,80 @@ def _frag_capture_free(intent, voice, ctx):
     proven = intent.capture_undefended or intent.capture_line_gain
     concept = None if proven else _concept_name(intent.why_motif)
 
+    demo = _piece_demonstrative(intent.captured_piece)
+
     if voice == CREATIVE:
         # "sans compensation" affirme la même chose que "sans reprise" (la
         # pièce ne peut pas revenir dans le camp adverse) -- gardé par la
         # même preuve. "tourne largement à ton avantage" affirme un gain ->
         # exige capture_line_gain. Sans aucune des deux preuves, description
-        # neutre de la prise, sans bilan matériel.
+        # neutre de la prise, sans bilan matériel -- même règle pour la 2e
+        # formulation (_pick_variant, voir anti-répétition).
         if intent.capture_undefended:
-            obs = f"{prise} adverse {where} tombe sans compensation".replace("  ", " ").rstrip()
+            options = [
+                (f"{prise} adverse {where} tombe sans compensation".replace("  ", " ").rstrip(),
+                 f"prends {demo}, puis enchaîne pendant que tu tiens l'avantage matériel"),
+                (f"{prise} adverse {where} n'a personne pour la reprendre".replace("  ", " ").rstrip(),
+                 f"encaisse {demo}, l'initiative reste avec toi"),
+            ]
         elif intent.capture_line_gain:
-            obs = f"l'échange {where} tourne largement à ton avantage".replace("  ", " ").rstrip()
+            options = [
+                (f"l'échange {where} tourne largement à ton avantage".replace("  ", " ").rstrip(),
+                 f"prends {demo}, puis enchaîne pendant que tu tiens l'avantage matériel"),
+                (f"la séquence {where} laisse plus de matériel dans ton camp".replace("  ", " ").rstrip(),
+                 f"engage l'échange, le bilan te reste favorable"),
+            ]
         else:
-            obs = f"{par} prend {prise} {where}".replace("  ", " ").rstrip()
-        plan = f"prends {_piece_demonstrative(intent.captured_piece)}, puis enchaîne pendant que tu tiens l'avantage matériel" if proven \
-            else f"prends {_piece_demonstrative(intent.captured_piece)}, puis évalue calmement la suite"
+            options = [
+                (f"{par} prend {prise} {where}".replace("  ", " ").rstrip(),
+                 f"prends {demo}, puis évalue calmement la suite"),
+                (f"{par} se saisit de {prise} {where}".replace("  ", " ").rstrip(),
+                 f"prends {demo}, puis observe ce que ça donne"),
+            ]
+        obs, plan = _pick_variant(options, intent, ctx)
         return _f(obs, plan, concept)
     if voice == CLASSICAL:
-        # "gain net de matériel" est un bilan -- ne l'affirmer que prouvé.
+        # "gain net de matériel" est un bilan -- ne l'affirmer que prouvé,
+        # dans les deux formulations.
         if proven:
-            obs = f"{par} capture {prise} {where} avec un gain net de matériel".replace("  ", " ")
-            plan = "encaisse le matériel, puis convertis proprement l'avantage"
+            options = [
+                (f"{par} capture {prise} {where} avec un gain net de matériel".replace("  ", " ").rstrip(),
+                 "encaisse le matériel, puis convertis proprement l'avantage"),
+                (f"{par} capture {prise} {where}, le bilan matériel est acquis".replace("  ", " ").rstrip(),
+                 "prends ce gain, puis joue simplement sur l'avantage acquis"),
+            ]
         else:
-            obs = f"{par} capture {prise} {where}".replace("  ", " ")
-            plan = "vérifie le motif tactique avant de t'engager dans la suite"
+            options = [
+                (f"{par} capture {prise} {where}".replace("  ", " ").rstrip(),
+                 "vérifie le motif tactique avant de t'engager dans la suite"),
+                (f"{par} prend {prise} {where}, sans bilan matériel établi".replace("  ", " ").rstrip(),
+                 "confirme le motif avant de poursuivre la ligne"),
+            ]
+        obs, plan = _pick_variant(options, intent, ctx)
         return _f(obs, plan, concept)
     # popular
     if intent.capture_undefended:
-        obs = f"{prise} adverse {where} n'est pas défendu".replace("  ", " ")
+        options = [
+            (f"{prise} adverse {where} n'est pas défendu".replace("  ", " ").rstrip(),
+             f"prends {demo}, c'est du matériel gagné"),
+            (f"{prise} adverse {where} est libre à prendre".replace("  ", " ").rstrip(),
+             f"prends {demo}, personne ne peut le reprendre"),
+        ]
     elif intent.capture_line_gain:
-        obs = f"l'échange {where} tourne à ton avantage".replace("  ", " ")
+        options = [
+            (f"l'échange {where} tourne à ton avantage".replace("  ", " ").rstrip(),
+             f"prends {demo}, c'est du matériel gagné"),
+            (f"l'échange {where} te laisse en tête au niveau matériel".replace("  ", " ").rstrip(),
+             f"prends {demo}, le bilan te reste favorable"),
+        ]
     else:
-        obs = f"{prise} adverse {where} tombe".replace("  ", " ")
-    plan = f"prends {_piece_demonstrative(intent.captured_piece)}, c'est du matériel gagné" if proven \
-        else f"prends {_piece_demonstrative(intent.captured_piece)}, puis regarde ce que ça donne"
+        options = [
+            (f"{prise} adverse {where} tombe".replace("  ", " ").rstrip(),
+             f"prends {demo}, puis regarde ce que ça donne"),
+            (f"{prise} adverse {where} est à portée".replace("  ", " ").rstrip(),
+             f"prends {demo}, puis juge la suite calmement"),
+        ]
+    obs, plan = _pick_variant(options, intent, ctx)
     return _f(obs, plan, concept)
 
 
@@ -848,18 +904,35 @@ def _frag_mate(intent, voice, ctx):
 
 def _frag_develop(intent, voice, ctx):
     # Une mineure sort de la rangee de fond. Fait verifiable : la piece et sa
-    # case d'arrivee, lues sur l'intent.
+    # case d'arrivee, lues sur l'intent. Au moins 2 formulations par voix
+    # (choisies via _pick_variant) : a l'audit, 3 coups de developpement de
+    # suite sortaient le meme paragraphe mot pour mot.
     dest = _sq(intent.to_square)
     par = _piece_with_article(intent.moved_piece)
     where = f"en {dest}" if dest else ""
     if voice == CREATIVE:
-        return _f(f"{par} entre dans la partie {where}".replace("  ", " ").rstrip(),
-                  "sors tes pieces d'abord, les idees viendront apres", None)
-    if voice == CLASSICAL:
-        return _f(f"{par} se developpe {where}".replace("  ", " ").rstrip(),
-                  "termine ton developpement avant d'ouvrir le jeu", None)
-    return _f(f"{par} sort {where}".replace("  ", " ").rstrip(),
-              "developpe, puis roque", None)
+        options = [
+            (f"{par} entre dans la partie {where}".replace("  ", " ").rstrip(),
+             "sors tes pieces d'abord, les idees viendront apres"),
+            (f"{par} rejoint le jeu {where}".replace("  ", " ").rstrip(),
+             "chaque piece sortie ajoute une option, continue"),
+        ]
+    elif voice == CLASSICAL:
+        options = [
+            (f"{par} se developpe {where}".replace("  ", " ").rstrip(),
+             "termine ton developpement avant d'ouvrir le jeu"),
+            (f"{par} quitte sa case de depart {where}".replace("  ", " ").rstrip(),
+             "acheve la mobilisation des pieces mineures avant tout plan"),
+        ]
+    else:
+        options = [
+            (f"{par} sort {where}".replace("  ", " ").rstrip(),
+             "developpe, puis roque"),
+            (f"{par} se met en jeu {where}".replace("  ", " ").rstrip(),
+             "sors une piece de plus avant de lancer une action"),
+        ]
+    obs, plan = _pick_variant(options, intent, ctx)
+    return _f(obs, plan, None)
 
 
 def _frag_castle(intent, voice, ctx):
@@ -892,18 +965,37 @@ def _frag_rook_file(intent, voice, ctx):
 
 def _frag_reposition(intent, voice, ctx):
     # Piece deja developpee qui change de poste, sans capture : on ne peut pas
-    # affirmer POURQUOI sans detecteur dedie, donc on decrit le fait seul.
+    # affirmer POURQUOI sans detecteur dedie, donc on decrit le fait seul --
+    # AUCUN jugement sur la case d'arrivee (pas de "mieux"/"meilleur"/"bon
+    # poste") dans l'observation, dans AUCUNE des formulations (voir
+    # test_reposition_isole). Au moins 2 formulations par voix, choisies via
+    # _pick_variant pour ne pas repeter le meme texte a chaque reposition.
     dest = _sq(intent.to_square)
     par = _piece_with_article(intent.moved_piece)
     where = f"en {dest}" if dest else ""
     if voice == CREATIVE:
-        return _f(f"{par} part chercher un autre poste {where}".replace("  ", " ").rstrip(),
-                  "ameliore ta piece la moins bien placee, c'est souvent le meilleur coup", None)
-    if voice == CLASSICAL:
-        return _f(f"{par} se replace {where}".replace("  ", " ").rstrip(),
-                  "ameliore la piece la moins active avant de forcer le jeu", None)
-    return _f(f"{par} change de poste {where}".replace("  ", " ").rstrip(),
-              "repositionne, il n'y a rien de force ici", None)
+        options = [
+            (f"{par} part chercher un autre poste {where}".replace("  ", " ").rstrip(),
+             "ameliore ta piece la moins bien placee, c'est souvent le bon coup"),
+            (f"{par} va voir ailleurs {where}".replace("  ", " ").rstrip(),
+             "bouge ta piece la moins utile, garde l'initiative dans le jeu"),
+        ]
+    elif voice == CLASSICAL:
+        options = [
+            (f"{par} se replace {where}".replace("  ", " ").rstrip(),
+             "ameliore la piece la moins active avant de forcer le jeu"),
+            (f"{par} se redeploie {where}".replace("  ", " ").rstrip(),
+             "reoriente les pieces mal placees avant d'ouvrir les hostilites"),
+        ]
+    else:
+        options = [
+            (f"{par} change de poste {where}".replace("  ", " ").rstrip(),
+             "repositionne, il n'y a rien de force ici"),
+            (f"{par} bouge de case {where}".replace("  ", " ").rstrip(),
+             "recycle cette piece, le jeu n'est pas encore force"),
+        ]
+    obs, plan = _pick_variant(options, intent, ctx)
+    return _f(obs, plan, None)
 
 
 _INTENT_FUNCS = {

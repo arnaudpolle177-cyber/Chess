@@ -196,6 +196,31 @@ def test_coup_calme_est_raconte_pas_la_position():
           f"un coup calme doit citer sa case d'arrivee, obtenu {out['text']!r}")
 
 
+def test_pas_deux_fois_le_meme_texte_de_suite():
+    # Audit : 3 coups DEVELOP de suite sortaient le meme paragraphe mot pour
+    # mot. recent_kinds doit faire devier la formulation quand le kind
+    # courant a deja ete servi recemment pour ce profil.
+    def cand(uci, san, developing):
+        return [{
+            "move_uci": uci, "move_san": san, "cp": 20, "eval_loss": 0,
+            "score": "+0.20", "pv_uci": [uci], "pv_san": [san],
+            "is_capture": False, "is_check": False, "is_castle": False,
+            "is_king_move": False, "is_developing_minor": developing,
+            "is_pawn_center_push": False, "to_square_central": False,
+            "win_prob": None, "moving_piece_value": 3, "captured_piece_value": None,
+        }]
+    b1 = chess.Board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1")
+    c1 = cand("f1c4", "Bc4", True)
+    t1 = nv2.narrate(b1, c1, "popular", chosen=c1[0])["text"]
+
+    b2 = chess.Board("rnbqkb1r/pppp1ppp/5n2/4p3/2B1P3/8/PPPP1PPP/RNBQK1NR w KQkq - 0 1")
+    c2 = cand("g1f3", "Nf3", True)
+    out2 = nv2.narrate(b2, c2, "popular", chosen=c2[0],
+                        recent_kinds=["develop"])
+    check(out2["text"] != t1,
+          f"deux DEVELOP consecutifs ne doivent pas donner le meme texte : {t1!r}")
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

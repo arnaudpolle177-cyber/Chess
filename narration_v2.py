@@ -163,7 +163,7 @@ def build_selection(board, candidates, swing_cp=None, opponent_better_move_san=N
 
 
 def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
-           board=None, caution_text=None):
+           board=None, caution_text=None, recent_kinds=None):
     """
     Étape profil-level : tisse le paragraphe final pour un profil donné, à
     partir d'une Selection déjà calculée (voir build_selection). C'est la
@@ -176,6 +176,11 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
     board : position actuelle (pour nommer une pièce sur une case, rare).
     caution_text : avertissement transversal DÉJÀ rendu en texte (ex: risque
         de pat) -- renvoyé à part, jamais tissé (voir narration_weaver.weave).
+    recent_kinds : kinds d'intention déjà rendus pour CE profil sur les
+        positions précédentes (du plus ancien au plus récent). Sert à ne pas
+        répéter la même formulation plusieurs coups d'affilée -- observé en
+        pratique : trois coups de développement de suite sortaient le même
+        paragraphe mot pour mot. None -> aucune contrainte.
 
     Retourne le dict de narration_weaver.weave :
       {"text", "lead", "supports", "voice", "caution"}.
@@ -187,6 +192,7 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
         board=board, chosen=chosen, why_motif=why_motif, why_detail=why_detail,
         eval_cp=selection.eval_cp,
     )
+    ctx.recent_kinds = tuple(recent_kinds or ())
 
     # Intention du COUP recommandé (voir move_intent). Calculé par profil
     # (chosen diffère selon le profil) -> différencie enfin les 3 profils et
@@ -220,7 +226,7 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
 
 def narrate(board, candidates, profile_id, swing_cp=None, opponent_better_move_san=None,
             initiative_trend=None, move_history=None, chosen=None, why_motif=None,
-            why_detail=None, caution_text=None, require_relation=False):
+            why_detail=None, caution_text=None, require_relation=False, recent_kinds=None):
     """
     Raccourci tout-en-un (sélection + tissage) -- pratique pour les tests et
     le chemin non caché. En production, PRÉFÉRER build_selection() une fois
@@ -233,7 +239,8 @@ def narrate(board, candidates, profile_id, swing_cp=None, opponent_better_move_s
         move_history=move_history, require_relation=require_relation,
     )
     return render(selection, profile_id, chosen=chosen, why_motif=why_motif,
-                  why_detail=why_detail, board=board, caution_text=caution_text)
+                  why_detail=why_detail, board=board, caution_text=caution_text,
+                  recent_kinds=recent_kinds)
 
 
 class SelectionCache:
