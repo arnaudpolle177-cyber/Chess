@@ -20,6 +20,7 @@ delai, on considere qu'il est mort, on abandonne le scenario en cours et on
 en RECREE un neuf avant d'enchainer le scenario suivant.
 """
 import queue
+import re
 import sys
 import threading
 import traceback
@@ -38,11 +39,22 @@ OUT_PATH = r"C:\Users\Triv\Desktop\Vivado\test\Chess-main\audit_scenarios_report
 ENGINE_TIMEOUT_S = 60
 
 SCENARIOS = [
-    ("finale tours+pions", "8/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1", 8),
-    ("finale roi+pions", "8/5ppp/8/8/8/8/5PPP/6K1 w - - 0 1", 8),
+    # ponytail: FEN du brief task-9 CORRIGEES -- les 3 finales etaient sans
+    # roi noir ("8/.../6K1 w ...", etc.), donc une position ILLEGALE. Un
+    # moteur nourri d'une position sans roi renvoie un score degenere (mate
+    # sentinelle -> "avantage d'environ 1000.0 pions" observe en smoke-test),
+    # et la narration le repete fidelement : ce n'etait pas un bug narration,
+    # c'etait un bug de donnee d'entree du harnais. Roi noir ajoute en
+    # symetrique de la position blanche. Deuxieme correction : la version
+    # symetrique "naive" (pions f7g7h7 / f2g2h2 boites) offrait un mat au
+    # dos immediat (Rxa8#/Qxd8#) des le premier coup -- le scenario s'arretait
+    # avant de tester quoi que ce soit d'une finale. Luft ajoute (pion h
+    # avance en h3/h6) pour que le roi ait une case de fuite.
+    ("finale tours+pions", "r5k1/5pp1/7p/8/8/8/5PP1/R5K1 w - - 0 1", 8),
+    ("finale roi+pions", "6k1/5ppp/8/8/8/8/5PPP/6K1 w - - 0 1", 8),
     ("position fermee", "r1bqk2r/pp2bppp/2n1pn2/2pp4/2PP4/2N1PN2/PP2BPPP/R1BQK2R w KQkq - 0 1", 10),
     ("defense sous attaque", "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5Q2/PPPP1PPP/RNB1K1NR b KQkq - 0 1", 8),
-    ("finale de dames", "8/5ppp/8/8/8/8/5PPP/3Q2K1 w - - 0 1", 6),
+    ("finale de dames", "3q2k1/5pp1/7p/8/8/8/5PP1/3Q2K1 w - - 0 1", 6),
     ("position egale sans jeu", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 6),
 ]
 
@@ -79,16 +91,25 @@ def _avec_timeout(fn, timeout_s, *args, **kwargs):
 
 def controler(nom, rows):
     for i, r in enumerate(rows):
-        case = r["coup"][-2:]
+        # ponytail: SAN peut se terminer par '+'/'#' (echec/mat) -- sans le
+        # retrait, "Rxa8+"[-2:] = "8+" qui n'apparait jamais dans un texte
+        # qui dit correctement "en a8" : faux positif systematique sur toute
+        # capture/echec, observe au premier run complet. Le roque (O-O) n'a
+        # de toute facon pas de "case" au sens de ce controle -- exempte
+        # comme "quiet" au lieu de faux-positiver a chaque roque.
+        case = r["coup"].rstrip("+#")[-2:]
         # 1. Le texte cite-t-il la piece ou la case du coup propose ?
-        if case not in r["texte"] and r["intent"] != "quiet":
+        if (case not in r["texte"] and r["intent"] not in ("quiet", "castle")):
             FAUTES.append(f"[{nom}] {r['coup']} ({r['intent']}) : le texte ne cite pas {case}")
         # 2. Repetition immediate
         if i > 0 and r["texte"] == rows[i - 1]["texte"]:
             FAUTES.append(f"[{nom}] {r['coup']} : texte identique au coup precedent")
         # 3. Accord et coherence de vocabulaire
+        # ponytail: "in" (substring) faisait un faux positif sur "une fou"
+        # DANS "une fourchette" -- observe au run complet. \b force une
+        # frontiere de mot des deux cotes.
         for faute in ("le tour", "le dame", "un tour", "une cavalier", "une fou"):
-            if faute in r["texte"]:
+            if re.search(r"\b" + re.escape(faute) + r"\b", r["texte"]):
                 FAUTES.append(f"[{nom}] {r['coup']} : accord fautif '{faute}'")
         # 4. Affirmation non prouvee
         if "sans reprise" in r["texte"] and r["why"] not in ("undefended", "not_recaptured"):
@@ -118,6 +139,12 @@ def jouer_scenario(eng, nom, fen, n_coups, log):
         return rows, False
 
     history = []
+    # ponytail: reproduit exactement web_bridge._recent_intent_kinds (voir
+    # web_bridge.py:1305-1307) -- un tuple des 4 derniers "kind" par profil,
+    # passe a narration_v2.render(recent_kinds=...). Sans ca l'anti-repetition
+    # de production n'est jamais exerce et le harnais mesurerait des
+    # repetitions qui n'existent pas en vrai (voir brief task-9).
+    recent_kinds = []
     for ply in range(n_coups):
         if board.is_game_over():
             log(f"[{nom}] partie terminee ({board.result()}) apres {ply} coup(s) joue(s)")
@@ -143,7 +170,11 @@ def jouer_scenario(eng, nom, fen, n_coups, log):
             sel = narration_v2.build_selection(board, cands, move_history=list(history))
             out = narration_v2.render(sel, "popular", chosen=chosen,
                                        why_motif=why_motif, why_detail=why_detail,
-                                       board=board)
+                                       board=board, recent_kinds=tuple(recent_kinds))
+            kind = (out.get("intent_kind")
+                    or (out.get("lead") and str(out["lead"])) or "")
+            recent_kinds.append(kind)
+            recent_kinds = recent_kinds[-4:]
             mv = chess.Move.from_uci(chosen["move_uci"])
             if mv not in board.legal_moves:
                 log(f"[{nom}] coup illegal renvoye par le pipeline au ply {ply} "
@@ -201,6 +232,10 @@ def main():
                 log(f"\n--- coup {r['n']}. {r['coup']}   intent={r['intent']}"
                     f"{' (forcant)' if r['forcing'] else ''}   theme={r['lead']}   why={r['why']}")
                 log(f"    {r['texte']}")
+
+            if rows:
+                n_quiet = sum(1 for r in rows if r["intent"] == "quiet")
+                log(f"\n[{nom}] taux quiet residuel : {n_quiet}/{len(rows)}")
 
             try:
                 controler(nom, rows)
