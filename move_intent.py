@@ -325,7 +325,12 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     is_mate = board.is_checkmate()
     board.pop()
     scored_mate = engine_analysis.mate_in_moves(chosen.get("cp"))
-    mate_in = 1 if is_mate else (scored_mate if scored_mate and scored_mate > 0 else None)
+    # Garde (pas un calcul) : si l'echiquier ne prouve pas le mat immediat
+    # (is_mate faux), on n'annonce JAMAIS mate_in=1 meme si le score le
+    # suggere -- un score Mate(1) sans mat reel sur l'echiquier serait un
+    # fait invente. max(2, scored_mate) referme ce trou a cout nul : la
+    # branche non-is_mate ne peut plus jamais retomber sur 1.
+    mate_in = 1 if is_mate else (max(2, scored_mate) if scored_mate and scored_mate > 0 else None)
     if mate_in:
         return MoveIntent(
             kind=MATE, forcing=True,

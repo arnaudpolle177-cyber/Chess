@@ -32,6 +32,8 @@ from typing import List, Optional
 
 import chess
 
+import engine_analysis  # uniquement pour MATE_SCORE (source unique de l'encodage mat)
+
 DEFAULT_EVAL_DEPTH = 13  # repli si l'appelant ne précise pas de depth (voir analyze_variation)
 MAX_PLY = 6      # nombre de demi-coups de la PV analysés (cohérent avec pv_san actuel)
 
@@ -80,7 +82,7 @@ def _pov_cp(score, root_color):
     """Score en centipawns du point de vue de root_color, quel que soit le camp au trait sur cette position précise."""
     if score is None:
         return None
-    return score.pov(root_color).score(mate_score=100000)
+    return score.pov(root_color).score(mate_score=engine_analysis.MATE_SCORE)
 
 
 def _classify_trend(cps):

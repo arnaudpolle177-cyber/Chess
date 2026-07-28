@@ -53,7 +53,7 @@ def coups_matants(board):
     for m in board.legal_moves:
         board.push(m)
         if board.is_checkmate():
-            trouves.append(board.san(chess.Move.null()) if False else m)
+            trouves.append(m)
         board.pop()
     return trouves
 
