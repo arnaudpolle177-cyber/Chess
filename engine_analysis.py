@@ -33,6 +33,8 @@ class ChessCoachEngine:
         # moteur qui n'a pas l'une des deux options (ex. lc0 n'a pas
         # "Hash") ferait échouer configure() pour les deux d'un coup sinon.
         for option, value in (("Threads", threads), ("Hash", hash_mb)):
+            if option not in self.engine.options:
+                continue  # lc0 n'a pas "Hash" : inutile d'essayer et de crier
             try:
                 self.engine.configure({option: value})
             except chess.engine.EngineError as e:
