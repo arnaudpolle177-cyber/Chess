@@ -107,6 +107,20 @@ class MoveIntent:
                   est gagnante" : un échange favorable sur une case défendue
                   est gagnant SANS être imprenable. Seul ce booléen autorise un
                   fragment à écrire "sans reprise".
+    capture_line_gain : seconde preuve CALCULÉE (chemin 2 de _capture_is_free) :
+                  bilan matériel de la LIGNE strictement positif (line_delta > 0)
+                  ET la PV contient la réponse adverse (len(pv_uci) >= 2). Un
+                  intent CAPTURE_FREE peut exister sans AUCUNE des deux preuves
+                  (3e chemin de _capture_is_free : simple confirmation par
+                  why_motif, ex. "fork", qui ne recalcule aucun gain matériel) --
+                  dans ce cas ni capture_undefended ni capture_line_gain ne sont
+                  vrais, et un fragment ne doit affirmer NI "sans reprise" NI
+                  "gain net de matériel".
+    why_motif   : motif why_detector reçu en entrée (voir detect_move_intent),
+                  reporté tel quel sur l'intent. Sert de repli DESCRIPTIF
+                  (jamais de bilan matériel) quand ni capture_undefended ni
+                  capture_line_gain ne prouvent un gain -- voir
+                  fragment_library._frag_capture_free.
     """
     kind: str
     forcing: bool
@@ -118,6 +132,8 @@ class MoveIntent:
     gives_check: bool = False
     sacrifice_ply: Optional[int] = None
     capture_undefended: bool = False   # la case d'arrivée n'a AUCUN défenseur adverse
+    capture_line_gain: bool = False    # bilan de ligne positif, PV avec réponse adverse
+    why_motif: Optional[str] = None    # motif why_detector reporté tel quel (repli descriptif)
 
 
 def _immediate_material_delta(board, move):
@@ -265,13 +281,15 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     gives_check = board.gives_check(move)
     was_in_check = board.is_check()
 
-    def _mk(kind, forcing, delta, capture_undefended=False):
+    def _mk(kind, forcing, delta, capture_undefended=False, capture_line_gain=False):
         return MoveIntent(
             kind=kind, forcing=forcing,
             from_square=move.from_square, to_square=move.to_square,
             moved_piece=moved_piece, captured_piece=captured_piece,
             material_delta=delta, gives_check=gives_check,
             capture_undefended=capture_undefended,
+            capture_line_gain=capture_line_gain,
+            why_motif=why_motif,
         )
 
     # 1. Sortir d'un échec prime sur tout : c'est le BUT du coup, aucune
@@ -301,7 +319,8 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     #    classée fork/material_gain qui retombait en simple échange".
     if is_capture and _capture_is_free(board, move, pv_uci, line_delta, why_motif):
         return _mk(CAPTURE_FREE, True, immediate_delta,
-                   capture_undefended=not board.attackers(not board.turn, move.to_square))
+                   capture_undefended=not board.attackers(not board.turn, move.to_square),
+                   capture_line_gain=line_delta > 0 and len(pv_uci) >= 2)
 
     # 5. Le coup donne échec (sans être une prise nette déjà traitée).
     if gives_check:

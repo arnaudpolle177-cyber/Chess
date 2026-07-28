@@ -668,38 +668,58 @@ def _frag_check_escape(intent, voice, ctx):
 
 
 def _frag_capture_free(intent, voice, ctx):
-    # Prise NETTE : soit la pièce ne peut pas être reprise, soit l'échange
-    # laisse un gain net (voir move_intent._capture_is_free). Le texte reste
-    # donc vrai dans les DEUX cas -- on n'affirme "sans reprise" QUE si
-    # intent.capture_undefended le PROUVE (case non défendue) ; sinon repli
-    # honnête sur "l'échange tourne à ton avantage" (voir _capture_is_free :
-    # une prise défendue mais gagnante à l'échange n'est pas imprenable).
+    # Prise classée CAPTURE_FREE par _capture_is_free, qui a TROIS chemins,
+    # mais seuls DEUX sont des preuves matérielles CALCULÉES :
+    #   - capture_undefended : case non défendue -> prise imprenable ;
+    #   - capture_line_gain  : bilan de ligne strictement positif (PV avec
+    #     la réponse adverse).
+    # Le 3e chemin (confirmation par why_motif seul, ex. "fork") ne recalcule
+    # AUCUN gain -- une prise défendue à valeur égale peut y passer si le
+    # coup fourchette aussi une autre pièce. Dans ce cas ("proven" ci-dessous
+    # False) on ne dit RIEN sur le matériel (ni "sans reprise", ni "gain
+    # net") : on décrit la prise et, si connu, le motif réellement détecté
+    # (cause = concept, jamais une pièce ou un gain fabriqués).
     dest = _sq(intent.to_square)
     prise = _piece_with_article(intent.captured_piece)
     par = _piece_with_article(intent.moved_piece)
-    prise_nu = _piece_type_name(intent.captured_piece)
     where = f"en {dest}" if dest else ""
+    proven = intent.capture_undefended or intent.capture_line_gain
+    concept = None if proven else _concept_name(intent.why_motif)
+
     if voice == CREATIVE:
         # "sans compensation" affirme la même chose que "sans reprise" (la
-        # pièce ne peut pas revenir dans le camp adverse) -- même garde que
-        # la voix popular, même repli honnête si la case est défendue.
+        # pièce ne peut pas revenir dans le camp adverse) -- gardé par la
+        # même preuve. "tourne largement à ton avantage" affirme un gain ->
+        # exige capture_line_gain. Sans aucune des deux preuves, description
+        # neutre de la prise, sans bilan matériel.
         if intent.capture_undefended:
             obs = f"{prise} adverse {where} tombe sans compensation".replace("  ", " ").rstrip()
-        else:
+        elif intent.capture_line_gain:
             obs = f"l'échange {where} tourne largement à ton avantage".replace("  ", " ").rstrip()
-        plan = f"prends {_piece_demonstrative(intent.captured_piece)}, puis enchaîne pendant que tu tiens l'avantage matériel"
-        return _f(obs, plan, None)
+        else:
+            obs = f"{par} prend {prise} {where}".replace("  ", " ").rstrip()
+        plan = f"prends {_piece_demonstrative(intent.captured_piece)}, puis enchaîne pendant que tu tiens l'avantage matériel" if proven \
+            else f"prends {_piece_demonstrative(intent.captured_piece)}, puis évalue calmement la suite"
+        return _f(obs, plan, concept)
     if voice == CLASSICAL:
-        obs = f"{par} capture {prise} {where} avec un gain net de matériel".replace("  ", " ")
-        plan = "encaisse le matériel, puis convertis proprement l'avantage"
-        return _f(obs, plan, None)
+        # "gain net de matériel" est un bilan -- ne l'affirmer que prouvé.
+        if proven:
+            obs = f"{par} capture {prise} {where} avec un gain net de matériel".replace("  ", " ")
+            plan = "encaisse le matériel, puis convertis proprement l'avantage"
+        else:
+            obs = f"{par} capture {prise} {where}".replace("  ", " ")
+            plan = "vérifie le motif tactique avant de t'engager dans la suite"
+        return _f(obs, plan, concept)
     # popular
     if intent.capture_undefended:
         obs = f"{prise} adverse {where} n'est pas défendu".replace("  ", " ")
-    else:
+    elif intent.capture_line_gain:
         obs = f"l'échange {where} tourne à ton avantage".replace("  ", " ")
-    plan = f"prends {_piece_demonstrative(intent.captured_piece)}, c'est du matériel gagné"
-    return _f(obs, plan, None)
+    else:
+        obs = f"{prise} adverse {where} tombe".replace("  ", " ")
+    plan = f"prends {_piece_demonstrative(intent.captured_piece)}, c'est du matériel gagné" if proven \
+        else f"prends {_piece_demonstrative(intent.captured_piece)}, puis regarde ce que ça donne"
+    return _f(obs, plan, concept)
 
 
 def _frag_sacrifice(intent, voice, ctx):

@@ -263,6 +263,32 @@ def test_sans_reprise_seulement_si_case_non_defendue():
               f"[creative] 'sans compensation' est faux ici : {creative_blob!r}")
 
 
+def test_capture_free_sans_preuve_materielle_ne_ment_pas():
+    import chess, move_intent
+    # Cavalier c3 prend un cavalier e4 DEFENDU par le pion d5, valeur egale
+    # (3 pour 3) -> line_delta == 0 apres reprise, donc NI capture_undefended
+    # (case defendue) NI capture_line_gain (bilan de ligne nul, pas positif).
+    # Seul le 3e chemin de _capture_is_free (why_motif="fork", qui ne
+    # recalcule aucun gain) fait ressortir CAPTURE_FREE : aucun fragment ne
+    # doit alors affirmer un gain materiel ou une prise imprenable.
+    board = chess.Board("4k3/8/8/3p4/4n3/2N5/8/4K3 w - - 0 1")
+    intent = move_intent.detect_move_intent(
+        board, {"move_uci": "c3e4", "pv_uci": ["c3e4", "d5e4"]}, why_motif="fork")
+    check(intent.kind == move_intent.CAPTURE_FREE,
+          f"setup: attendu capture_free, obtenu {intent.kind}")
+    check(intent.capture_undefended is False,
+          "case defendue par le pion d5 : capture_undefended doit etre False")
+    check(intent.capture_line_gain is False,
+          "echange a valeur egale (line_delta == 0) : capture_line_gain doit etre False")
+    for voice in ("popular", "creative", "classical"):
+        frag = fragment_library.fragments_for_intent(intent, voice)
+        blob = " ".join(v for v in frag.values() if v)
+        check("sans reprise" not in blob and "sans compensation" not in blob,
+              f"[{voice}] aucune preuve d'imprenabilite : {blob!r}")
+        check("gain net" not in blob and "tourne" not in blob.lower(),
+              f"[{voice}] aucune preuve de gain materiel, ne pas l'affirmer : {blob!r}")
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
