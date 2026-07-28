@@ -711,6 +711,11 @@ def _frag_capture_free(intent, voice, ctx):
     fem = _piece_is_feminine(intent.captured_piece)
     pron = "la" if fem else "le"
     defendu = "défendue" if fem else "défendu"
+    # « de » + article défini se CONTRACTE au masculin : "de le cavalier" est
+    # fautif, il faut "du cavalier" ("de la tour" reste correct au féminin).
+    # Sortait réellement à l'écran -- ni la garde d'accents ni celle d'accord
+    # ne pouvaient le voir, aucune des deux ne regardait les prépositions.
+    de_prise = f"de {prise}" if fem else f"du {_piece_type_name(intent.captured_piece)}"
 
     if voice == CREATIVE:
         # "sans compensation" affirme la même chose que "sans reprise" (la
@@ -737,7 +742,7 @@ def _frag_capture_free(intent, voice, ctx):
             options = [
                 (f"{par} prend {prise} {where}".replace("  ", " ").rstrip(),
                  f"prends {demo}, puis évalue calmement la suite"),
-                (f"{par} se saisit de {prise} {where}".replace("  ", " ").rstrip(),
+                (f"{par} se saisit {de_prise} {where}".replace("  ", " ").rstrip(),
                  f"prends {demo}, puis observe ce que ça donne"),
             ]
         obs, plan = _pick_variant(options, intent, ctx)

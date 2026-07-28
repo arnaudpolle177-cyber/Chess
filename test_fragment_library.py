@@ -527,8 +527,14 @@ def test_accord_genre_dans_les_fragments_dintention():
         for piece in pieces:
             for kind in kinds:
                 for preuve in preuves:
+                  # DEUX cases d'arrivee, pas une : _pick_variant choisit la
+                  # variante par `to_square % len(options)`. Avec la seule case
+                  # d4 (27, impair) la variante d'index 0 n'etait JAMAIS evaluee
+                  # -- la garde laissait repasser « n'est pas defendu », l'une
+                  # des trois formulations qu'elle est censee surveiller.
+                  for arrivee in (chess.D4, chess.E4):
                     intent = mi.MoveIntent(
-                        kind=kind, forcing=True, from_square=chess.D1, to_square=chess.D4,
+                        kind=kind, forcing=True, from_square=chess.D1, to_square=arrivee,
                         moved_piece=piece, captured_piece=piece, **preuve)
                     for voice in VOICES:
                         frag = fragment_library.fragments_for_intent(intent, voice)
@@ -540,6 +546,13 @@ def test_accord_genre_dans_les_fragments_dintention():
                             check(m is None,
                                   f"[{voice}/{kind}/{genre}] accord casse "
                                   f"({m.group(0) if m else ''}) -> {blob!r}")
+                        # Contraction obligatoire en francais : de + le -> du,
+                        # de + les -> des. « se saisit de le cavalier » sortait
+                        # reellement a l'ecran, manque par tous les balayages.
+                        m = re.search(r"\bde l(e|es) (tour|dame|cavalier|fou|pion|roi)\b", blob)
+                        check(m is None,
+                              f"[{voice}/{kind}/{genre}] contraction manquante "
+                              f"({m.group(0) if m else ''}) -> {blob!r}")
 
 
 def test_colonne_semi_ouverte_nest_pas_dite_ouverte():
