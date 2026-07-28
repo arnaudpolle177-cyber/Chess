@@ -102,6 +102,11 @@ class MoveIntent:
                     matériel part DÈS ce coup ; au-delà -> le déficit ne se
                     matérialise que plus loin dans la ligne forcée (voir
                     _material_delta_over_pv et fragment_library._frag_sacrifice).
+    capture_undefended : preuve DIRECTE que la pièce prise ne peut pas être
+                  reprise (aucun défenseur sur la case). Distinct de "la prise
+                  est gagnante" : un échange favorable sur une case défendue
+                  est gagnant SANS être imprenable. Seul ce booléen autorise un
+                  fragment à écrire "sans reprise".
     """
     kind: str
     forcing: bool
@@ -112,6 +117,7 @@ class MoveIntent:
     material_delta: int = 0
     gives_check: bool = False
     sacrifice_ply: Optional[int] = None
+    capture_undefended: bool = False   # la case d'arrivée n'a AUCUN défenseur adverse
 
 
 def _immediate_material_delta(board, move):
@@ -259,12 +265,13 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     gives_check = board.gives_check(move)
     was_in_check = board.is_check()
 
-    def _mk(kind, forcing, delta):
+    def _mk(kind, forcing, delta, capture_undefended=False):
         return MoveIntent(
             kind=kind, forcing=forcing,
             from_square=move.from_square, to_square=move.to_square,
             moved_piece=moved_piece, captured_piece=captured_piece,
             material_delta=delta, gives_check=gives_check,
+            capture_undefended=capture_undefended,
         )
 
     # 1. Sortir d'un échec prime sur tout : c'est le BUT du coup, aucune
@@ -293,7 +300,8 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     #    (voir _capture_is_free) : c'est le correctif du cas "prise gagnante
     #    classée fork/material_gain qui retombait en simple échange".
     if is_capture and _capture_is_free(board, move, pv_uci, line_delta, why_motif):
-        return _mk(CAPTURE_FREE, True, immediate_delta)
+        return _mk(CAPTURE_FREE, True, immediate_delta,
+                   capture_undefended=not board.attackers(not board.turn, move.to_square))
 
     # 5. Le coup donne échec (sans être une prise nette déjà traitée).
     if gives_check:

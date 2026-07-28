@@ -29,6 +29,7 @@ from theme_detector import (
     ENDGAME, OPENING, INITIATIVE_SHIFT, STRATEGIC_ADVANTAGE, PAWN_STRUCTURE,
     PIECE_ACTIVITY_GAP, KING_SAFETY_WARNING, EQUAL_POSITION,
 )
+import fragment_library
 import fragment_library as fl
 from fragment_library import FragmentContext, fragments_for, VOICES
 
@@ -205,6 +206,52 @@ def test_opening_castle_three_states():
     # Déjà roqué : on ne renvoie plus vers le roque.
     check("roque est derrière" in done_txt or "roque n'est plus" in done_txt,
           f"déjà roqué -> devrait acter que le roque est fait -> {done_txt!r}")
+
+
+def test_piece_article_accord():
+    import chess
+    check(fragment_library._piece_with_article(chess.ROOK) == "la tour",
+          "tour est FEMININ : 'la tour', jamais 'le tour'")
+    check(fragment_library._piece_with_article(chess.QUEEN) == "la dame",
+          "dame est FEMININ")
+    check(fragment_library._piece_with_article(chess.KNIGHT) == "le cavalier",
+          "cavalier est masculin")
+    check(fragment_library._piece_with_article(chess.ROOK, definite=False) == "une tour",
+          "article indefini feminin")
+    check(fragment_library._piece_with_article(None) == "la piece"
+          or fragment_library._piece_with_article(None) == "la pièce",
+          "type inconnu -> repli feminin coherent avec 'piece'")
+
+
+def test_capture_free_accorde_et_coherent():
+    import chess, move_intent
+    # Tour noire en d7 non défendue, tour blanche en d1 la prend.
+    board = chess.Board("7k/3r4/8/8/8/8/8/3RK3 w - - 0 1")
+    intent = move_intent.detect_move_intent(
+        board, {"move_uci": "d1d7", "pv_uci": ["d1d7"]})
+    for voice in ("popular", "creative", "classical"):
+        frag = fragment_library.fragments_for_intent(intent, voice)
+        blob = " ".join(v for v in frag.values() if v)
+        check("le tour" not in blob, f"[{voice}] accord : jamais 'le tour'")
+        check("pièce" not in blob or "tour" in blob,
+              f"[{voice}] on nomme la piece reellement prise, pas 'piece'")
+
+
+def test_sans_reprise_seulement_si_case_non_defendue():
+    import chess, move_intent
+    # Tour en d7 DEFENDUE par le roi e8 : la prise reste gagnante mais la
+    # piece EST reprenable -> interdit d'ecrire "sans reprise".
+    board = chess.Board("4k3/3r4/8/8/8/8/8/3QK3 w - - 0 1")
+    intent = move_intent.detect_move_intent(
+        board, {"move_uci": "d1d7", "pv_uci": ["d1d7", "e8d7"]})
+    if intent.kind == move_intent.CAPTURE_FREE:
+        check(intent.capture_undefended is False,
+              "case defendue par le roi : capture_undefended doit etre False")
+        for voice in ("popular", "creative", "classical"):
+            frag = fragment_library.fragments_for_intent(intent, voice)
+            blob = " ".join(v for v in frag.values() if v)
+            check("sans reprise" not in blob,
+                  f"[{voice}] 'sans reprise' est faux ici : {blob!r}")
 
 
 def _run():

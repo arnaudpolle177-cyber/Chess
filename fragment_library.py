@@ -613,6 +613,31 @@ def _piece_type_name(piece_type):
     return PIECE_NAMES_FR.get(piece_type, "pièce")
 
 
+# Genre grammatical des noms de pièces -- "tour" et "dame" sont FÉMININS.
+# Les fragments écrivaient "le {nom}" en dur, d'où "le tour adverse" observé
+# en pratique. Le repli "pièce" est féminin lui aussi, donc cohérent.
+_PIECE_IS_FEMININE = {chess.ROOK, chess.QUEEN}
+
+
+def _piece_with_article(piece_type, definite=True):
+    """
+    Nom FR d'un type de pièce précédé de son article accordé :
+    "la tour", "le cavalier", "une dame", "un fou". None/inconnu -> "la pièce".
+    """
+    name = _piece_type_name(piece_type)
+    feminine = piece_type in _PIECE_IS_FEMININE or name == "pièce"
+    if definite:
+        return f"{'la' if feminine else 'le'} {name}"
+    return f"{'une' if feminine else 'un'} {name}"
+
+
+def _piece_demonstrative(piece_type):
+    """"ce cavalier" / "cette tour" -- accord identique à _piece_with_article."""
+    name = _piece_type_name(piece_type)
+    feminine = piece_type in _PIECE_IS_FEMININE or name == "pièce"
+    return f"{'cette' if feminine else 'ce'} {name}"
+
+
 def _frag_check_escape(intent, voice, ctx):
     # Le roi était en échec : le coup le met à l'abri. On nomme la case
     # d'arrivée si on l'a. On distingue "le roi bouge" d'une parade (une autre
@@ -645,23 +670,29 @@ def _frag_check_escape(intent, voice, ctx):
 def _frag_capture_free(intent, voice, ctx):
     # Prise NETTE : soit la pièce ne peut pas être reprise, soit l'échange
     # laisse un gain net (voir move_intent._capture_is_free). Le texte reste
-    # donc vrai dans les DEUX cas -- on n'affirme pas "non défendue", ce qui
-    # serait faux pour une prise défendue mais gagnante à l'échange.
+    # donc vrai dans les DEUX cas -- on n'affirme "sans reprise" QUE si
+    # intent.capture_undefended le PROUVE (case non défendue) ; sinon repli
+    # honnête sur "l'échange tourne à ton avantage" (voir _capture_is_free :
+    # une prise défendue mais gagnante à l'échange n'est pas imprenable).
     dest = _sq(intent.to_square)
-    prise = _piece_type_name(intent.captured_piece)
-    par = _piece_type_name(intent.moved_piece)
+    prise = _piece_with_article(intent.captured_piece)
+    par = _piece_with_article(intent.moved_piece)
+    prise_nu = _piece_type_name(intent.captured_piece)
     where = f"en {dest}" if dest else ""
     if voice == CREATIVE:
-        obs = f"le {prise} adverse {where} tombe sans compensation".replace("  ", " ").rstrip()
-        plan = "prends-le, puis enchaîne pendant que tu tiens l'avantage matériel"
+        obs = f"{prise} adverse {where} tombe sans compensation".replace("  ", " ").rstrip()
+        plan = f"prends {_piece_demonstrative(intent.captured_piece)}, puis enchaîne pendant que tu tiens l'avantage matériel"
         return _f(obs, plan, None)
     if voice == CLASSICAL:
-        obs = f"le {par} capture le {prise} {where} avec un gain net de matériel".replace("  ", " ")
+        obs = f"{par} capture {prise} {where} avec un gain net de matériel".replace("  ", " ")
         plan = "encaisse le matériel, puis convertis proprement l'avantage"
         return _f(obs, plan, None)
     # popular
-    obs = f"le {prise} adverse {where} tombe sans reprise à ta hauteur".replace("  ", " ")
-    plan = "prends la pièce, c'est du matériel gagné"
+    if intent.capture_undefended:
+        obs = f"{prise} adverse {where} n'est pas défendu".replace("  ", " ")
+    else:
+        obs = f"l'échange {where} tourne à ton avantage".replace("  ", " ")
+    plan = f"prends {_piece_demonstrative(intent.captured_piece)}, c'est du matériel gagné"
     return _f(obs, plan, None)
 
 
@@ -751,20 +782,20 @@ def _frag_promotion(intent, voice, ctx):
 
 def _frag_capture_trade(intent, voice, ctx):
     # Échange à valeur ~égale : on décrit la prise sans dramatiser.
-    prise = _piece_type_name(intent.captured_piece)
-    par = _piece_type_name(intent.moved_piece)
+    prise = _piece_with_article(intent.captured_piece)
+    par = _piece_with_article(intent.moved_piece)
     dest = _sq(intent.to_square)
     where = f"en {dest}" if dest else ""
     if voice == CREATIVE:
-        obs = f"le {par} prend le {prise} {where} et relance la position".replace("  ", " ")
+        obs = f"{par} prend {prise} {where} et relance la position".replace("  ", " ")
         plan = "engage l'échange, puis cherche à en tirer l'initiative"
         return _f(obs, plan, None)
     if voice == CLASSICAL:
-        obs = f"le {par} échange le {prise} {where}".replace("  ", " ")
+        obs = f"{par} échange {prise} {where}".replace("  ", " ")
         plan = "réalise l'échange, il clarifie la position"
         return _f(obs, plan, None)
     # popular
-    obs = f"le {par} prend le {prise} {where}".replace("  ", " ")
+    obs = f"{par} prend {prise} {where}".replace("  ", " ")
     plan = "fais l'échange, il simplifie la position sans rien concéder"
     return _f(obs, plan, None)
 
