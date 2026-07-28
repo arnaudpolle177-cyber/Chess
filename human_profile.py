@@ -39,6 +39,8 @@ import random
 
 import chess
 
+import engine_analysis
+
 
 @dataclass(frozen=True)
 class EloTier:
@@ -487,6 +489,28 @@ def select_move(candidates, elo_tier_id, profile_id,
     """
     if not candidates:
         return None
+
+    # MAT FORCÉ : priorité ABSOLUE sur toute la logique de profil/humanité.
+    # Un mat encodé ne se départage PAS par eval_loss : mat en 1 = 99999,
+    # mat en 4 = 99996 -- un coup de distance au mat pèse 1cp, donc bien moins
+    # que la fenêtre de tolérance du niveau (20 à 90cp). Tous les mats
+    # semblaient équivalents au scoring, et _band_penalty (qui pénalise
+    # volontairement eval_loss=0) finissait par préférer le mat le PLUS LENT --
+    # un coach qui montre mat en 4 alors que mat en 2 existe enseigne une
+    # erreur. On court-circuite donc : le mat le plus COURT, quel que soit le
+    # profil et le niveau. mate_in_moves est SIGNÉ du point de vue du camp au
+    # trait (voir engine_analysis) : on ne garde que les mats > 0 (les miens),
+    # jamais un cp très négatif qui encode un mat SUBI. Départage déterministe
+    # par l'ordre moteur (aucun aléa). Positions sans mat : rien ne change.
+    mates = [(dist, rank, c) for rank, c in enumerate(candidates)
+             for dist in (engine_analysis.mate_in_moves(c.get("cp")),)
+             if dist is not None and dist > 0]
+    if mates:
+        chosen = dict(min(mates, key=lambda t: (t[0], t[1]))[2])
+        chosen["is_inaccuracy"] = False
+        chosen["is_brilliant"] = False
+        return chosen
+
     tier = ELO_TIERS.get(elo_tier_id, ELO_TIERS[DEFAULT_ELO_TIER])
     tier = _tiered_for_position(tier, board)
     rng = rng or random

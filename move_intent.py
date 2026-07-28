@@ -26,6 +26,7 @@ from typing import Optional
 
 import chess
 
+import engine_analysis  # uniquement pour l'encodage des mats (constantes + mate_in_moves)
 import why_detector
 
 # Valeurs standard -- mêmes que why_detector / variation_narrator (source
@@ -155,6 +156,11 @@ class MoveIntent:
                   échec alors que son kind principal est autre chose (une
                   prise, un sacrifice) -- sans ce champ, l'échec était
                   purement et simplement perdu (observé sur Fxb5+).
+    mate_in     : kind MATE seulement -- nombre de COUPS avant le mat (1 = mat
+                  immédiat sur l'échiquier, 2 = mat forcé en deux coups...).
+                  Lu sur la valeur NUMÉRIQUE chosen["cp"] (encodage
+                  engine_analysis.MATE_SCORE), jamais sur la chaîne "Mat en 2"
+                  (fragile et dépendante de la langue). None hors MATE.
     """
     kind: str
     forcing: bool
@@ -170,6 +176,7 @@ class MoveIntent:
     file_status: Optional[str] = None  # ROOK_FILE : "open" / "half_open" (colonne d'arrivée)
     why_motif: Optional[str] = None    # motif why_detector reporté tel quel (repli descriptif)
     tags: frozenset = frozenset()      # faits secondaires vrais, ex. "gives_check" (voir docstring)
+    mate_in: Optional[int] = None      # MATE : nombre de COUPS avant le mat (1 = mat immédiat)
 
 
 def _immediate_material_delta(board, move):
@@ -287,7 +294,7 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     -- l'appelant retombe alors sur le thème de position, jamais sur un crash.
 
     Priorité de classement (du plus marquant au plus neutre) :
-      0. le coup fait MAT                     -> MATE
+      0. le coup mate (immédiat ou forcé en N) -> MATE (mate_in = N)
       1. mon roi en échec AVANT le coup      -> CHECK_ESCAPE
       2. je donne du matériel net            -> SACRIFICE
       3. promotion                            -> PROMOTION
@@ -305,13 +312,21 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     if move not in board.legal_moves:
         return None  # désync improbable -- pas d'intent plutôt qu'un raisonnement faux
 
-    # Priorité 0 : le coup fait MAT. Rien d'autre ne mérite d'être raconté --
-    # observé en pratique, un mat sortait sous "gives_check" ("l'adversaire
-    # doit réagir tout de suite", alors qu'il ne peut plus rien).
+    # Priorité 0 : le coup MATE -- immédiatement, OU au bout d'une séquence
+    # forcée. Rien d'autre ne mérite d'être raconté (observé en pratique, un
+    # mat sortait sous "gives_check" : "l'adversaire doit réagir tout de
+    # suite", alors qu'il ne peut plus rien ; et un mat forcé en 2 ressortait
+    # carrément en "rook_file", conseil de colonne ouverte).
+    # Le mat en N vient du SCORE du candidat, pas de l'échiquier : seule la
+    # valeur numérique chosen["cp"] le prouve (encodage engine_analysis).
+    # mate_in_moves est SIGNÉ : négatif = mat SUBI, surtout pas une intention
+    # "je mate".
     board.push(move)
     is_mate = board.is_checkmate()
     board.pop()
-    if is_mate:
+    scored_mate = engine_analysis.mate_in_moves(chosen.get("cp"))
+    mate_in = 1 if is_mate else (scored_mate if scored_mate and scored_mate > 0 else None)
+    if mate_in:
         return MoveIntent(
             kind=MATE, forcing=True,
             from_square=move.from_square, to_square=move.to_square,
@@ -319,7 +334,8 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
             captured_piece=(board.piece_at(move.to_square).piece_type
                             if board.piece_at(move.to_square) else None),
             material_delta=_immediate_material_delta(board, move),
-            gives_check=True,
+            gives_check=is_mate or board.gives_check(move),
+            mate_in=mate_in,
         )
 
     moved = board.piece_at(move.from_square)

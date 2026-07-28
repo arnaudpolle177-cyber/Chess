@@ -897,11 +897,25 @@ def _frag_capture_trade(intent, voice, ctx):
 
 
 def _frag_mate(intent, voice, ctx):
-    # Le coup fait MAT. Aucune nuance à apporter : c'est la fin de la partie,
-    # le seul message utile est "joue-le".
+    # Le coup MATE. Aucune nuance à apporter : c'est la fin de la partie, le
+    # seul message utile est "joue-le". Deux cas distincts, jamais confondus :
+    # le mat est-il DÉJÀ sur l'échiquier (mate_in == 1) ou au bout d'une
+    # séquence forcée (mate_in > 1) ? On ne dit "fait mat" que dans le premier
+    # cas -- sinon on annonce le compte, prouvé par le score du candidat (voir
+    # move_intent.mate_in), jamais deviné.
     dest = _sq(intent.to_square)
     par = _piece_with_article(intent.moved_piece)
     where = f"en {dest}" if dest else ""
+    n = intent.mate_in or 1
+    if n > 1:
+        if voice == CREATIVE:
+            obs = f"{par} {where} lance le mat en {n} coups".replace("  ", " ")
+            return _f(obs, "va au bout de la séquence, elle est forcée", None)
+        if voice == CLASSICAL:
+            obs = f"{par} {where} force le mat en {n} coups".replace("  ", " ")
+            return _f(obs, "conduis la séquence jusqu'au mat, elle ne laisse aucune parade", None)
+        obs = f"{par} {where} force le mat en {n} coups".replace("  ", " ")
+        return _f(obs, "joue-le et enchaîne, la partie est gagnée", None)
     if voice == CREATIVE:
         obs = f"{par} {where} met le roi adverse échec et mat".replace("  ", " ")
         plan = "c'est fini, joue-le"

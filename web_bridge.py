@@ -36,6 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import chess
 import chess.engine
 
+import engine_analysis
 from engine_analysis import ChessCoachEngine
 from explain import explain_move_local, explain_move_via_api
 import human_profile
@@ -60,12 +61,9 @@ DEFAULT_PORT = 8765
 # changement nécessaire, le code reste intact).
 LICHESS_EXPLORER_ENABLED = False
 
-# Au-delà de cette valeur ABSOLUE de cp, on considère que le score encode un
-# mat, pas une éval matérielle (voir engine_analysis.analyze_candidates :
-# score().score(mate_score=100000)). 100000 = mat immédiat ; 100000 - N ~=
-# mat en N demi-coups. Un vrai avantage matériel ne dépasse jamais ça (une
-# dame vaut ~900cp), donc le seuil départage sans ambiguïté.
-_MATE_CP_THRESHOLD = 90000
+# (Le seuil "ce score encode un mat" vit désormais dans engine_analysis --
+# MATE_SCORE / MATE_CP_THRESHOLD / mate_in_moves, source unique : c'est lui qui
+# produit l'encodage. Ne pas le redéfinir ici.)
 
 # Budget de recherche EN TEMPS pour lc0 (profil "classical", voir
 # BridgeState) -- PAS en profondeur (voir engine_analysis.analyze_candidates,
@@ -106,13 +104,9 @@ def _objective_eval_white(top_candidate, board):
         return {"cp": None, "mate": None}  # coup de livre : pas d'éval réelle
     # Renverse vers le point de vue des Blancs si c'est aux Noirs de jouer.
     white_cp = cp if board.turn == chess.WHITE else -cp
-    if abs(white_cp) >= _MATE_CP_THRESHOLD:
-        # Encode un mat : reconstruit le nombre de demi-coups (100000 - |cp|),
-        # converti en coups pleins, en gardant le signe (côté qui mate).
-        plies = max(1, 100000 - abs(white_cp))
-        moves = (plies + 1) // 2
-        return {"cp": white_cp, "mate": moves if white_cp > 0 else -moves}
-    return {"cp": white_cp, "mate": None}
+    # Encode un mat ? engine_analysis.mate_in_moves reconstruit le nombre de
+    # coups pleins en gardant le signe (côté qui mate) -- None sinon.
+    return {"cp": white_cp, "mate": engine_analysis.mate_in_moves(white_cp)}
 
 
 class BridgeState:

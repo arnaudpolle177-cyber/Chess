@@ -21,6 +21,7 @@ except Exception:
 
 import chess
 
+import engine_analysis
 import move_intent as mi
 import narration_v2 as nv2
 import theme_detector as td
@@ -129,6 +130,30 @@ def test_mate_prime_sur_tout():
     check(intent.kind == mi.MATE,
           f"Td8# doit etre MATE, obtenu {intent.kind}")
     check(intent.forcing is True, "le mat est forcement forcant")
+    check(intent.mate_in == 1, f"un mat immediat est un mat en 1, obtenu {intent.mate_in}")
+
+
+def test_mat_force_en_deux_coups():
+    # Mat de l'escalier : le mat n'est PAS sur l'echiquier apres le coup, il
+    # est force en 2 coups. Seul le score numerique du candidat le prouve
+    # (encodage engine_analysis.MATE_SCORE) -- surtout pas la chaine "Mat en 2".
+    board = chess.Board("7k/8/8/8/8/8/6R1/5R1K w - - 0 1")
+    cp = engine_analysis.MATE_SCORE - 2  # encodage : MATE_SCORE - nombre de COUPS
+    intent = mi.detect_move_intent(board, {"move_uci": "g2g7", "pv_uci": ["g2g7"], "cp": cp})
+    check(intent is not None, "un mat force doit produire un intent")
+    check(intent.kind == mi.MATE, f"mat force en 2 doit etre MATE, obtenu {intent.kind}")
+    check(intent.mate_in == 2, f"mate_in doit valoir 2, obtenu {intent.mate_in}")
+    check(intent.forcing is True, "un mat force est forcant")
+
+
+def test_mat_subi_n_est_pas_une_intention_de_mat():
+    # cp tres NEGATIF = c'est MOI qui me fais mater. Aucune intention "je mate".
+    board = chess.Board(chess.STARTING_FEN)
+    cp = -(engine_analysis.MATE_SCORE - 2)
+    intent = mi.detect_move_intent(board, {"move_uci": "e2e4", "pv_uci": ["e2e4"], "cp": cp})
+    check(intent is not None, "intent non None")
+    check(intent.kind != mi.MATE, f"un mat SUBI ne doit pas sortir en MATE (kind={intent.kind})")
+    check(intent.mate_in is None, f"pas de mate_in sur un mat subi : {intent.mate_in}")
 
 
 # --- 5. GIVES_CHECK (sans prise nette) -------------------------------------
@@ -313,6 +338,7 @@ def test_render_forcing_end_to_end():
 def main():
     for fn in (test_check_escape, test_capture_free, test_capture_free_defended_but_winning,
                test_sacrifice, test_promotion, test_mate_prime_sur_tout,
+               test_mat_force_en_deux_coups, test_mat_subi_n_est_pas_une_intention_de_mat,
                test_gives_check, test_quiet, test_malformed,
                test_prise_qui_donne_echec_porte_le_tag,
                test_intentions_calmes, test_statut_de_colonne_reporte,

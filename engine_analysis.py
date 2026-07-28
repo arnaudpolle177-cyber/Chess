@@ -17,6 +17,34 @@ DEFAULT_DEPTH = 20
 # volume égal" (technique classique de fin de partie).
 PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9}
 
+# SOURCE DE VÉRITÉ UNIQUE de l'encodage des mats en centipions (voir
+# analyze_candidates : score().score(mate_score=MATE_SCORE)). MATE_SCORE = mat
+# immédiat ; MATE_SCORE - N = mat en N demi-coups. Un vrai avantage matériel ne
+# dépasse jamais MATE_CP_THRESHOLD (une dame vaut ~900cp), donc le seuil
+# départage sans ambiguïté. Consommé par web_bridge.py, human_profile.py et
+# move_intent.py -- ne PAS recopier ces valeurs ailleurs (une copie qui diverge
+# a déjà coûté un bug ici).
+MATE_SCORE = 100000
+MATE_CP_THRESHOLD = 90000
+
+
+def mate_in_moves(cp):
+    """
+    Nombre de COUPS avant le mat encodé dans `cp`, SIGNÉ du même point de vue
+    que `cp` (positif = c'est MOI qui mate, négatif = je me fais mater), ou
+    None si le score n'encode pas un mat. None-safe.
+
+    L'écart au MATE_SCORE compte des COUPS PLEINS, pas des demi-coups :
+    chess.engine.Mate(n).score(mate_score=100000) == 100000 - n (vérifié :
+    mat en 4 -> 99996, pas 99993). web_bridge le reconvertissait en divisant
+    par deux et affichait donc "mat en 2" pour un mat en 4 -- corrigé ici, à
+    la source.
+    """
+    if cp is None or abs(cp) < MATE_CP_THRESHOLD:
+        return None
+    moves = max(1, MATE_SCORE - abs(cp))
+    return moves if cp > 0 else -moves
+
 
 class ChessCoachEngine:
     def __init__(self, stockfish_path, threads=None, hash_mb=1024):
@@ -116,7 +144,7 @@ class ChessCoachEngine:
             if not pv:
                 continue
             move = pv[0]
-            cp = info["score"].pov(board.turn).score(mate_score=100000)
+            cp = info["score"].pov(board.turn).score(mate_score=MATE_SCORE)
             if best_cp is None:
                 best_cp = cp
 

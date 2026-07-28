@@ -364,6 +364,22 @@ def test_fragment_mate_dans_les_3_voix():
         check("mat" in blob, f"[{voice}] le texte doit dire que c'est mat")
 
 
+def test_fragment_mate_en_n_annonce_le_compte():
+    # Mat FORCE en plusieurs coups : les 3 voix doivent annoncer le mat ET son
+    # nombre de coups. Sans ca, un mat en 2 ressortait en conseil de colonne
+    # ouverte ("double tes tours"), ou au mieux en "echec au roi".
+    import chess, move_intent
+    intent = move_intent.MoveIntent(
+        kind=move_intent.MATE, forcing=True, from_square=chess.G2,
+        to_square=chess.G7, moved_piece=chess.ROOK, gives_check=True, mate_in=3)
+    for voice in ("popular", "creative", "classical"):
+        frag = fragment_library.fragments_for_intent(intent, voice)
+        check(frag is not None, f"[{voice}] MATE en N doit avoir un fragment")
+        blob = " ".join(v for v in frag.values() if v).lower()
+        check("mat" in blob, f"[{voice}] le texte doit dire que c'est un mat : {blob!r}")
+        check("3" in blob, f"[{voice}] le texte doit annoncer le compte (3) : {blob!r}")
+
+
 def test_fragments_calmes_nomment_le_coup():
     import chess, move_intent
     cas = [
