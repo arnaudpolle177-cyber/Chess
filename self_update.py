@@ -41,6 +41,14 @@ import app_paths
 # retenue, pas un poll sur le PID, qui absorbe le délai entre la fin du
 # process Python et la libération réelle du verrou sur CoachEchecs.exe).
 #
+# La relance passe --web-bridge, PAS un lancement nu : sans argument,
+# main.py affiche le MENU INTERACTIF et bloque sur input() (voir
+# main.interactive_menu) -- le coach ne démarre jamais de lui-même. Lancé
+# depuis un process détaché, il n'a même pas d'entrée standard et meurt sur
+# EOFError, ce qui donnait exactement le symptôme "l'app ne se relance pas
+# après la mise à jour". --web-bridge utilise les mêmes valeurs par défaut
+# que le choix "1" du menu (resolve_stockfish_path(None)/resolve_lc0_path(None)).
+#
 # Journalisé dans %TEMP%\\coachechecs_update_log.txt (PAS supprimé, seul le
 # script .bat l'est à la fin) : ce script tourne en tâche DÉTACHÉE, sans
 # fenêtre -- sans ce journal, un échec (copie ratée, exe introuvable après
@@ -52,8 +60,8 @@ echo [%time%] Copie de "{src}" vers "{dst}"... >> "%LOG%"
 robocopy "{src}" "{dst}" /E /IS /IT /R:20 /W:1 >> "%LOG%" 2>&1
 echo [%time%] Code retour robocopy: %errorlevel% >> "%LOG%"
 if exist "{exe}" (
-    echo [%time%] Relance de "{exe}" >> "%LOG%"
-    start "" "{exe}"
+    echo [%time%] Relance de "{exe}" --web-bridge >> "%LOG%"
+    start "" "{exe}" --web-bridge
 ) else (
     echo [%time%] ERREUR : "{exe}" introuvable apres la copie -- mise a jour incomplete. >> "%LOG%"
 )

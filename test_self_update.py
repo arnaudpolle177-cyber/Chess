@@ -30,7 +30,11 @@ def test_bat_script_contains_paths_no_tasklist():
           "vérifie que l'exe existe avant de tenter de le relancer")
     check("/R:20" in bat, "robocopy retente lui-même (pas de poll PID séparé) le temps que le verrou se libère")
     check(r'"C:\extracted\CoachEchecs" "C:\install\CoachEchecs"' in bat, "robocopy copie du dossier extrait vers l'install")
-    check(r'start "" "C:\install\CoachEchecs\CoachEchecs.exe"' in bat, "relance le bon exe")
+    # --web-bridge obligatoire : lancé sans argument, main.py ouvre le menu
+    # interactif et bloque sur input() -- en tâche détachée (pas d'entrée
+    # standard) l'exe meurt sur EOFError et le coach ne redémarre jamais.
+    check(r'start "" "C:\install\CoachEchecs\CoachEchecs.exe" --web-bridge' in bat,
+          "relance le bon exe AVEC --web-bridge (sans ça : menu interactif bloquant, pas de redémarrage)")
     check("del \"%~f0\"" in bat, "le script se supprime lui-même à la fin")
 
 
