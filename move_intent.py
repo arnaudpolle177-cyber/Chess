@@ -26,6 +26,8 @@ from typing import Optional
 
 import chess
 
+import why_detector
+
 # Valeurs standard -- mêmes que why_detector / variation_narrator (source
 # recopiée volontairement : ces trois modules doivent rester autonomes et
 # testables sans s'importer mutuellement pour une simple table de constantes).
@@ -42,6 +44,15 @@ PROMOTION = "promotion"          # le coup promeut un pion
 CAPTURE_TRADE = "capture_trade"  # prise à valeur ~équilibrée (échange) -- forçant "léger"
 # NON FORÇANTE :
 QUIET = "quiet"                  # coup calme / positionnel -> laisse parler le thème de position
+
+# CALMES (non forçantes : elles ne priment jamais sur une tactique, mais elles
+# DÉCRIVENT le coup, ce que QUIET seul ne permettait pas -- 47% des coups
+# tombaient dans ce trou et recevaient un commentaire de position sans rapport
+# avec la flèche, mesuré à l'audit du 2026-07-28).
+DEVELOP = "develop"          # cavalier/fou quittant la rangée de fond
+CASTLE = "castle"            # le roque
+ROOK_FILE = "rook_file"      # tour/dame arrivant sur une colonne ouverte ou semi-ouverte
+REPOSITION = "reposition"    # pièce déjà développée qui change de poste, sans capture
 
 FORCING_KINDS = frozenset({MATE, CHECK_ESCAPE, CAPTURE_FREE, SACRIFICE, GIVES_CHECK, PROMOTION, CAPTURE_TRADE})
 
@@ -364,6 +375,29 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     if is_capture:
         return _mk(CAPTURE_TRADE, True, immediate_delta)
 
-    # 7. Coup calme : aucune intention marquante -> on laisse le thème de
-    #    position parler (le commentaire positionnel a du sens ici).
+    # --- Catégories calmes (aucune ne prime sur une tactique) ---------------
+    # On arrive ici seulement si aucune catégorie forçante ci-dessus n'a
+    # matché : une tactique garde donc toujours la priorité.
+    from_rank = chess.square_rank(move.from_square)
+    home_rank = 0 if board.turn == chess.WHITE else 7
+
+    if board.is_castling(move):
+        return _mk(CASTLE, False, immediate_delta)
+
+    if moved_piece in (chess.KNIGHT, chess.BISHOP) and from_rank == home_rank:
+        return _mk(DEVELOP, False, immediate_delta)
+
+    # _open_file_status(board, file_index, my_side) -> "open" | "half_open" | None
+    # (why_detector.py:125). On regarde la colonne d'ARRIVÉE de la tour/dame.
+    if moved_piece in (chess.ROOK, chess.QUEEN):
+        status = why_detector._open_file_status(
+            board, chess.square_file(move.to_square), board.turn)
+        if status in ("open", "half_open"):
+            return _mk(ROOK_FILE, False, immediate_delta)
+
+    if moved_piece in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN) and from_rank != home_rank:
+        return _mk(REPOSITION, False, immediate_delta)
+
+    # 7. Coup calme résiduel : aucune intention marquante -> on laisse le
+    #    thème de position parler (le commentaire positionnel a du sens ici).
     return _mk(QUIET, False, immediate_delta)

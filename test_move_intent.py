@@ -173,6 +173,54 @@ def test_prise_qui_donne_echec_porte_le_tag():
           "l'echec ne doit pas etre perdu : tag gives_check attendu")
 
 
+# --- 7ter. Intentions calmes : les coups tranquilles enfin classés ---------
+def test_intentions_calmes():
+    # Roque : le drapeau is_castle est déjà posé par engine_analysis, mais
+    # detect_move_intent doit rester correct même sans lui (board fait foi).
+    b = chess.Board("rnbqk2r/pppp1ppp/5n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1")
+    i = mi.detect_move_intent(b, chosen("e1g1"))
+    check(i.kind == mi.CASTLE, f"O-O doit etre CASTLE, obtenu {i.kind}")
+
+    # Développement : fou quittant la rangée de fond, sans capture.
+    b = chess.Board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1")
+    i = mi.detect_move_intent(b, chosen("f1c4"))
+    check(i.kind == mi.DEVELOP, f"Fc4 doit etre DEVELOP, obtenu {i.kind}")
+
+    # Tour sur colonne ouverte (colonne d vide de pions).
+    b = chess.Board("4k3/ppp2ppp/8/8/8/8/PPP2PPP/3RK3 w - - 0 1")
+    i = mi.detect_move_intent(b, chosen("d1d5"))
+    check(i.kind == mi.ROOK_FILE, f"Td5 doit etre ROOK_FILE, obtenu {i.kind}")
+
+    # Aucune de ces catégories -> QUIET résiduel (poussée de pion sur l'aile).
+    b = chess.Board("4k3/ppp2ppp/8/8/8/8/PPP2PPP/4K3 w - - 0 1")
+    i = mi.detect_move_intent(b, chosen("a2a3"))
+    check(i.kind == mi.QUIET, f"a3 doit rester QUIET, obtenu {i.kind}")
+
+    for kind in (mi.DEVELOP, mi.CASTLE, mi.ROOK_FILE, mi.REPOSITION):
+        check(kind not in mi.FORCING_KINDS,
+              f"{kind} est calme : ne doit PAS primer sur une tactique")
+
+
+def test_repositionnement():
+    # Cavalier déjà développé (pas sur la rangée de fond) qui change de poste,
+    # sans capture -> REPOSITION.
+    b = chess.Board("4k3/8/8/8/8/2N5/8/4K3 w - - 0 1")
+    i = mi.detect_move_intent(b, chosen("c3d5"))
+    check(i.kind == mi.REPOSITION, f"Cd5 doit etre REPOSITION, obtenu {i.kind}")
+    check(not i.forcing, "reposition: non forçant")
+
+
+def test_castle_qui_donne_echec_reste_gives_check():
+    # Roque qui délivre échec au roi adverse (tour arrivant sur la colonne f,
+    # roi noir en f8) : la priorité forçante GIVES_CHECK doit primer sur la
+    # catégorie calme CASTLE.
+    b = chess.Board("5k2/8/8/8/8/8/8/4K2R w K - 0 1")
+    i = mi.detect_move_intent(b, chosen("e1g1"))
+    check(i.kind == mi.GIVES_CHECK,
+          f"roque + echec doit rester GIVES_CHECK, obtenu {i.kind}")
+    check(i.forcing, "roque + echec : forçant")
+
+
 # --- 8. Porte de cohérence géométrique (narration_v2) ----------------------
 def _pawn_structure_brick(weak_square):
     return td.ThemeCandidate(
@@ -231,8 +279,10 @@ def main():
     for fn in (test_check_escape, test_capture_free, test_capture_free_defended_but_winning,
                test_sacrifice, test_promotion, test_mate_prime_sur_tout,
                test_gives_check, test_quiet, test_malformed,
-               test_prise_qui_donne_echec_porte_le_tag, test_coherence_gate,
-               test_render_forcing_end_to_end):
+               test_prise_qui_donne_echec_porte_le_tag,
+               test_intentions_calmes, test_repositionnement,
+               test_castle_qui_donne_echec_reste_gives_check,
+               test_coherence_gate, test_render_forcing_end_to_end):
         try:
             fn()
         except Exception as e:
