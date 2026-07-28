@@ -201,6 +201,41 @@ def test_intentions_calmes():
               f"{kind} est calme : ne doit PAS primer sur une tactique")
 
 
+def test_statut_de_colonne_reporte():
+    # Le statut de la colonne était calculé puis JETÉ : les fragments écrivaient
+    # « colonne ouverte » même sur une colonne semi-ouverte. On le reporte.
+    ouverte = chess.Board("4k3/ppp2ppp/8/8/8/8/PPP2PPP/3RK3 w - - 0 1")
+    semi = chess.Board("4k3/ppp2ppp/3p4/8/8/8/PPP2PPP/3RK3 w - - 0 1")  # pion NOIR en d6
+    i_ouverte = mi.detect_move_intent(ouverte, chosen("d1d5"))
+    i_semi = mi.detect_move_intent(semi, chosen("d1d5"))
+    check(i_ouverte.file_status == "open",
+          f"colonne d vide des 2 camps -> 'open', obtenu {i_ouverte.file_status!r}")
+    check(i_semi.kind == mi.ROOK_FILE and i_semi.file_status == "half_open",
+          f"colonne d avec un pion adverse -> 'half_open', obtenu {i_semi.file_status!r}")
+
+
+def test_capture_is_free_nomme_sa_preuve():
+    # UNE SEULE SOURCE DE VÉRITÉ : _capture_is_free retourne le NOM de la preuve
+    # et detect_move_intent le lit, au lieu de recopier ses conditions (une copie
+    # qui divergeait aurait fait écrire « sans reprise » sur une prise reprenable).
+    board = chess.Board("8/r7/8/8/4k3/8/4K3/R7 w - - 0 1")  # tour a7 non défendue
+    move = chess.Move.from_uci("a1a7")
+    check(mi._capture_is_free(board, move, ["a1a7"], 5, None) == "undefended",
+          "case sans défenseur -> preuve 'undefended'")
+    intent = mi.detect_move_intent(board, chosen("a1a7"))
+    check(intent.capture_undefended is True and intent.capture_line_gain is False,
+          "l'intent doit refléter EXACTEMENT la preuve retenue")
+
+    defendue = chess.Board("8/8/4k3/3q4/8/8/8/3R2K1 w - - 0 1")  # d5 défendue par le roi
+    d1d5 = chess.Move.from_uci("d1d5")
+    check(mi._capture_is_free(defendue, d1d5, ["d1d5", "e6d5"], 4, None) == "line_gain",
+          "case défendue mais bilan de ligne positif -> preuve 'line_gain'")
+    check(mi._capture_is_free(defendue, d1d5, ["d1d5"], 9, None) is None,
+          "PV sans reprise adverse et aucun motif -> AUCUNE preuve (None)")
+    check(mi._capture_is_free(defendue, d1d5, ["d1d5"], 9, "fork") == "motif",
+          "confirmation par why_motif seul -> preuve 'motif' (aucun gain recalculé)")
+
+
 def test_repositionnement():
     # Cavalier déjà développé (pas sur la rangée de fond) qui change de poste,
     # sans capture -> REPOSITION.
@@ -280,7 +315,8 @@ def main():
                test_sacrifice, test_promotion, test_mate_prime_sur_tout,
                test_gives_check, test_quiet, test_malformed,
                test_prise_qui_donne_echec_porte_le_tag,
-               test_intentions_calmes, test_repositionnement,
+               test_intentions_calmes, test_statut_de_colonne_reporte,
+               test_capture_is_free_nomme_sa_preuve, test_repositionnement,
                test_castle_qui_donne_echec_reste_gives_check,
                test_coherence_gate, test_render_forcing_end_to_end):
         try:

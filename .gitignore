@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 coach_run.log
 engine_degraded.json
+
+# Sorties de diagnostic regenerables (audit_narration.py / audit_scenarios.py)
+audit_apres.txt
+audit_scenarios_report.txt

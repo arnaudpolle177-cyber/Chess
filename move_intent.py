@@ -70,6 +70,11 @@ _FREE_CAPTURE_MOTIFS = frozenset({"undefended", "not_recaptured", "material_gain
 def _capture_is_free(board, move, pv_uci, line_delta, why_motif):
     """
     Une capture est-elle NETTE (l'adversaire ne peut pas rétablir le matériel) ?
+    Retourne le NOM de la preuve retenue -- "undefended", "line_gain",
+    "motif" -- ou None si aucune. SOURCE DE VÉRITÉ UNIQUE : l'appelant lit ce
+    nom au lieu de recopier les conditions (une copie qui divergeait aurait
+    fait écrire "sans reprise" sur une prise reprenable).
+
     Deux preuves CALCULÉES, indépendantes de l'étiquette why_detector :
 
       1. case d'arrivée NON défendue par l'adversaire (board.attackers) : la
@@ -86,10 +91,10 @@ def _capture_is_free(board, move, pv_uci, line_delta, why_motif):
     """
     opponent = not board.turn
     if not board.attackers(opponent, move.to_square):
-        return True  # rien ne défend la case -> prise imprenable
+        return "undefended"  # rien ne défend la case -> prise imprenable
     if line_delta > 0 and len(pv_uci) >= 2:
-        return True  # gain matériel net sur une ligne qui inclut la reprise adverse
-    return why_motif in _FREE_CAPTURE_MOTIFS
+        return "line_gain"  # gain matériel net sur une ligne qui inclut la reprise adverse
+    return "motif" if why_motif in _FREE_CAPTURE_MOTIFS else None
 
 
 @dataclass
@@ -127,7 +132,19 @@ class MoveIntent:
                   why_motif, ex. "fork", qui ne recalcule aucun gain matériel) --
                   dans ce cas ni capture_undefended ni capture_line_gain ne sont
                   vrais, et un fragment ne doit affirmer NI "sans reprise" NI
-                  "gain net de matériel".
+                  "gain net de matériel". Les deux booléens sont MUTUELLEMENT
+                  EXCLUSIFS : ils reflètent la preuve RETENUE par
+                  _capture_is_free (case non défendue d'abord, bilan de ligne
+                  ensuite), pas toutes celles qui pourraient s'appliquer --
+                  "imprenable" implique déjà "gagnant", les fragments testent
+                  capture_undefended en premier.
+    file_status : pour un intent ROOK_FILE seulement -- statut RÉEL de la
+                  colonne d'arrivée calculé par why_detector._open_file_status :
+                  "open" (aucun pion des deux camps) ou "half_open" (seul
+                  l'adversaire y a un pion). L'information était calculée puis
+                  jetée, et les fragments écrivaient "colonne ouverte" en dur :
+                  sur une colonne SEMI-ouverte, c'était un fait inventé (et le
+                  conseil n'est pas le même -- un pion adverse à attaquer).
     why_motif   : motif why_detector reçu en entrée (voir detect_move_intent),
                   reporté tel quel sur l'intent. Sert de repli DESCRIPTIF
                   (jamais de bilan matériel) quand ni capture_undefended ni
@@ -150,6 +167,7 @@ class MoveIntent:
     sacrifice_ply: Optional[int] = None
     capture_undefended: bool = False   # la case d'arrivée n'a AUCUN défenseur adverse
     capture_line_gain: bool = False    # bilan de ligne positif, PV avec réponse adverse
+    file_status: Optional[str] = None  # ROOK_FILE : "open" / "half_open" (colonne d'arrivée)
     why_motif: Optional[str] = None    # motif why_detector reporté tel quel (repli descriptif)
     tags: frozenset = frozenset()      # faits secondaires vrais, ex. "gives_check" (voir docstring)
 
@@ -323,7 +341,7 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     tags = frozenset({"gives_check"}) if gives_check else frozenset()
 
     def _mk(kind, forcing, delta, capture_undefended=False, capture_line_gain=False,
-            move_tags=tags):
+            move_tags=tags, file_status=None):
         return MoveIntent(
             kind=kind, forcing=forcing,
             from_square=move.from_square, to_square=move.to_square,
@@ -331,6 +349,7 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
             material_delta=delta, gives_check=gives_check,
             capture_undefended=capture_undefended,
             capture_line_gain=capture_line_gain,
+            file_status=file_status,
             why_motif=why_motif,
             tags=move_tags,
         )
@@ -360,10 +379,11 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     #    Prouvé sur la position, sans dépendre de l'étiquette why_detector
     #    (voir _capture_is_free) : c'est le correctif du cas "prise gagnante
     #    classée fork/material_gain qui retombait en simple échange".
-    if is_capture and _capture_is_free(board, move, pv_uci, line_delta, why_motif):
+    proof = _capture_is_free(board, move, pv_uci, line_delta, why_motif) if is_capture else None
+    if proof:
         return _mk(CAPTURE_FREE, True, immediate_delta,
-                   capture_undefended=not board.attackers(not board.turn, move.to_square),
-                   capture_line_gain=line_delta > 0 and len(pv_uci) >= 2)
+                   capture_undefended=proof == "undefended",
+                   capture_line_gain=proof == "line_gain")
 
     # 5. Le coup donne échec (sans être une prise nette déjà traitée). L'échec
     #    est déjà le sujet ici -> pas de tag "gives_check" redondant.
@@ -393,7 +413,9 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
         status = why_detector._open_file_status(
             board, chess.square_file(move.to_square), board.turn)
         if status in ("open", "half_open"):
-            return _mk(ROOK_FILE, False, immediate_delta)
+            # On REPORTE le statut : "ouverte" et "semi-ouverte" ne se disent
+            # pas pareil et n'appellent pas le même plan (voir _frag_rook_file).
+            return _mk(ROOK_FILE, False, immediate_delta, file_status=status)
 
     if moved_piece in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN) and from_rank != home_rank:
         return _mk(REPOSITION, False, immediate_delta)

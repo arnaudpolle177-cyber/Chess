@@ -42,23 +42,38 @@ def check(cond, msg):
         _failures.append(msg)
 
 
-def test_texte_affiche_toujours_accentue():
-    """
-    Garde de non-régression : tout texte AFFICHÉ doit être en français
-    correctement accentué. Défaut constaté en pratique -- les fragments
-    d'intention ont été écrits sans accents (« Developpe, puis roque », « roi
-    a l'abri », « se redeploie ») parce que la consigne « messages de commit
-    sans accent » avait été appliquée par erreur au texte de l'interface.
-    L'écran mélangeait alors « la partie est gagnée » et « Developpe ».
+def _frag_string_constants():
+    """(nom de fonction _frag_*, ligne, chaîne littérale) lues dans la SOURCE.
 
-    On inspecte les chaînes littérales des fonctions _frag_* du module (source
-    AST, pas exécution : couvre AUSSI les branches jamais empruntées par les
-    autres tests, c'était justement le cas de « se redeploie »).
+    AST plutôt qu'exécution : couvre AUSSI les branches que les autres tests
+    n'empruntent jamais (c'était justement le cas de « se redeploie »).
     """
     import ast
+    source = open(fragment_library.__file__, encoding="utf-8").read()
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("_frag_")):
+            continue
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                yield node.name, sub.lineno, sub.value
+
+
+def test_texte_affiche_toujours_accentue():
+    """
+    Garde de non-régression BIDIRECTIONNELLE sur les accents du texte AFFICHÉ.
+
+    1. Accents MANQUANTS -- les fragments d'intention avaient été écrits sans
+       accents (« Developpe, puis roque », « roi a l'abri », « se redeploie »)
+       parce que la consigne « messages de commit sans accent » avait été
+       appliquée par erreur au texte de l'interface.
+    2. Accents EN TROP (sur-correction) -- le chercher/remplacer qui a rétabli
+       les accents a aussi transformé le VERBE « force » en participe
+       « forcé » (« forcé la position », « une séquence qui forcé un
+       sacrifice »). Une garde qui ne cherchait que les accents manquants
+       validait donc ses propres dégâts, toujours au vert.
+    """
     import re
 
-    source = open(fragment_library.__file__, encoding="utf-8").read()
     # Formes NUES de mots qui portent toujours un accent en français. On liste
     # la forme fautive, pas la correcte : une occurrence = un oubli.
     nues = re.compile(
@@ -70,16 +85,24 @@ def test_texte_affiche_toujours_accentue():
         r"strategie|verifie"
         r")\b"
     )
-    for node in ast.walk(ast.parse(source)):
-        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("_frag_")):
-            continue
-        for sub in ast.walk(node):
-            if not (isinstance(sub, ast.Constant) and isinstance(sub.value, str)):
-                continue
-            for mot in sorted(set(nues.findall(sub.value))):
-                check(False,
-                      f"{node.name} (ligne {sub.lineno}) : « {mot} » sans accent "
-                      f"dans un texte affiché -- {sub.value!r}")
+    # Sur-corrections : un participe passé suivi d'un DÉTERMINANT est en
+    # réalité un verbe conjugué (« force la position », « donne échec et
+    # force la réponse »). Même piège pour « sécurisé le roi », « développé
+    # tes pièces » : c'est l'impératif qui était visé.
+    surcorrige = re.compile(
+        r"\b(forcé|sécurisé|développé|amélioré|vérifié|achevé|réorienté)\s+"
+        r"(la|le|les|un|une|des|ton|ta|tes|cette|ce)\b"
+    )
+    for fname, lineno, valeur in _frag_string_constants():
+        for mot in sorted(set(nues.findall(valeur))):
+            check(False,
+                  f"{fname} (ligne {lineno}) : « {mot} » sans accent "
+                  f"dans un texte affiché -- {valeur!r}")
+        for mot, suite in surcorrige.findall(valeur):
+            check(False,
+                  f"{fname} (ligne {lineno}) : « {mot} {suite} » -- participe "
+                  f"passé accentué là où le VERBE est attendu (sur-correction "
+                  f"d'accents) -- {valeur!r}")
 
 
 def brick(theme, **fields):
@@ -474,6 +497,118 @@ def test_rook_file_a_plusieurs_formulations():
             intent, voice, ctx_avec_historique((intent.kind,)))
         check(frag_repete == frag_repete_bis,
               f"[{voice}] meme historique -> doit redonner le meme texte")
+
+
+def test_accord_genre_dans_les_fragments_dintention():
+    # Garde d'ACCORD (le bug que _piece_with_article ne couvrait pas) : l'article
+    # etait accorde, mais les ADJECTIFS et PRONOMS restaient en dur -- « la tour
+    # adverse n'est pas defendu », « prends cette tour, personne ne peut le
+    # reprendre ». On balaie les intentions qui NOMMENT une piece, pour une piece
+    # feminine (tour, dame) et une masculine (cavalier, fou), dans les 3 voix.
+    import re
+    import move_intent as mi
+
+    faux_si_feminin = [
+        r"\ble (tour|dame)\b", r"\bce (tour|dame)\b", r"\bun (tour|dame)\b",
+        r"\bdéfendu\b", r"\ble reprendre\b",
+    ]
+    faux_si_masculin = [
+        r"\bla (cavalier|fou)\b", r"\bcette (cavalier|fou)\b", r"\bune (cavalier|fou)\b",
+        r"\bdéfendue\b", r"\bla reprendre\b",
+    ]
+    kinds = ("capture_free", "capture_trade", "mate", "sacrifice", "gives_check",
+             "develop", "rook_file", "reposition")
+    # Les 3 etats de preuve de capture_free : chaque branche a ses propres
+    # formulations, donc ses propres accords a verifier.
+    preuves = ({}, {"capture_undefended": True}, {"capture_line_gain": True})
+
+    for genre, pieces, motifs in (("feminin", (chess.ROOK, chess.QUEEN), faux_si_feminin),
+                                  ("masculin", (chess.KNIGHT, chess.BISHOP), faux_si_masculin)):
+        for piece in pieces:
+            for kind in kinds:
+                for preuve in preuves:
+                    intent = mi.MoveIntent(
+                        kind=kind, forcing=True, from_square=chess.D1, to_square=chess.D4,
+                        moved_piece=piece, captured_piece=piece, **preuve)
+                    for voice in VOICES:
+                        frag = fragment_library.fragments_for_intent(intent, voice)
+                        if frag is None:
+                            continue
+                        blob = " ".join(v for v in frag.values() if v)
+                        for motif in motifs:
+                            m = re.search(motif, blob)
+                            check(m is None,
+                                  f"[{voice}/{kind}/{genre}] accord casse "
+                                  f"({m.group(0) if m else ''}) -> {blob!r}")
+
+
+def test_colonne_semi_ouverte_nest_pas_dite_ouverte():
+    # « colonne ouverte » etait ecrit en dur alors que ROOK_FILE accepte AUSSI
+    # les colonnes semi-ouvertes : fait invente, reproduit sur cette position
+    # (pion NOIR en d6, aucun pion blanc sur la colonne d -> half_open).
+    import move_intent
+    board = chess.Board("4k3/ppp2ppp/3p4/8/8/8/PPP2PPP/3RK3 w - - 0 1")
+    intent = move_intent.detect_move_intent(board, {"move_uci": "d1d5", "pv_uci": ["d1d5"]})
+    check(intent.kind == move_intent.ROOK_FILE, f"setup : attendu rook_file, obtenu {intent.kind}")
+    check(intent.file_status == "half_open",
+          f"setup : colonne d semi-ouverte attendue, obtenu {intent.file_status!r}")
+    for voice in VOICES:
+        for historique in ((), (intent.kind,)):  # les DEUX variantes
+            ctx = FragmentContext(board=board)
+            ctx.recent_kinds = historique
+            frag = fragment_library.fragments_for_intent(intent, voice, ctx)
+            blob = " ".join(v for v in frag.values() if v)
+            check("colonne ouverte" not in blob,
+                  f"[{voice}] colonne SEMI-ouverte annoncee « ouverte » -> {blob!r}")
+            check("semi-ouverte" in blob,
+                  f"[{voice}] le statut reel de la colonne doit etre dit -> {blob!r}")
+
+
+def test_pas_de_seconde_tour_inventee():
+    # Finale a UNE seule tour : aucun plan ne doit supposer qu'il en existe une
+    # autre (« amene ta seconde tour », « double tes tours », « l'autre tour »).
+    import move_intent
+    board = chess.Board("4k3/ppp2ppp/8/8/8/8/PPP2PPP/3RK3 w - - 0 1")
+    intent = move_intent.detect_move_intent(board, {"move_uci": "d1d5", "pv_uci": ["d1d5"]})
+    check(intent.kind == move_intent.ROOK_FILE, f"setup : attendu rook_file, obtenu {intent.kind}")
+    check(len(board.pieces(chess.ROOK, chess.WHITE)) == 1, "setup : une seule tour blanche")
+    for voice in VOICES:
+        for historique in ((), (intent.kind,)):
+            ctx = FragmentContext(board=board)
+            ctx.recent_kinds = historique
+            frag = fragment_library.fragments_for_intent(intent, voice, ctx)
+            blob = " ".join(v for v in frag.values() if v).lower()
+            for invente in ("seconde tour", "l'autre tour", "double tes tours",
+                            "double ensuite", "tes tours"):
+                check(invente not in blob,
+                      f"[{voice}] une seule tour sur l'echiquier, « {invente} » est invente -> {blob!r}")
+
+    # Cas miroir : avec DEUX tours, le conseil de doubler redevient legitime.
+    board2 = chess.Board("4k3/ppp2ppp/8/8/8/8/PPP2PPP/3RK2R w - - 0 1")
+    intent2 = move_intent.detect_move_intent(board2, {"move_uci": "d1d5", "pv_uci": ["d1d5"]})
+    ctx2 = FragmentContext(board=board2)
+    ctx2.recent_kinds = (intent2.kind,)
+    blob2 = " ".join(v for v in fragment_library.fragments_for_intent(intent2, "popular", ctx2).values() if v)
+    check("tours" in blob2.lower(),
+          f"deux tours : le plan de doublement doit rester possible -> {blob2!r}")
+
+
+def test_develop_ne_conseille_pas_un_roque_impossible():
+    # « developpe, puis roque » sans AUCUN droit de roque = conseil d'un coup
+    # illegal. Position sans droits (champ de roque « - » dans la FEN).
+    import move_intent
+    board = chess.Board("4k3/8/8/8/8/8/PPP2PPP/R3KBNR w - - 0 1")
+    check(not board.has_castling_rights(chess.WHITE), "setup : aucun droit de roque")
+    intent = move_intent.detect_move_intent(board, {"move_uci": "f1c4", "pv_uci": ["f1c4"]})
+    check(intent.kind == move_intent.DEVELOP, f"setup : attendu develop, obtenu {intent.kind}")
+    for voice in VOICES:
+        for historique in ((), (intent.kind,)):
+            ctx = FragmentContext(board=board)
+            ctx.recent_kinds = historique
+            frag = fragment_library.fragments_for_intent(intent, voice, ctx)
+            blob = " ".join(v for v in frag.values() if v).lower()
+            check("roque" not in blob,
+                  f"[{voice}] plus de droit de roque : ne pas le conseiller -> {blob!r}")
 
 
 def _run():
