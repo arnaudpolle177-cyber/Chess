@@ -45,6 +45,14 @@ from fragment_library import FragmentContext
 # zone du thème ?). Une brique peut n'en porter aucune (thème diffus comme
 # STRATEGIC_ADVANTAGE) -> pas de case, la porte tranche alors sur la seule
 # proximité au roi le cas échéant, sinon abandonne le thème.
+# Écart, en centipawns, au-delà duquel le coup s'impose tout seul et n'a pas
+# besoin d'être expliqué (voir Selection.gap_cp). VALEUR À CALIBRER en
+# pratique -- volontairement une constante nommée, réglable sans toucher à la
+# logique. 60cp ≈ « plus d'un demi-pion d'écart avec le 2e coup » : à ce
+# niveau-là le choix ne se discute plus, et une explication devient du
+# remplissage.
+EXPLAIN_GAP_MAX_CP = 60
+
 _THEME_KEY_SQUARE_FIELDS = (
     "pawn_weakness_square",     # PAWN_STRUCTURE : le pion faible ciblé
     "king_square",              # ATTACK / DEFENSE : le roi concerné
@@ -104,12 +112,16 @@ class Selection:
     eval_cp  : éval de la position du point de vue de mon camp (candidates[0].cp)
                -- profil-indépendant, nécessaire au tissage (sens de
                l'initiative, ampleur de l'avantage). 0 si indisponible.
+    gap_cp   : perte d'éval du DEUXIÈME meilleur coup par rapport au premier
+               (candidates[1]["eval_loss"]) -- mesure à quel point le meilleur
+               coup se détache. 0 si un seul candidat. Profil-indépendant.
     bricks   : toutes les briques collectées (debug / introspection ; pas
                requis par render()).
     """
     lead: Optional[td.ThemeCandidate]
     supports: List[td.ThemeCandidate]
     eval_cp: int = 0
+    gap_cp: int = 0
     bricks: List[td.ThemeCandidate] = field(default_factory=list)
 
 
@@ -150,6 +162,10 @@ def build_selection(board, candidates, swing_cp=None, opponent_better_move_san=N
         top_cp = candidates[0].get("cp")
         eval_cp = top_cp if top_cp is not None else 0
 
+    gap_cp = 0
+    if len(candidates) > 1:
+        gap_cp = candidates[1].get("eval_loss") or 0
+
     bricks = td.collect_theme_bricks(
         board, candidates, swing_cp=swing_cp,
         opponent_better_move_san=opponent_better_move_san, initiative_trend=initiative_trend,
@@ -159,11 +175,12 @@ def build_selection(board, candidates, swing_cp=None, opponent_better_move_san=N
     lead, supports = ts.select_lead_and_support(
         bricks, max_supports=max_supports, relation_ok=relation_ok,
     )
-    return Selection(lead=lead, supports=supports, eval_cp=eval_cp, bricks=bricks)
+    return Selection(lead=lead, supports=supports, eval_cp=eval_cp, gap_cp=gap_cp,
+                     bricks=bricks)
 
 
 def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
-           board=None, caution_text=None, recent_kinds=None):
+           board=None, caution_text=None, recent_kinds=None, prophylaxis=None):
     """
     Étape profil-level : tisse le paragraphe final pour un profil donné, à
     partir d'une Selection déjà calculée (voir build_selection). C'est la
@@ -181,6 +198,9 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
         répéter la même formulation plusieurs coups d'affilée -- observé en
         pratique : trois coups de développement de suite sortaient le même
         paragraphe mot pour mot. None -> aucune contrainte.
+    prophylaxis : dict {"san", "reason"} rendu par prophylaxis.prevented_by
+        (calculé par l'appelant, un appel moteur par POSITION -- voir
+        web_bridge). None = pas de fait prophylactique pour ce coup.
 
     Retourne le dict de narration_weaver.weave :
       {"text", "lead", "supports", "voice", "caution"}.
@@ -194,13 +214,20 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
     )
     ctx.recent_kinds = tuple(recent_kinds or ())
 
+    # Le seuil : la cause ne se rend QUE si le coup ne s'impose pas de
+    # lui-même. Garde-fou contre l'effet cumulé des deux sources
+    # d'explication -- sans lui, une cause s'ajoute à chaque coup, et l'audit
+    # multi-scénarios a déjà montré qu'un texte qui revient devient du bruit.
+    ctx.explain = selection.gap_cp <= EXPLAIN_GAP_MAX_CP
+
     # Intention du COUP recommandé (voir move_intent). Calculé par profil
     # (chosen diffère selon le profil) -> différencie enfin les 3 profils et
     # débloque le figement du thème de position.
     intent = None
     if board is not None and chosen is not None:
         try:
-            intent = mi.detect_move_intent(board, chosen, why_motif, why_detail)
+            intent = mi.detect_move_intent(board, chosen, why_motif, why_detail,
+                                           prophylaxis=prophylaxis)
         except Exception as e:
             # Best-effort : jamais bloquant. Mais SILENCIEUX auparavant, ce qui
             # a rendu le diagnostic beaucoup plus long -- on journalise comme

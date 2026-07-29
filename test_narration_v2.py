@@ -221,6 +221,55 @@ def test_pas_deux_fois_le_meme_texte_de_suite():
           f"deux DEVELOP consecutifs ne doivent pas donner le meme texte : {t1!r}")
 
 
+# --- Seuil d'explication ----------------------------------------------------
+# La cause n'est rendue que quand le coup NE S'IMPOSE PAS de lui-meme. C'est ce
+# qui distingue un commentaire explicatif d'un bavardage : sans ce garde-fou,
+# une explication s'ajoute a chaque coup et le texte redevient du bruit.
+
+def _render_avec_ecart(second_loss, prophylaxis=None):
+    board = chess.Board("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1")
+    move = board.parse_san("Bc4")
+    chosen = {
+        "move_uci": move.uci(), "move_san": "Bc4", "cp": 30, "eval_loss": 0,
+        "score": "+0.30", "pv_uci": [move.uci()], "pv_san": ["Bc4"],
+        "is_capture": False, "is_check": False, "is_castle": False,
+        "is_king_move": False, "is_developing_minor": True,
+        "is_pawn_center_push": False, "to_square_central": False,
+        "win_prob": None, "moving_piece_value": 3, "captured_piece_value": None,
+    }
+    cands = [chosen, {"move_uci": "b1c3", "move_san": "Nc3", "cp": 30 - second_loss,
+                      "eval_loss": second_loss, "pv_uci": ["b1c3"],
+                      "is_check": False, "is_capture": False}]
+    sel = nv2.build_selection(board, cands)
+    return nv2.render(sel, "popular", chosen=chosen, board=board,
+                      prophylaxis=prophylaxis)
+
+
+def test_seuil_ecart_faible_explique():
+    proph = {"san": "d5", "reason": "blocked"}
+    out = _render_avec_ecart(10, prophylaxis=proph)
+    check("d5" in out["text"], out["text"])
+
+
+def test_seuil_ecart_large_nexplique_pas():
+    proph = {"san": "d5", "reason": "blocked"}
+    out = _render_avec_ecart(400, prophylaxis=proph)
+    check("d5" not in out["text"], out["text"])
+    check(bool(out["text"]), "le paragraphe doit rester complet, seule la cause tombe")
+
+
+def test_gap_cp_lu_sur_le_second_candidat():
+    board = chess.Board()
+    cands = [{"move_uci": "e2e4", "move_san": "e4", "cp": 30, "eval_loss": 0},
+             {"move_uci": "d2d4", "move_san": "d4", "cp": -20, "eval_loss": 50}]
+    check(nv2.build_selection(board, cands).gap_cp == 50, "gap_cp doit lire eval_loss du 2e candidat")
+
+
+def test_gap_cp_vaut_zero_sans_second_candidat():
+    cands = [{"move_uci": "e2e4", "move_san": "e4", "cp": 30, "eval_loss": 0}]
+    check(nv2.build_selection(chess.Board(), cands).gap_cp == 0, "gap_cp doit valoir 0 sans 2e candidat")
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:
