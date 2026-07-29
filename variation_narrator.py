@@ -157,14 +157,25 @@ def analyze_variation(engine, board, pv_moves, compute_eval=True, depth=DEFAULT_
         piece_type = piece.piece_type if piece else None
         is_capture = cur.is_capture(move)
         captured = cur.piece_at(move.to_square)
+        cur.push(move)
+
+        # Rupture = MA poussée de pion qui provoque une capture au coup
+        # suivant. Deux gardes indispensables, chacune corrigeant un faux
+        # positif observé en production :
+        #  - mover_color : tous les gabarits parlent de "mes pièces" ; une
+        #    poussée ADVERSE n'est pas ma rupture ;
+        #  - le test is_capture doit se faire APRÈS le push, dans la position
+        #    où moves[i+1] est légal. python-chess calcule is_capture sur
+        #    `from ^ to` intersecté avec les pièces adverses : évalué une
+        #    position trop tôt, la case de DÉPART du coup suivant suffit à
+        #    rendre True, et n'importe quelle poussée passait pour une rupture.
         was_pawn_push_to_open_file = (
-            piece_type == chess.PAWN
+            mover_color == root_color
+            and piece_type == chess.PAWN
             and not is_capture
             and i + 1 < len(moves)
             and cur.is_capture(moves[i + 1])
         )
-
-        cur.push(move)
 
         if is_capture:
             cap_value = PIECE_VALUES.get(captured.piece_type, 0) if captured else 1  # 1 = en passant
@@ -178,10 +189,15 @@ def analyze_variation(engine, board, pv_moves, compute_eval=True, depth=DEFAULT_
             breakthrough_square = move.to_square
             breakthrough_piece = chess.PAWN
 
-        if opp_king_square is not None and chess.square_distance(move.to_square, opp_king_square) <= 2:
+        # Même raison que ci-dessus : seuls MES coups pressent le roi adverse
+        # ou repositionnent MES pièces. Sans cette garde, un simple Fe7/Cf6
+        # adverse près de son propre roi comptait comme ma pression.
+        if (mover_color == root_color and opp_king_square is not None
+                and chess.square_distance(move.to_square, opp_king_square) <= 2):
             king_pressure_hits += 1
 
-        if not is_capture and piece_type in (chess.KNIGHT, chess.BISHOP, chess.QUEEN, chess.ROOK):
+        if (mover_color == root_color and not is_capture
+                and piece_type in (chess.KNIGHT, chess.BISHOP, chess.QUEEN, chess.ROOK)):
             moved_squares[move.from_square] = moved_squares.get(move.from_square, 0) + 1
 
         if compute_eval:
