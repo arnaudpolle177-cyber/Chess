@@ -38,6 +38,7 @@ import theme_detector as td
 import theme_scoring as ts
 import narration_weaver as nw
 import move_intent as mi
+import engine_analysis  # uniquement pour MATE_CP_THRESHOLD
 import fragment_library as fl
 from fragment_library import FragmentContext
 
@@ -53,6 +54,12 @@ from fragment_library import FragmentContext
 # niveau-là le choix ne se discute plus, et une explication devient du
 # remplissage.
 EXPLAIN_GAP_MAX_CP = 60
+
+# Intentions dont le fragment parle DÉJÀ de matériel (voir fragment_library) :
+# le gain de ligne n'y ajoute rien et ferait doublon dans la même phrase.
+_KINDS_QUI_DISENT_LE_MATERIEL = frozenset({
+    "mate", "capture_free", "capture_trade", "sacrifice", "promotion",
+})
 # Fait mesuré : 60cp est à l'échelle du BRUIT d'une recherche multi-thread en
 # profondeur 14 -- rejouer l'analyse de la MÊME position peut faire franchir
 # le seuil à un coup (observé : un coup passé de 23cp à 68cp entre deux
@@ -248,6 +255,22 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
     # développement.
     ctx.explain_geometry = not selection.book
 
+    # Le COMBIEN, complément exact du POURQUOI ci-dessus : quand le coup se
+    # détache (écart large), le lecteur n'a pas besoin qu'on lui explique
+    # pourquoi celui-là, mais ce qu'il rapporte. Les deux champs sont donc
+    # armés dans des cas DISJOINTS -- fragment_library les rend dans le même
+    # emplacement (l'apposition après l'observation), le paragraphe ne gagne
+    # pas une phrase.
+    #
+    # Exclusion du mat : eval_loss vaut best_cp - cp, et un mat est encodé
+    # ~99996 (voir engine_analysis.mate_in_moves). Sans ce test, une position
+    # avec mat annonçait « les autres coups laissent filer 999 pions ». Le mat
+    # a de toute façon son propre intent, qui parle bien mieux que ça.
+    ctx.gain_cp = None
+    if not ctx.explain and 0 < selection.gap_cp < engine_analysis.MATE_CP_THRESHOLD:
+        ctx.gain_cp = selection.gap_cp
+    ctx.gain_material = None
+
     # Intention du COUP recommandé (voir move_intent). Calculé par profil
     # (chosen diffère selon le profil) -> différencie enfin les 3 profils et
     # débloque le figement du thème de position.
@@ -269,6 +292,14 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
     # position n'entre plus qu'en APPUI, et seulement s'il est géométriquement
     # cohérent avec le coup -- garde qui existait déjà mais n'était appliquée
     # qu'aux coups forçants.
+    # Gain MATÉRIEL de la ligne, prioritaire sur l'écart d'éval (plus concret).
+    # Réservé aux coups qui n'en parlent PAS déjà : un fragment de prise ou de
+    # sacrifice dit lui-même ce qui se gagne ou se donne, redire « tu ressors
+    # un pion devant » en apposition serait de la répétition, pas du coaching.
+    if intent is not None and ctx.gain_cp and intent.kind not in _KINDS_QUI_DISENT_LE_MATERIEL:
+        if intent.line_delta > 0:
+            ctx.gain_material = intent.line_delta
+
     if intent is not None:
         kept_theme = selection.lead if _intent_is_coherent_with_theme(intent, selection.lead) else None
         woven = nw.weave_intent(intent, kept_theme, profile_id, ctx, caution_text=caution_text)
@@ -281,7 +312,8 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
     # ça, la cause était structurellement inatteignable pour tout coup de pion
     # et tout coup de roi non-roquant -- soit l'archétype même du coup que la
     # cause devait expliquer.
-    lead_cause = fl._explain_cause(intent, profile_id, ctx) if intent is not None else None
+    lead_cause = (fl._explain_cause(intent, profile_id, ctx) if intent is not None else None)
+    lead_cause = lead_cause or fl._explain_gain(profile_id, ctx)
     return nw.weave(selection.lead, selection.supports, profile_id, ctx,
                     caution_text=caution_text, lead_cause=lead_cause)
 

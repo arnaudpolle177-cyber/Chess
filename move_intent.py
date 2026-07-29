@@ -191,6 +191,12 @@ class MoveIntent:
     moved_piece: Optional[int] = None
     captured_piece: Optional[int] = None
     material_delta: int = 0
+    # Bilan matériel de TOUTE la ligne (voir _material_delta_over_pv), positif
+    # = je ressors devant si l'adversaire suit la PV. Distinct de
+    # material_delta, qui ne compte que la prise immédiate : un coup calme qui
+    # gagne du matériel trois demi-coups plus loin a line_delta > 0 et
+    # material_delta = 0. C'est ce champ que la narration du GAIN lit.
+    line_delta: int = 0
     gives_check: bool = False
     sacrifice_ply: Optional[int] = None
     capture_undefended: bool = False   # la case d'arrivée n'a AUCUN défenseur adverse
@@ -266,6 +272,7 @@ def _material_delta_over_pv(board, pv_uci):
     sacrifice_square = None
     last_ply = 0
     last_was_opponent_capture_sq = None  # case d'une prise adverse au tout dernier demi-coup
+    last_was_my_capture_sq = None        # ... et de MA prise, pour la garde symétrique côté gain
     for ply, uci in enumerate(pv_uci, start=1):
         try:
             move = chess.Move.from_uci(uci)
@@ -287,6 +294,7 @@ def _material_delta_over_pv(board, pv_uci):
         tmp.push(move)
         last_ply = ply
         last_was_opponent_capture_sq = move.to_square if (is_capture_move and not mover_is_me) else None
+        last_was_my_capture_sq = move.to_square if (is_capture_move and mover_is_me) else None
         if gain < 0 and sacrifice_ply is None:
             sacrifice_ply = ply
             sacrifice_square = move.to_square
@@ -301,6 +309,17 @@ def _material_delta_over_pv(board, pv_uci):
             tmp.piece_type_at(last_was_opponent_capture_sq), 0)
         if gain + recapture_value >= 0:
             return gain + recapture_value, None, None  # rendu après reprise -> pas un sacrifice
+
+    # Garde d'horizon SYMÉTRIQUE, côté gain : la PV se termine sur MA prise et
+    # l'adversaire a une reprise sur cette case -> le bilan positif n'est
+    # qu'un artefact de troncature, sa reprise tombe juste au-delà. Sans elle,
+    # la narration du gain (fragment_library._explain_gain) annoncerait « tu
+    # ressors une pièce devant » sur un échange parfaitement égal -- le même
+    # faux fait que les 50 faux sacrifices, dans l'autre sens.
+    if (gain > 0 and last_was_my_capture_sq is not None
+            and tmp.attackers(not my_side, last_was_my_capture_sq)):
+        exposed = PIECE_VALUES.get(tmp.piece_type_at(last_was_my_capture_sq), 0)
+        gain -= exposed
 
     return gain, sacrifice_ply, sacrifice_square
 
@@ -502,7 +521,7 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None, prophylax
             kind=kind, forcing=forcing,
             from_square=move.from_square, to_square=move.to_square,
             moved_piece=moved_piece, captured_piece=captured_piece,
-            material_delta=delta, gives_check=gives_check,
+            material_delta=delta, line_delta=line_delta, gives_check=gives_check,
             capture_undefended=capture_undefended,
             capture_line_gain=capture_line_gain,
             file_status=file_status,

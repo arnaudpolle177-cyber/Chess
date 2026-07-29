@@ -258,6 +258,69 @@ def test_seuil_ecart_large_nexplique_pas():
     check(bool(out["text"]), "le paragraphe doit rester complet, seule la cause tombe")
 
 
+def _cand(board, uci, cp, loss, pv=None):
+    """Candidat complet (les champs que collect_theme_bricks lit vraiment)."""
+    mv = chess.Move.from_uci(uci)
+    after = board.copy()
+    after.push(mv)
+    return {"move_uci": uci, "move_san": board.san(mv), "cp": cp, "eval_loss": loss,
+            "pv_uci": pv or [uci], "is_check": after.is_check(),
+            "is_capture": board.is_capture(mv), "is_castle": board.is_castling(mv)}
+
+
+def _texte(fen, uci, cp, loss2, pv=None, alt="g1f1"):
+    board = chess.Board(fen)
+    top = _cand(board, uci, cp, 0, pv)
+    sel = nv2.build_selection(board, [top, _cand(board, alt, cp - loss2, loss2)])
+    return nv2.render(sel, "popular", chosen=top, board=board)["text"]
+
+
+# --- Le GAIN : ce que le coup rapporte, quand le POURQUOI ne sert plus -----
+def test_ecart_faible_explique_ecart_large_chiffre():
+    """Les deux moitiés du même seuil : écart faible -> le lecteur a besoin du
+    pourquoi ; écart large -> le coup se détache seul, il a besoin du combien.
+    Jamais les deux, sinon le paragraphe enfle."""
+    fen = "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1"
+    petit = _texte(fen, "e1g1", 30, 20, alt="d2d3")
+    grand = _texte(fen, "e1g1", 30, 320, alt="d2d3")
+    check("laissent filer" not in petit,
+          f"écart faible : pas de chiffrage du gain -> {petit!r}")
+    check("laissent filer au moins l'équivalent d'une pièce" in grand,
+          f"écart large : le gain doit être chiffré en matériel -> {grand!r}")
+
+
+def test_gain_materiel_de_ligne_prioritaire():
+    """Coup CALME qui ramasse une tour trois demi-coups plus loin : c'est le
+    matériel qu'on annonce, pas l'écart d'éval (plus concret)."""
+    txt = _texte("3r2k1/pp3ppp/8/8/8/8/PP3PPP/R5K1 w - - 0 1", "a1d1", 300, 200,
+                 pv=["a1d1", "g8h8", "d1d8"])
+    check("tu ressors avec l'équivalent d'une tour de plus" in txt,
+          f"le gain matériel de la ligne doit être dit -> {txt!r}")
+
+
+def test_gain_materiel_faux_par_horizon_nest_pas_annonce():
+    """Même ligne, mais la dame noire en c7 reprend en d8 juste au-delà de la
+    PV fournie. Le bilan positif n'est qu'un artefact de troncature : on ne
+    promet pas une tour. Symétrique exact des 50 faux sacrifices.
+
+    La dame est en c7 et NON en d7 : en d7 elle bloquerait la colonne, Txd8
+    serait illégal, la ligne s'arrêterait avant la prise et le test passerait
+    au vert sans rien tester (vérifié -- première version de ce test)."""
+    txt = _texte("3r2k1/ppq2ppp/8/8/8/8/PP3PPP/R5K1 w - - 0 1", "a1d1", 300, 200,
+                 pv=["a1d1", "g8h8", "d1d8"])
+    check("tu ressors" not in txt,
+          f"aucun gain matériel promis quand la reprise est hors horizon -> {txt!r}")
+
+
+def test_mat_ne_chiffre_pas_un_gain_absurde():
+    """eval_loss vaut best_cp - cp et un mat est encodé ~99996 : sans
+    exclusion, le coach annonçait « au moins l'équivalent d'une dame » sur un
+    écart de 990 pions."""
+    txt = _texte("6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1", "a1a8", 99999, 99000)
+    check("laissent filer" not in txt, f"pas de chiffrage sur un mat -> {txt!r}")
+    check("mat" in txt.lower(), f"le mat doit rester le sujet -> {txt!r}")
+
+
 def test_gap_cp_lu_sur_le_second_candidat():
     board = chess.Board()
     cands = [{"move_uci": "e2e4", "move_san": "e4", "cp": 30, "eval_loss": 0},

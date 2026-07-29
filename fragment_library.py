@@ -1227,6 +1227,69 @@ _INTENT_FUNCS = {
 # fou contrôle 7 cases de plus » est un comptage vrai et parfaitement creux --
 # le champ reste disponible pour un futur seuil ou une future formulation, il
 # n'a pas sa place dans une phrase aujourd'hui.
+# Bandes de conversion centipawns -> mots. Volontairement GROSSIÈRES : les
+# écarts d'éval bougent d'une analyse à l'autre (23cp -> 68cp observé sur la
+# même position), donc « 0,45 pion » afficherait une précision qui n'existe
+# pas et qui changerait sous les yeux du lecteur. Un ordre de grandeur en
+# matériel, lui, reste vrai des deux côtés du jitter.
+_GAIN_BANDS = (
+    (900, "l'équivalent d'une dame"),
+    (500, "l'équivalent d'une tour"),
+    (300, "l'équivalent d'une pièce"),
+    (150, "près de deux pions"),
+    (0, "environ un pion"),
+)
+
+
+def _material_words(cp):
+    """Ordre de grandeur en matériel d'un écart en centipawns."""
+    for floor, words in _GAIN_BANDS:
+        if cp >= floor:
+            return words
+    return _GAIN_BANDS[-1][1]
+
+
+def _explain_gain(voice, ctx=None):
+    """
+    Clause « ce que ce coup rapporte », ou None. Même forme et même
+    emplacement que la cause (apposition après l'observation) -- les deux ne
+    coexistent JAMAIS, et c'est voulu : voir narration_v2.render, où le seuil
+    d'écart choisit lequel des deux le lecteur a besoin de lire.
+
+    Deux sources, la plus concrète d'abord :
+      1. ctx.gain_material : bilan matériel de la LIGNE, positif (voir
+         move_intent.MoveIntent.line_delta). Conditionnel, parce qu'il
+         suppose que l'adversaire suit la ligne principale.
+      2. ctx.gain_cp : perte du MEILLEUR coup suivant. Les candidats étant
+         triés par éval, tout autre coup coûte AU MOINS ça -- « au moins »
+         est donc exact, pas une précaution de style.
+
+    Aucun jugement comparatif : on dit ce qui est compté, jamais que le coup
+    est « le meilleur » (règle centrale du projet).
+    """
+    if ctx is None:
+        return None
+
+    material = getattr(ctx, "gain_material", None)
+    if material:
+        mots = _material_words(material * 100)
+        if voice == CREATIVE:
+            return f"au bout de la ligne, {mots} reste dans ta poche"
+        if voice == CLASSICAL:
+            return f"la ligne principale se solde par un gain de {mots}"
+        return f"si l'adversaire suit la ligne, tu ressors avec {mots} de plus"
+
+    gain_cp = getattr(ctx, "gain_cp", None)
+    if not gain_cp:
+        return None
+    mots = _material_words(gain_cp)
+    if voice == CREATIVE:
+        return f"jouer autre chose coûte au moins {mots}"
+    if voice == CLASSICAL:
+        return f"toute autre suite concède au moins {mots}"
+    return f"les autres coups laissent filer au moins {mots}"
+
+
 def _explain_cause(intent, voice, ctx=None):
     """
     Clause « pourquoi ce coup », ou None. Initiale minuscule, sans ponctuation
@@ -1332,7 +1395,10 @@ def fragments_for_intent(intent, voice, ctx=None):
     # remplit ici, à l'UNIQUE point de passage des onze fragments d'intention,
     # plutôt que d'éparpiller la même logique dans chacun.
     if frag is not None and not frag.get("cause"):
-        frag["cause"] = _explain_cause(intent, voice, ctx)
+        # Le POURQUOI ou le COMBIEN, jamais les deux : les deux appels sont
+        # mutuellement exclusifs par construction (narration_v2 n'arme
+        # ctx.explain et ctx.gain_cp que dans des cas disjoints).
+        frag["cause"] = _explain_cause(intent, voice, ctx) or _explain_gain(voice, ctx)
     return frag
 
 
