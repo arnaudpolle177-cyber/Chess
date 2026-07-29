@@ -67,6 +67,13 @@ TIER_ENRICHMENT = "enrichment"
 
 TIER_WEIGHT = {TIER_STRONG: 1000, TIER_MEDIUM: 500, TIER_ENRICHMENT: 100}
 
+# Intensités d'ENDGAME (voir collect_theme_bricks). Lues telles quelles par
+# theme_scoring (plancher 0, saturation 99) : ce sont directement des points
+# d'intensité, à comparer aux 50 des thèmes présence/absence.
+ENDGAME_STRENGTH_DECISIVE = 95.0   # règle du carré : la course est gagnée
+ENDGAME_STRENGTH_CONCRETE = 65.0   # pion passé nommé, ou opposition
+ENDGAME_STRENGTH_GENERIC = 25.0    # aucun objet à montrer -> cède le pas
+
 THEME_TIER = {
     BLUNDER: TIER_STRONG,
     TACTICAL: TIER_STRONG,
@@ -928,11 +935,25 @@ def collect_theme_bricks(board, candidates, swing_cp=None,
         # carré et l'opposition sont les deux notions que la finale enseigne,
         # et toutes deux se PROUVENT sans moteur.
         passed_sq = _find_passed_pawn(board, my_side)
-        _add(ENDGAME, 1.0, {
+        fields = {
             "passed_pawn_square": passed_sq,
             "outruns_king": _pawn_outruns_king(board, passed_sq, my_side),
             "opposition": _kings_in_opposition(board),
-        })
+        }
+        # Le strength d'ENDGAME n'est plus une constante : il dit COMBIEN ce
+        # thème a de concret à raconter. Sinon la finale sortait toujours au
+        # même rang, et « ta position est nettement meilleure » (intensité
+        # proportionnelle à l'éval) passait devant « le roi adverse est hors
+        # du carré » -- alors que le second se joue et le premier se constate.
+        # Symétrique de la rétrogradation d'OPENING (2026-07-14) : c'est le
+        # thème qui a un fait actionnable qui mène, pas le thème de phase.
+        if fields["outruns_king"]:
+            strength = ENDGAME_STRENGTH_DECISIVE   # la course est tranchée
+        elif passed_sq is not None or fields["opposition"]:
+            strength = ENDGAME_STRENGTH_CONCRETE   # un objet précis à montrer
+        else:
+            strength = ENDGAME_STRENGTH_GENERIC    # "le roi devient actif" : vrai, générique
+        _add(ENDGAME, strength, fields)
     elif phase == "opening":
         _add(OPENING, 1.0, {})
 
