@@ -59,15 +59,48 @@ def test_aucune_menace_aucun_plantage():
     assert prophylaxis.prevented_by(board, board.parse_san("e4"), None) is None
 
 
+class _MoteurQuiNeDoitPasEtreAppele:
+    """Sentinelle non-None avec un `.engine.analyse` qui s'auto-enregistre au
+    lieu de lever : si `opponent_threat` capte une exception et rend None
+    quand meme (`except Exception`), un test qui se contenterait de faire
+    lever la sentinelle ne prouverait rien. Ici on verifie factuellement que
+    `analyse` n'a JAMAIS ete appelee."""
+
+    def __init__(self):
+        self.engine = self
+        self.called = False
+
+    def analyse(self, *args, **kwargs):
+        self.called = True
+        return {}
+
+
 def test_en_echec_pas_de_coup_nul():
-    # Roi blanc en echec : le coup nul est ILLEGAL. La detection doit rendre
-    # None sans jamais interroger le moteur (engine=None le prouve : si la
-    # garde sautait, on planterait sur None.engine).
-    check_board = chess.Board("rnbqkbnr/ppp2ppp/8/3pp3/6P1/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 1")
-    check_board.push_san("a3")
-    check_board.push_san("Qh4")
+    # Roi blanc en echec (mais PAS mat : le roi a des cases de fuite) sur une
+    # position minimale -- la FEN "Qh4" du brief est en realite un MAT
+    # (is_game_over() est deja True), ce qui masquerait la garde is_check()
+    # exactement comme engine=None la masquait : is_game_over() court-circuite
+    # avant is_check() d'etre determinant. Ici seule is_check() peut arreter
+    # l'appel.
+    check_board = chess.Board("4k3/8/8/8/8/8/4r3/4K3 w - - 0 1")
     assert check_board.is_check()
-    assert prophylaxis.opponent_threat(None, check_board) is None
+    assert not check_board.is_game_over()
+
+    sentinel = _MoteurQuiNeDoitPasEtreAppele()
+    # `probe.is_valid()` est un second filet ("ceinture et bretelles") qui,
+    # a lui seul, rattrape TOUJOURS une position en echec apres coup nul --
+    # donc meme sans la garde is_check(), ce filet empecherait l'appel
+    # moteur et le test paraitrait probant sans l'etre. On le neutralise
+    # temporairement pour isoler ce que la garde is_check() fait vraiment.
+    original_is_valid = chess.Board.is_valid
+    chess.Board.is_valid = lambda self: True
+    try:
+        result = prophylaxis.opponent_threat(sentinel, check_board)
+    finally:
+        chess.Board.is_valid = original_is_valid
+
+    assert result is None
+    assert sentinel.called is False
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ Deux temps, dont un seul coûte un appel moteur :
    un fait binaire, vérifiable, et suffisant.
 """
 import chess
+import chess.engine
 
 THREAT_DEPTH = 10
 
