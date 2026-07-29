@@ -50,6 +50,7 @@ import opening_identity
 import variation_narrator
 import lichess_explorer
 import game_report
+import prophylaxis
 
 DEFAULT_PORT = 8765
 # Fallback réseau (Lichess Opening Explorer, voir lichess_explorer.py) :
@@ -298,6 +299,18 @@ class BridgeState:
         # generate_narration (façade v1) reste disponible en repli si la
         # sélection v2 manque (cache miss concurrent, cf. handle_single_profile).
         self._selection_cache = narration_v2.SelectionCache()
+        # Menace adverse (coup nul + 1 analyse profondeur 10, ~87 ms) pour LA
+        # POSITION COURANTE -- clé = fen, valeur = chess.Move ou None. Ne
+        # dépend PAS du profil (c'est l'échiquier qui menace, pas le coup
+        # qu'on choisit) : un seul appel moteur par position, partagé par les
+        # 3 profils, même schéma de cache que _theme_cache ci-dessus (clé
+        # comparée à chaque lecture, jamais purgée explicitement -- un
+        # nouveau fen invalide le cache tout seul). Tourne sur scenario_engine
+        # (moteur dédié, 1 thread) sous scenario_engine_lock pour ne jamais
+        # retarder ni bloquer le moteur principal (engine_lock) qui calcule
+        # les candidats des 3 profils.
+        self._threat_cache_key = None
+        self._threat_cache_value = None
         # Kinds d'intention deja racontes par profil (voir narration_v2.render,
         # recent_kinds) -- evite de resservir la meme formulation plusieurs
         # coups d'affilee. Borne a 4 : au-dela, la repetition ne se voit plus.
@@ -914,6 +927,36 @@ class BridgeState:
             except Exception:
                 pass  # cosmétique (identification d'ouverture) -- jamais bloquant
 
+    def _opponent_threat(self, fen, board):
+        """
+        Coup que l'adversaire jouerait s'il avait le trait (voir
+        prophylaxis.opponent_threat), mis en cache pour CETTE position --
+        même schéma que self._theme_cache (clé = fen comparée à chaque
+        lecture, jamais purgée explicitement).
+
+        Best-effort intégral : toute défaillance rend None, ce qui retire
+        seulement l'explication prophylactique du commentaire -- jamais le
+        commentaire lui-même. L'exception est journalisée, pas avalée (un
+        `except` muet a déjà allongé un diagnostic de plusieurs heures dans
+        ce projet). En pratique, prophylaxis.opponent_threat n'est déjà
+        censé jamais lever (il avale et journalise ses propres échecs
+        moteur) -- ce try/except est une garde de second rang contre un bug
+        inattendu ou une panne de _timed_engine_lock lui-même.
+        """
+        with self.lock:
+            if self._threat_cache_key == fen:
+                return self._threat_cache_value
+        threat = None
+        try:
+            with self._timed_engine_lock("threat", lock=self.scenario_engine_lock):
+                threat = prophylaxis.opponent_threat(self.scenario_engine, board)
+        except Exception as e:
+            print(f"⚠ Menace adverse indisponible : {e}")
+        with self.lock:
+            self._threat_cache_key = fen
+            self._threat_cache_value = threat
+        return threat
+
     def _attach_scenario_async(self, fen, board, chosen, profile_id, position_seq, elo_tier_id, entry):
         """
         Calcule le scénario (trajectoire d'éval + motifs structurels, voir
@@ -1287,10 +1330,27 @@ class BridgeState:
                     # move_history pour que la phase (plafond "opening") reste correcte.
                     selection = narration_v2.build_selection(
                         board, result["candidates"], move_history=list(self._move_history))
+                # Prophylaxie : ce que le coup EMPÊCHE. La menace est
+                # calculée une fois par position (cache ci-dessus, partagé
+                # par les 3 profils), la preuve qu'elle disparaît est du
+                # python-chess pur et se refait par profil, puisqu'elle
+                # dépend du coup choisi. Best-effort : sur échec, proph
+                # reste None -- le paragraphe se rend quand même, juste sans
+                # la phrase prophylactique.
+                proph = None
+                try:
+                    threat = self._opponent_threat(fen, board)
+                    if threat is not None:
+                        proph = prophylaxis.prevented_by(
+                            board, chess.Move.from_uci(chosen["move_uci"]), threat)
+                except Exception as e:
+                    print(f"⚠ Prophylaxie indisponible ({profile_id}) : {e}")
+
                 woven = narration_v2.render(
                     selection, profile_id, chosen=chosen,
                     why_motif=why_motif, why_detail=why_detail, board=board,
                     recent_kinds=self._recent_intent_kinds.get(profile_id, ()),
+                    prophylaxis=proph,
                 )
                 if woven.get("text"):
                     entry["narration"]["paragraph"] = woven["text"]
