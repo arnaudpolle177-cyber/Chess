@@ -58,11 +58,18 @@ def main():
 
                     # Verification INDEPENDANTE du fait affiche : si le texte
                     # cite un SAN, ce coup doit vraiment etre devenu illegal.
+                    # board.push(move) avance deja le trait vers l'adversaire
+                    # -- c'est la position ou "threat" (coup adverse) se
+                    # verifie. PAS de second coup nul ici : ca ramenerait le
+                    # trait a nous et viderait legal_moves des coups adverses
+                    # (meme piege que documente dans prophylaxis.prevented_by).
+                    # On compare l'objet Move, pas le SAN : le SAN de "threat"
+                    # a ete calcule sur une autre position (avant notre coup,
+                    # trait inverse), ou la desambiguation peut differer.
                     if proph:
                         after = board.copy()
                         after.push(move)
-                        after.push(chess.Move.null())
-                        if any(after.san(m) == proph["san"] for m in after.legal_moves):
+                        if threat in after.legal_moves:
                             faux.append(f"{chosen['move_san']} : {proph['san']} est encore legal")
             board.push_san(san)
     finally:
