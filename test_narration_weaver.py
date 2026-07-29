@@ -128,7 +128,10 @@ def test_missed_san_survives_weaving():
     lead, supports = ts.select_lead_and_support(
         [brick(MISSED_OPPORTUNITY, 90, swing_cp=90, opponent_better_move_san="Qh5")])
     res = nw.weave(lead, supports, "creative", FragmentContext(eval_cp=40))
-    check("Qh5" in res["text"], f"le SAN réel doit survivre au tissage -> {res['text']!r}")
+    # La brique porte le SAN anglais de python-chess ; l'affichage le
+    # francise (voir fragment_library._san_fr). Ce qui doit survivre au
+    # tissage, c'est la DONNÉE de la brique -- ici sous sa forme affichée.
+    check("Dh5" in res["text"], f"le SAN réel doit survivre au tissage -> {res['text']!r}")
 
 
 def test_all_voices_produce_text():
@@ -162,6 +165,87 @@ def test_two_supports_max_flow():
     res = nw.weave(lead, supports, "classical", FragmentContext(eval_cp=300))
     n = _n_sentences(res["text"])
     check(2 <= n <= 4, f"paragraphe attendu 2..4 phrases, obtenu {n} -> {res['text']!r}")
+
+
+def test_echec_secondaire_apparait_dans_le_texte():
+    import move_intent
+    board = chess.Board("4k3/8/8/1p6/B7/8/8/4K3 w - - 0 1")
+    intent = move_intent.detect_move_intent(
+        board, {"move_uci": "a4b5", "pv_uci": ["a4b5"]})
+    out = nw.weave_intent(intent, None, "popular")
+    check("échec" in out["text"].lower(),
+          f"l'echec du coup doit apparaitre, texte obtenu : {out['text']!r}")
+
+
+def test_la_cause_prime_sur_le_secondaire_inline_et_ne_le_perd_pas():
+    """Régression : _lead_sentence préférait le thème inline, la cause du coup
+    disparaissait alors du paragraphe (mesuré ~10-25% des positions qui en
+    portent une). La cause passe désormais devant -- et le secondaire évincé
+    doit repartir en phrase à part, pas au fond du seau."""
+    lead, supports = ts.select_lead_and_support([
+        brick(STRATEGIC_ADVANTAGE, 300, eval_cp=300),
+        brick(PAWN_STRUCTURE, 200, weak_square=chess.D5),
+    ])
+    check(supports, "ce cas doit produire un secondaire (sinon il ne teste rien)")
+    res = nw.weave(lead, supports, "popular", FragmentContext(eval_cp=300),
+                   lead_cause="ce coup empêche Cd4")
+    check("ce coup empêche Cd4" in res["text"],
+          f"la cause doit survivre au secondaire -> {res['text']!r}")
+    sup_obs = fl.fragments_for(supports[0], "popular",
+                               FragmentContext(eval_cp=300))["observation"]
+    check(sup_obs.rstrip(" .") in res["text"],
+          f"le secondaire évincé de l'inline doit rester une phrase -> {res['text']!r}")
+
+
+def test_cause_du_coup_calme_atteint_le_paragraphe():
+    """Régression : pour un intent QUIET (pion, roi non-roquant), aucun
+    fragment d'intention n'existe -> narration_v2 retombait sur le tissage de
+    thème, qui n'a jamais vu le MoveIntent. La cause du coup était donc
+    structurellement inatteignable sur 30-40% d'une partie."""
+    import narration_v2 as nv2
+    board = chess.Board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+    cands = [{"move_uci": "e2e4", "move_san": "e4", "cp": 30, "eval_loss": 0},
+             {"move_uci": "d2d4", "move_san": "d4", "cp": 20, "eval_loss": 10}]
+    sel = nv2.build_selection(board, cands)
+    out = nv2.render(sel, "popular", board=board, chosen=cands[0],
+                     prophylaxis={"san": "Fb4", "reason": "blocked"})
+    check("Fb4" in out["text"],
+          f"la cause prophylactique d'un coup calme doit apparaitre -> {out['text']!r}")
+
+
+def test_mode_livre_garde_la_prophylaxie_et_coupe_le_geometrique():
+    """Régression : en mode livre, eval_loss est synthétique (<=40) et le
+    seuil EXPLAIN_GAP_MAX_CP ne filtre plus rien. Le fait moteur (prophylaxie)
+    reste, le comptage géométrique tombe."""
+    import narration_v2 as nv2
+    import fragment_library as flib
+    # Après 1.e4 e5 : Cf3 attaque le pion e5 -> new_attack_square posé, donc
+    # une cause géométrique EXISTE réellement ici (sans quoi le test ne
+    # testerait rien -- vérifié en cassant la garde).
+    board = chess.Board("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2")
+    chosen = {"move_uci": "g1f3", "move_san": "Nf3", "cp": None, "eval_loss": 0, "score": "Livre"}
+    book = [chosen,
+            {"move_uci": "f1c4", "move_san": "Bc4", "cp": None, "eval_loss": 20, "score": "Livre"}]
+    engine_like = [dict(chosen, cp=30), dict(book[1], cp=10)]
+
+    sel_engine = nv2.build_selection(board, engine_like)
+    check(not sel_engine.book, "des candidats avec cp ne sont pas du livre")
+    out_engine = nv2.render(sel_engine, "popular", board=board, chosen=chosen)
+    check("e5" in out_engine["text"],
+          f"hors livre, la cause géométrique doit sortir -> {out_engine['text']!r}")
+
+    sel = nv2.build_selection(board, book)
+    check(sel.book, "des candidats sans cp doivent être reconnus comme livre")
+    out = nv2.render(sel, "popular", board=board, chosen=chosen)
+    check("e5" not in out["text"],
+          f"en livre, la cause géométrique doit tomber -> {out['text']!r}")
+    check(bool(out["text"]), "le paragraphe doit rester complet, seule la cause tombe")
+
+    # la prophylaxie, elle, est un fait moteur : elle survit au mode livre
+    out_proph = nv2.render(sel, "popular", board=board, chosen=chosen,
+                           prophylaxis={"san": "Fb4", "reason": "blocked"})
+    check("Fb4" in out_proph["text"],
+          f"la prophylaxie doit survivre au mode livre -> {out_proph['text']!r}")
 
 
 def _run():

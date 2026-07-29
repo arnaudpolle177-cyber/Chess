@@ -177,6 +177,162 @@ def test_selection_cache_roundtrip():
     check(cache.get(fen) is None, "invalidate -> None")
 
 
+def test_coup_calme_est_raconte_pas_la_position():
+    # Coup calme (développement de fou, non forçant) : le paragraphe doit
+    # citer la case d'arrivée du coup affiché (c4), pas uniquement le thème
+    # de position -- c'est le bug corrigé par la tâche 6 (branche
+    # `if intent.forcing` supprimée dans render()).
+    board = chess.Board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1")
+    candidates = [{
+        "move_uci": "f1c4", "move_san": "Bc4", "cp": 30, "eval_loss": 0,
+        "score": "+0.30", "pv_uci": ["f1c4"], "pv_san": ["Bc4"],
+        "is_capture": False, "is_check": False, "is_castle": False,
+        "is_king_move": False, "is_developing_minor": True,
+        "is_pawn_center_push": False, "to_square_central": False,
+        "win_prob": None, "moving_piece_value": 3, "captured_piece_value": None,
+    }]
+    out = nv2.narrate(board, candidates, "popular", chosen=candidates[0])
+    check("c4" in out["text"],
+          f"un coup calme doit citer sa case d'arrivee, obtenu {out['text']!r}")
+
+
+def test_pas_deux_fois_le_meme_texte_de_suite():
+    # Audit : 3 coups DEVELOP de suite sortaient le meme paragraphe mot pour
+    # mot. recent_kinds doit faire devier la formulation quand le kind
+    # courant a deja ete servi recemment pour ce profil.
+    def cand(uci, san, developing):
+        return [{
+            "move_uci": uci, "move_san": san, "cp": 20, "eval_loss": 0,
+            "score": "+0.20", "pv_uci": [uci], "pv_san": [san],
+            "is_capture": False, "is_check": False, "is_castle": False,
+            "is_king_move": False, "is_developing_minor": developing,
+            "is_pawn_center_push": False, "to_square_central": False,
+            "win_prob": None, "moving_piece_value": 3, "captured_piece_value": None,
+        }]
+    b1 = chess.Board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1")
+    c1 = cand("f1c4", "Bc4", True)
+    t1 = nv2.narrate(b1, c1, "popular", chosen=c1[0])["text"]
+
+    b2 = chess.Board("rnbqkb1r/pppp1ppp/5n2/4p3/2B1P3/8/PPPP1PPP/RNBQK1NR w KQkq - 0 1")
+    c2 = cand("g1f3", "Nf3", True)
+    out2 = nv2.narrate(b2, c2, "popular", chosen=c2[0],
+                        recent_kinds=["develop"])
+    check(out2["text"] != t1,
+          f"deux DEVELOP consecutifs ne doivent pas donner le meme texte : {t1!r}")
+
+
+# --- Seuil d'explication ----------------------------------------------------
+# La cause n'est rendue que quand le coup NE S'IMPOSE PAS de lui-meme. C'est ce
+# qui distingue un commentaire explicatif d'un bavardage : sans ce garde-fou,
+# une explication s'ajoute a chaque coup et le texte redevient du bruit.
+
+def _render_avec_ecart(second_loss, prophylaxis=None):
+    board = chess.Board("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1")
+    move = board.parse_san("Bc4")
+    chosen = {
+        "move_uci": move.uci(), "move_san": "Bc4", "cp": 30, "eval_loss": 0,
+        "score": "+0.30", "pv_uci": [move.uci()], "pv_san": ["Bc4"],
+        "is_capture": False, "is_check": False, "is_castle": False,
+        "is_king_move": False, "is_developing_minor": True,
+        "is_pawn_center_push": False, "to_square_central": False,
+        "win_prob": None, "moving_piece_value": 3, "captured_piece_value": None,
+    }
+    cands = [chosen, {"move_uci": "b1c3", "move_san": "Nc3", "cp": 30 - second_loss,
+                      "eval_loss": second_loss, "pv_uci": ["b1c3"],
+                      "is_check": False, "is_capture": False}]
+    sel = nv2.build_selection(board, cands)
+    return nv2.render(sel, "popular", chosen=chosen, board=board,
+                      prophylaxis=prophylaxis)
+
+
+def test_seuil_ecart_faible_explique():
+    proph = {"san": "d5", "reason": "blocked"}
+    out = _render_avec_ecart(10, prophylaxis=proph)
+    check("d5" in out["text"], out["text"])
+
+
+def test_seuil_ecart_large_nexplique_pas():
+    proph = {"san": "d5", "reason": "blocked"}
+    out = _render_avec_ecart(400, prophylaxis=proph)
+    check("d5" not in out["text"], out["text"])
+    check(bool(out["text"]), "le paragraphe doit rester complet, seule la cause tombe")
+
+
+def _cand(board, uci, cp, loss, pv=None):
+    """Candidat complet (les champs que collect_theme_bricks lit vraiment)."""
+    mv = chess.Move.from_uci(uci)
+    after = board.copy()
+    after.push(mv)
+    return {"move_uci": uci, "move_san": board.san(mv), "cp": cp, "eval_loss": loss,
+            "pv_uci": pv or [uci], "is_check": after.is_check(),
+            "is_capture": board.is_capture(mv), "is_castle": board.is_castling(mv)}
+
+
+def _texte(fen, uci, cp, loss2, pv=None, alt="g1f1"):
+    board = chess.Board(fen)
+    top = _cand(board, uci, cp, 0, pv)
+    sel = nv2.build_selection(board, [top, _cand(board, alt, cp - loss2, loss2)])
+    return nv2.render(sel, "popular", chosen=top, board=board)["text"]
+
+
+# --- Le GAIN : ce que le coup rapporte, quand le POURQUOI ne sert plus -----
+def test_ecart_faible_explique_ecart_large_chiffre():
+    """Les deux moitiés du même seuil : écart faible -> le lecteur a besoin du
+    pourquoi ; écart large -> le coup se détache seul, il a besoin du combien.
+    Jamais les deux, sinon le paragraphe enfle."""
+    fen = "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1"
+    petit = _texte(fen, "e1g1", 30, 20, alt="d2d3")
+    grand = _texte(fen, "e1g1", 30, 320, alt="d2d3")
+    check("laissent filer" not in petit,
+          f"écart faible : pas de chiffrage du gain -> {petit!r}")
+    check("laissent filer au moins l'équivalent d'une pièce" in grand,
+          f"écart large : le gain doit être chiffré en matériel -> {grand!r}")
+
+
+def test_gain_materiel_de_ligne_prioritaire():
+    """Coup CALME qui ramasse une tour trois demi-coups plus loin : c'est le
+    matériel qu'on annonce, pas l'écart d'éval (plus concret)."""
+    txt = _texte("3r2k1/pp3ppp/8/8/8/8/PP3PPP/R5K1 w - - 0 1", "a1d1", 300, 200,
+                 pv=["a1d1", "g8h8", "d1d8"])
+    check("tu ressors avec l'équivalent d'une tour de plus" in txt,
+          f"le gain matériel de la ligne doit être dit -> {txt!r}")
+
+
+def test_gain_materiel_faux_par_horizon_nest_pas_annonce():
+    """Même ligne, mais la dame noire en c7 reprend en d8 juste au-delà de la
+    PV fournie. Le bilan positif n'est qu'un artefact de troncature : on ne
+    promet pas une tour. Symétrique exact des 50 faux sacrifices.
+
+    La dame est en c7 et NON en d7 : en d7 elle bloquerait la colonne, Txd8
+    serait illégal, la ligne s'arrêterait avant la prise et le test passerait
+    au vert sans rien tester (vérifié -- première version de ce test)."""
+    txt = _texte("3r2k1/ppq2ppp/8/8/8/8/PP3PPP/R5K1 w - - 0 1", "a1d1", 300, 200,
+                 pv=["a1d1", "g8h8", "d1d8"])
+    check("tu ressors" not in txt,
+          f"aucun gain matériel promis quand la reprise est hors horizon -> {txt!r}")
+
+
+def test_mat_ne_chiffre_pas_un_gain_absurde():
+    """eval_loss vaut best_cp - cp et un mat est encodé ~99996 : sans
+    exclusion, le coach annonçait « au moins l'équivalent d'une dame » sur un
+    écart de 990 pions."""
+    txt = _texte("6k1/5ppp/8/8/8/8/5PPP/R5K1 w - - 0 1", "a1a8", 99999, 99000)
+    check("laissent filer" not in txt, f"pas de chiffrage sur un mat -> {txt!r}")
+    check("mat" in txt.lower(), f"le mat doit rester le sujet -> {txt!r}")
+
+
+def test_gap_cp_lu_sur_le_second_candidat():
+    board = chess.Board()
+    cands = [{"move_uci": "e2e4", "move_san": "e4", "cp": 30, "eval_loss": 0},
+             {"move_uci": "d2d4", "move_san": "d4", "cp": -20, "eval_loss": 50}]
+    check(nv2.build_selection(board, cands).gap_cp == 50, "gap_cp doit lire eval_loss du 2e candidat")
+
+
+def test_gap_cp_vaut_zero_sans_second_candidat():
+    cands = [{"move_uci": "e2e4", "move_san": "e4", "cp": 30, "eval_loss": 0}]
+    check(nv2.build_selection(chess.Board(), cands).gap_cp == 0, "gap_cp doit valoir 0 sans 2e candidat")
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

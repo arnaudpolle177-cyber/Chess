@@ -38,6 +38,8 @@ import theme_detector as td
 import theme_scoring as ts
 import narration_weaver as nw
 import move_intent as mi
+import engine_analysis  # uniquement pour MATE_CP_THRESHOLD
+import fragment_library as fl
 from fragment_library import FragmentContext
 
 # Champs de brique portant une CASE-CLÉ de position (voir ThemeResult) : c'est
@@ -45,6 +47,31 @@ from fragment_library import FragmentContext
 # zone du thème ?). Une brique peut n'en porter aucune (thème diffus comme
 # STRATEGIC_ADVANTAGE) -> pas de case, la porte tranche alors sur la seule
 # proximité au roi le cas échéant, sinon abandonne le thème.
+# Écart, en centipawns, au-delà duquel le coup s'impose tout seul et n'a pas
+# besoin d'être expliqué (voir Selection.gap_cp). VALEUR À CALIBRER en
+# pratique -- volontairement une constante nommée, réglable sans toucher à la
+# logique. 60cp ≈ « plus d'un demi-pion d'écart avec le 2e coup » : à ce
+# niveau-là le choix ne se discute plus, et une explication devient du
+# remplissage.
+EXPLAIN_GAP_MAX_CP = 60
+
+# Intentions dont le fragment parle DÉJÀ de matériel (voir fragment_library) :
+# le gain de ligne n'y ajoute rien et ferait doublon dans la même phrase.
+_KINDS_QUI_DISENT_LE_MATERIEL = frozenset({
+    "mate", "capture_free", "capture_trade", "sacrifice", "promotion",
+})
+# Fait mesuré : 60cp est à l'échelle du BRUIT d'une recherche multi-thread en
+# profondeur 14 -- rejouer l'analyse de la MÊME position peut faire franchir
+# le seuil à un coup (observé : un coup passé de 23cp à 68cp entre deux
+# analyses successives, sans rien d'autre changé). Ce n'est PAS un problème
+# en coaching live : les 3 profils PARTAGENT une seule analyse par position
+# via _candidates_cache, donc gap_cp y est stable -- ce bruit n'est
+# observable qu'à travers des RÉ-analyses (ex: audit_narration.py qui relance
+# le moteur). Si jamais observé en live malgré tout, la réponse est
+# d'ÉLARGIR cette constante (~120), jamais d'ajouter un second appel moteur
+# pour la stabiliser -- un coût de latence permanent pour corriger un bruit
+# qui n'existe déjà pas dans ce chemin.
+
 _THEME_KEY_SQUARE_FIELDS = (
     "pawn_weakness_square",     # PAWN_STRUCTURE : le pion faible ciblé
     "king_square",              # ATTACK / DEFENSE : le roi concerné
@@ -104,13 +131,62 @@ class Selection:
     eval_cp  : éval de la position du point de vue de mon camp (candidates[0].cp)
                -- profil-indépendant, nécessaire au tissage (sens de
                l'initiative, ampleur de l'avantage). 0 si indisponible.
+    gap_cp   : perte d'éval du DEUXIÈME meilleur coup par rapport au premier
+               (candidates[1]["eval_loss"]) -- mesure à quel point le meilleur
+               coup se détache. 0 si un seul candidat. Profil-indépendant.
+    book     : les candidats viennent du LIVRE d'ouvertures (cp absent, voir
+               opening_book.candidates_from_book_entries). Leur `eval_loss`
+               est synthétique et plafonné à 40 -- il passe donc TOUJOURS
+               sous EXPLAIN_GAP_MAX_CP : sans ce drapeau, le seuil est inerte
+               pendant toute l'ouverture.
     bricks   : toutes les briques collectées (debug / introspection ; pas
                requis par render()).
     """
     lead: Optional[td.ThemeCandidate]
     supports: List[td.ThemeCandidate]
     eval_cp: int = 0
+    gap_cp: int = 0
+    book: bool = False
     bricks: List[td.ThemeCandidate] = field(default_factory=list)
+
+
+def _followup_from_pv(board, chosen):
+    """
+    {"reply": SAN de la réponse adverse, "next": SAN de MON coup suivant} lus
+    sur la PV du coup recommandé, ou None.
+
+    Ne rend quelque chose QUE si mon coup suivant est CONCRET -- une prise,
+    un échec ou une promotion. Un 3e demi-coup calme ne vaut pas la peine
+    d'être annoncé : « puis joue Cd2 » n'apprend rien et remplacerait un plan
+    utile par une liste de coups, ce que ce projet refuse depuis le début.
+
+    Les deux SAN sont calculés DANS la position où leur coup est légal (on
+    rejoue la ligne), jamais en avance : c'est le même piège que
+    `is_capture` évalué une position trop tôt, qui a déjà coûté deux bugs à
+    ce dépôt. Ligne trop courte, illisible ou désynchronisée -> None, sans
+    exception.
+    """
+    if not chosen:
+        return None
+    pv = chosen.get("pv_uci") or []
+    if len(pv) < 3:
+        return None
+    tmp = board.copy()
+    sans = []
+    interessant = False
+    for i, uci in enumerate(pv[:3]):
+        try:
+            mv = chess.Move.from_uci(uci)
+        except ValueError:
+            return None
+        if mv not in tmp.legal_moves:
+            return None  # ligne désynchronisée : on se tait
+        if i == 2:
+            interessant = (tmp.is_capture(mv) or tmp.gives_check(mv)
+                           or mv.promotion is not None)
+        sans.append(tmp.san(mv))
+        tmp.push(mv)
+    return {"reply": sans[1], "next": sans[2]} if interessant else None
 
 
 def build_selection(board, candidates, swing_cp=None, opponent_better_move_san=None,
@@ -150,6 +226,10 @@ def build_selection(board, candidates, swing_cp=None, opponent_better_move_san=N
         top_cp = candidates[0].get("cp")
         eval_cp = top_cp if top_cp is not None else 0
 
+    gap_cp = 0
+    if len(candidates) > 1:
+        gap_cp = candidates[1].get("eval_loss") or 0
+
     bricks = td.collect_theme_bricks(
         board, candidates, swing_cp=swing_cp,
         opponent_better_move_san=opponent_better_move_san, initiative_trend=initiative_trend,
@@ -159,11 +239,13 @@ def build_selection(board, candidates, swing_cp=None, opponent_better_move_san=N
     lead, supports = ts.select_lead_and_support(
         bricks, max_supports=max_supports, relation_ok=relation_ok,
     )
-    return Selection(lead=lead, supports=supports, eval_cp=eval_cp, bricks=bricks)
+    return Selection(lead=lead, supports=supports, eval_cp=eval_cp, gap_cp=gap_cp,
+                     book=bool(candidates) and candidates[0].get("cp") is None,
+                     bricks=bricks)
 
 
 def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
-           board=None, caution_text=None):
+           board=None, caution_text=None, recent_kinds=None, prophylaxis=None):
     """
     Étape profil-level : tisse le paragraphe final pour un profil donné, à
     partir d'une Selection déjà calculée (voir build_selection). C'est la
@@ -176,6 +258,14 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
     board : position actuelle (pour nommer une pièce sur une case, rare).
     caution_text : avertissement transversal DÉJÀ rendu en texte (ex: risque
         de pat) -- renvoyé à part, jamais tissé (voir narration_weaver.weave).
+    recent_kinds : kinds d'intention déjà rendus pour CE profil sur les
+        positions précédentes (du plus ancien au plus récent). Sert à ne pas
+        répéter la même formulation plusieurs coups d'affilée -- observé en
+        pratique : trois coups de développement de suite sortaient le même
+        paragraphe mot pour mot. None -> aucune contrainte.
+    prophylaxis : dict {"san", "reason"} rendu par prophylaxis.prevented_by
+        (calculé par l'appelant, un appel moteur par POSITION -- voir
+        web_bridge). None = pas de fait prophylactique pour ce coup.
 
     Retourne le dict de narration_weaver.weave :
       {"text", "lead", "supports", "voice", "caution"}.
@@ -187,42 +277,106 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
         board=board, chosen=chosen, why_motif=why_motif, why_detail=why_detail,
         eval_cp=selection.eval_cp,
     )
+    ctx.recent_kinds = tuple(recent_kinds or ())
 
-    # Intention du COUP recommandé (voir move_intent) : quand le coup est
-    # FORÇANT (fuite d'échec, prise nette, sacrifice, échec, promotion), il
-    # DOIT primer sur le thème de position -- sinon on affiche "pion isolé"
-    # alors que la flèche prend une pièce ou sauve le roi (bug observé). Le
-    # thème de position n'est gardé en secondaire QUE s'il est cohérent avec le
-    # coup (porte géométrique : le coup touche la zone du thème) -- ta consigne
-    # "garder le thème positionnel quand il est cohérent avec une prise".
-    # Calculé par profil (chosen diffère selon le profil) -> différencie enfin
-    # les 3 profils et débloque le figement du thème de position.
+    # Le seuil : la cause ne se rend QUE si le coup ne s'impose pas de
+    # lui-même. Garde-fou contre l'effet cumulé des deux sources
+    # d'explication -- sans lui, une cause s'ajoute à chaque coup, et l'audit
+    # multi-scénarios a déjà montré qu'un texte qui revient devient du bruit.
+    ctx.explain = selection.gap_cp <= EXPLAIN_GAP_MAX_CP
+
+    # En mode LIVRE, gap_cp est synthétique (plafonné à 40 par
+    # opening_book) : le seuil ci-dessus est toujours vrai et ne filtre plus
+    # rien. On y garde la prophylaxie -- « ce coup empêche Fb4 » est un fait
+    # moteur, calculé pareil dans le livre et hors livre, et c'est l'idée
+    # d'ouverture elle-même -- mais on coupe le contraste géométrique, qui
+    # sortirait « la pièce arrive sur une case défendue » à chaque coup de
+    # développement.
+    ctx.explain_geometry = not selection.book
+
+    # Le COMBIEN, complément exact du POURQUOI ci-dessus : quand le coup se
+    # détache (écart large), le lecteur n'a pas besoin qu'on lui explique
+    # pourquoi celui-là, mais ce qu'il rapporte. Les deux champs sont donc
+    # armés dans des cas DISJOINTS -- fragment_library les rend dans le même
+    # emplacement (l'apposition après l'observation), le paragraphe ne gagne
+    # pas une phrase.
+    #
+    # Exclusion du mat : eval_loss vaut best_cp - cp, et un mat est encodé
+    # ~99996 (voir engine_analysis.mate_in_moves). Sans ce test, une position
+    # avec mat annonçait « les autres coups laissent filer 999 pions ». Le mat
+    # a de toute façon son propre intent, qui parle bien mieux que ça.
+    ctx.gain_cp = None
+    if not ctx.explain and 0 < selection.gap_cp < engine_analysis.MATE_CP_THRESHOLD:
+        ctx.gain_cp = selection.gap_cp
+    ctx.gain_material = None
+    # Coup d'ENCHAÎNEMENT : le 3e demi-coup de la PV, c'est-à-dire MON coup
+    # suivant après la meilleure réponse adverse. Il ne s'AJOUTE pas au
+    # paragraphe -- il remplace le plan générique par un plan concret (voir
+    # fragment_library._followup_plan), donc le nombre de phrases ne bouge pas.
+    ctx.followup = _followup_from_pv(board, chosen) if board is not None else None
+
+    # Intention du COUP recommandé (voir move_intent). Calculé par profil
+    # (chosen diffère selon le profil) -> différencie enfin les 3 profils et
+    # débloque le figement du thème de position.
     intent = None
     if board is not None and chosen is not None:
         try:
-            intent = mi.detect_move_intent(board, chosen, why_motif, why_detail)
-        except Exception:
-            intent = None  # best-effort : jamais bloquant, on retombe sur le thème
+            intent = mi.detect_move_intent(board, chosen, why_motif, why_detail,
+                                           prophylaxis=prophylaxis)
+        except Exception as e:
+            # Best-effort : jamais bloquant. Mais SILENCIEUX auparavant, ce qui
+            # a rendu le diagnostic beaucoup plus long -- on journalise comme
+            # le fait déjà l'appelant (web_bridge.py, ligne 1305).
+            print(f"⚠ Intention de coup indisponible ({profile_id}) : {e}")
+            intent = None
 
-    if intent is not None and intent.forcing:
+    # Le paragraphe part TOUJOURS du coup affiché : décrire la position sans
+    # regarder la flèche produisait "le fou bouge, le texte parle du pion"
+    # (mesuré : 47% des coups, voir la spec du 2026-07-28). Le thème de
+    # position n'entre plus qu'en APPUI, et seulement s'il est géométriquement
+    # cohérent avec le coup -- garde qui existait déjà mais n'était appliquée
+    # qu'aux coups forçants.
+    # Gain MATÉRIEL de la ligne, prioritaire sur l'écart d'éval (plus concret).
+    # Réservé aux coups qui n'en parlent PAS déjà : un fragment de prise ou de
+    # sacrifice dit lui-même ce qui se gagne ou se donne, redire « tu ressors
+    # un pion devant » en apposition serait de la répétition, pas du coaching.
+    if intent is not None and ctx.gain_cp and intent.kind not in _KINDS_QUI_DISENT_LE_MATERIEL:
+        if intent.line_delta > 0:
+            ctx.gain_material = intent.line_delta
+
+    if intent is not None:
         kept_theme = selection.lead if _intent_is_coherent_with_theme(intent, selection.lead) else None
         woven = nw.weave_intent(intent, kept_theme, profile_id, ctx, caution_text=caution_text)
         if woven.get("text"):
             return woven
-        # Repli : si l'intention n'a produit aucun texte (kind sans fragment),
-        # on retombe proprement sur le tissage de thème habituel ci-dessous.
+        # Repli : kind sans fragment (QUIET résiduel) -> tissage de thème.
 
-    return nw.weave(selection.lead, selection.supports, profile_id, ctx, caution_text=caution_text)
+    # Le coup calme n'a pas de fragment d'intention, mais il a un POURQUOI
+    # (prophylaxie, contraste géométrique) calculé sur son MoveIntent. Sans
+    # ça, la cause était structurellement inatteignable pour tout coup de pion
+    # et tout coup de roi non-roquant -- soit l'archétype même du coup que la
+    # cause devait expliquer.
+    lead_cause = (fl._explain_cause(intent, profile_id, ctx) if intent is not None else None)
+    lead_cause = lead_cause or fl._explain_gain(profile_id, ctx)
+    return nw.weave(selection.lead, selection.supports, profile_id, ctx,
+                    caution_text=caution_text, lead_cause=lead_cause)
 
 
 def narrate(board, candidates, profile_id, swing_cp=None, opponent_better_move_san=None,
             initiative_trend=None, move_history=None, chosen=None, why_motif=None,
-            why_detail=None, caution_text=None, require_relation=False):
+            why_detail=None, caution_text=None, require_relation=False, recent_kinds=None):
     """
     Raccourci tout-en-un (sélection + tissage) -- pratique pour les tests et
     le chemin non caché. En production, PRÉFÉRER build_selection() une fois
     par position puis render() par profil, pour mutualiser la sélection
     entre les 3 profils (voir étape 6).
+
+    NE FORWARDE PAS le paramètre `prophylaxis` de render() (pas de paramètre
+    correspondant ici) : tout appelant qui passe par narrate() -- notamment
+    audit_narration.py -- ne peut donc JAMAIS produire de cause prophylactique,
+    même sur une position où prophylaxis.opponent_threat en trouverait une ;
+    ne pas prendre ça pour un signe que la détection prophylactique ne
+    fonctionne pas.
     """
     selection = build_selection(
         board, candidates, swing_cp=swing_cp,
@@ -230,7 +384,8 @@ def narrate(board, candidates, profile_id, swing_cp=None, opponent_better_move_s
         move_history=move_history, require_relation=require_relation,
     )
     return render(selection, profile_id, chosen=chosen, why_motif=why_motif,
-                  why_detail=why_detail, board=board, caution_text=caution_text)
+                  why_detail=why_detail, board=board, caution_text=caution_text,
+                  recent_kinds=recent_kinds)
 
 
 class SelectionCache:

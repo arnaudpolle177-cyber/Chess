@@ -70,6 +70,10 @@ _SATURATION = {
     INITIATIVE_SHIFT: 150,      # pente cp/coup ; au-delà c'est déjà un basculement franc
     STRATEGIC_ADVANTAGE: 600,
     PIECE_ACTIVITY_GAP: 2.5,    # ratio de mobilité pondérée (mien/adverse)
+    # ENDGAME porte déjà des POINTS d'intensité (voir theme_detector,
+    # ENDGAME_STRENGTH_*) : plancher 0 / saturation 99 = passe-plat, la
+    # valeur posée par le détecteur arrive intacte dans le score.
+    ENDGAME: 99.0,
 }
 
 _FLOOR = {
@@ -81,10 +85,13 @@ _FLOOR = {
     INITIATIVE_SHIFT: INITIATIVE_SLOPE_CP,
     STRATEGIC_ADVANTAGE: STRATEGIC_EVAL_CP,
     PIECE_ACTIVITY_GAP: ACTIVITY_GAP_RATIO,
+    ENDGAME: 0.0,
 }
 
 # Intensité fixe pour les thèmes "présence/absence" dont le strength est une
-# constante 1.0 (ENDGAME, OPENING, PAWN_STRUCTURE, KING_SAFETY_WARNING) :
+# constante 1.0 (OPENING, PAWN_STRUCTURE, KING_SAFETY_WARNING -- ENDGAME est
+# sorti de cette liste : il module désormais son intensité selon ce qu'il a
+# de concret à dire, voir theme_detector.ENDGAME_STRENGTH_*) :
 # ils n'ont pas d'échelle continue, leur pertinence est binaire. Valeur
 # médiane volontaire -- ils ne dominent pas artificiellement leur tier, et
 # le tier reste le facteur discriminant principal.

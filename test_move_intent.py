@@ -21,6 +21,7 @@ except Exception:
 
 import chess
 
+import engine_analysis
 import move_intent as mi
 import narration_v2 as nv2
 import theme_detector as td
@@ -96,6 +97,90 @@ def test_sacrifice():
     check(intent.material_delta < 0, f"sacrifice: material_delta négatif (={intent.material_delta})")
 
 
+# --- 3quater. Les deux coups calmes que QUIET avalait ----------------------
+def test_poussee_de_pion_passe():
+    """Pion blanc a5, aucun pion noir sur a/b devant lui -> a6 est la poussée
+    d'un pion passé. Le pion noir en b7, lui, l'empêcherait : deuxième moitié
+    du test, sans quoi le détecteur pourrait dire toujours oui."""
+    board = chess.Board("7k/8/8/P7/8/8/8/K7 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("a5a6"))
+    check(intent.kind == mi.PASSED_PUSH, f"a6 = poussée de pion passé (kind={intent.kind})")
+
+    board = chess.Board("7k/1p6/8/P7/8/8/8/K7 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("a5a6"))
+    check(intent.kind != mi.PASSED_PUSH,
+          f"le pion b7 contrôle a6/b6 : pion NON passé (kind={intent.kind})")
+
+
+def test_avant_poste():
+    """Cavalier e3->d5, case couverte par mon pion e4. Les pions noirs qui
+    comptent sont ceux des colonnes c et e ENCORE EN ARRIÈRE (c6/c7, e6/e7) :
+    eux seuls pourront un jour attaquer d5. Un pion noir déjà en c5 ne le
+    pourra plus jamais."""
+    # Pion noir en c5, déjà passé devant : plus aucune menace de pion sur d5.
+    board = chess.Board("4k3/8/8/2p5/4P3/4N3/8/4K3 w - - 0 1")
+    check(chess.Move.from_uci("e3d5") in board.legal_moves, "setup : Cd5 doit être légal")
+    intent = mi.detect_move_intent(board, chosen("e3d5"))
+    check(intent.kind == mi.OUTPOST, f"d5 est un avant-poste (kind={intent.kind})")
+
+    # Le même pion en c7 : il descend en c6 et chasse le cavalier.
+    board = chess.Board("4k3/2p5/8/8/4P3/4N3/8/4K3 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("e3d5"))
+    check(intent.kind != mi.OUTPOST,
+          f"le pion c7 peut chasser le cavalier : pas un avant-poste (kind={intent.kind})")
+
+    # Case NON couverte par un de mes pions (pion e4 retiré) : ce n'est qu'une
+    # case libre, pas un avant-poste.
+    board = chess.Board("4k3/8/8/2p5/8/4N3/8/4K3 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("e3d5"))
+    check(intent.kind != mi.OUTPOST,
+          f"sans pion défenseur, pas d'avant-poste (kind={intent.kind})")
+
+
+def test_roi_actif_seulement_sans_dames():
+    """Roi qui se rapproche du centre : intention réelle SANS dames, coup
+    calme banal AVEC (où « active ton roi » serait un très mauvais conseil)."""
+    board = chess.Board("7k/8/8/8/8/8/8/K7 w - - 0 1")
+    check(mi._center_distance(chess.B2) < mi._center_distance(chess.A1),
+          "setup : b2 doit être plus près du centre que a1")
+    intent = mi.detect_move_intent(board, chosen("a1b2"))
+    check(intent.kind == mi.KING_ACTIVATION, f"roi actif sans dames (kind={intent.kind})")
+
+    board = chess.Board("6qk/8/8/8/8/8/8/K5Q1 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("a1b2"))
+    check(intent.kind != mi.KING_ACTIVATION,
+          f"avec les dames, pas d'activation de roi (kind={intent.kind})")
+
+    board = chess.Board("7k/8/8/8/8/8/8/1K6 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("b1a1"))
+    check(intent.kind != mi.KING_ACTIVATION,
+          f"un roi qui S'ÉLOIGNE du centre ne s'active pas (kind={intent.kind})")
+
+
+# --- 3ter. PAS un sacrifice : positions RÉELLES mesurées en partie ---------
+def test_faux_sacrifices_mesures_en_partie():
+    """Les deux motifs de faux positif relevés par audit_parties.py (50
+    « sacrifices » sur 450 positions). Les FEN et les PV sortent telles
+    quelles de l'audit, pas d'une position inventée."""
+    # 1) HORIZON : 4.Fg2, la PV finit sur ...dxc4 ; le pion est repris au-delà
+    #    des 6 demi-coups fournis. Le coach annonçait « met en route un
+    #    sacrifice dans 2 coups » sur un simple coup de développement.
+    board = chess.Board("rnbqkb1r/pp1p1ppp/4pn2/2p5/2P5/5NP1/PP1PPP1P/RNBQKB1R w KQkq - 1 4")
+    intent = mi.detect_move_intent(board, chosen(
+        "f1g2", pv_uci=["f1g2", "d7d5", "d2d4", "d5c4", "e1g1", "b8c6"]))
+    check(intent is not None and intent.kind != mi.SACRIFICE,
+          f"Fg2 n'est pas un sacrifice (kind={intent.kind if intent else None})")
+
+    # 2) MATÉRIEL QUI TOMBAIT DE TOUTE FAÇON : 11...Da6, la dame va en a6 mais
+    #    c'est le pion d4 que le cavalier prend au coup suivant -- il partait
+    #    quel que soit le coup joué. Le déficit n'est pas sur la case d'arrivée.
+    board = chess.Board("r3k2r/pp1bbppp/1qn1p3/3n4/2Np4/1P3NP1/PB2PPBP/R2Q1RK1 b kq - 3 11")
+    intent = mi.detect_move_intent(board, chosen(
+        "b6a6", pv_uci=["b6a6", "f3d4", "e8g8", "e2e4", "d5f6", "e4e5"]))
+    check(intent is not None and intent.kind != mi.SACRIFICE,
+          f"Da6 n'est pas un sacrifice (kind={intent.kind if intent else None})")
+
+
 # --- 3bis. PAS un sacrifice : reprise coupée par l'horizon de la PV ---------
 def test_not_sacrifice_recapture_beyond_horizon():
     # Échange parfaitement égal dont la PV s'arrête PILE sur la prise adverse :
@@ -117,6 +202,42 @@ def test_promotion():
     check(intent is not None and intent.kind == mi.PROMOTION,
           f"promotion: kind={intent.kind if intent else None}")
     check(intent.forcing, "promotion: forçant")
+
+
+# --- 4bis. MATE prime sur GIVES_CHECK --------------------------------------
+def test_mate_prime_sur_tout():
+    # Mat du couloir : Td8# -- c'est AUSSI un echec, la priorite doit
+    # neanmoins ressortir MATE, jamais gives_check.
+    board = chess.Board("6k1/5ppp/8/8/8/8/8/3R2K1 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("d1d8"))
+    check(intent is not None, "un coup de mat doit produire un intent")
+    check(intent.kind == mi.MATE,
+          f"Td8# doit etre MATE, obtenu {intent.kind}")
+    check(intent.forcing is True, "le mat est forcement forcant")
+    check(intent.mate_in == 1, f"un mat immediat est un mat en 1, obtenu {intent.mate_in}")
+
+
+def test_mat_force_en_deux_coups():
+    # Mat de l'escalier : le mat n'est PAS sur l'echiquier apres le coup, il
+    # est force en 2 coups. Seul le score numerique du candidat le prouve
+    # (encodage engine_analysis.MATE_SCORE) -- surtout pas la chaine "Mat en 2".
+    board = chess.Board("7k/8/8/8/8/8/6R1/5R1K w - - 0 1")
+    cp = engine_analysis.MATE_SCORE - 2  # encodage : MATE_SCORE - nombre de COUPS
+    intent = mi.detect_move_intent(board, {"move_uci": "g2g7", "pv_uci": ["g2g7"], "cp": cp})
+    check(intent is not None, "un mat force doit produire un intent")
+    check(intent.kind == mi.MATE, f"mat force en 2 doit etre MATE, obtenu {intent.kind}")
+    check(intent.mate_in == 2, f"mate_in doit valoir 2, obtenu {intent.mate_in}")
+    check(intent.forcing is True, "un mat force est forcant")
+
+
+def test_mat_subi_n_est_pas_une_intention_de_mat():
+    # cp tres NEGATIF = c'est MOI qui me fais mater. Aucune intention "je mate".
+    board = chess.Board(chess.STARTING_FEN)
+    cp = -(engine_analysis.MATE_SCORE - 2)
+    intent = mi.detect_move_intent(board, {"move_uci": "e2e4", "pv_uci": ["e2e4"], "cp": cp})
+    check(intent is not None, "intent non None")
+    check(intent.kind != mi.MATE, f"un mat SUBI ne doit pas sortir en MATE (kind={intent.kind})")
+    check(intent.mate_in is None, f"pas de mate_in sur un mat subi : {intent.mate_in}")
 
 
 # --- 5. GIVES_CHECK (sans prise nette) -------------------------------------
@@ -145,6 +266,103 @@ def test_malformed():
     check(mi.detect_move_intent(board, None) is None, "malformed: chosen None -> None")
     check(mi.detect_move_intent(board, {"move_uci": "zzzz"}) is None, "malformed: uci illisible -> None")
     check(mi.detect_move_intent(board, chosen("e7e5")) is None, "malformed: coup illégal (mauvais camp) -> None")
+
+
+# --- 7bis. tags : l'échec d'une prise n'est plus perdu ---------------------
+def test_prise_qui_donne_echec_porte_le_tag():
+    # Fou blanc prend en b5 AVEC echec (roi noir en e8, diagonale a4-e8).
+    board = chess.Board("4k3/8/8/1p6/8/8/8/4K2B w - - 0 1")
+    board.set_piece_at(chess.A4, chess.Piece(chess.BISHOP, chess.WHITE))
+    board.remove_piece_at(chess.H1)
+    intent = mi.detect_move_intent(
+        board, chosen("a4b5"))
+    check(intent.kind == mi.CAPTURE_FREE,
+          f"reste classe comme une prise, obtenu {intent.kind}")
+    check("gives_check" in intent.tags,
+          "l'echec ne doit pas etre perdu : tag gives_check attendu")
+
+
+# --- 7ter. Intentions calmes : les coups tranquilles enfin classés ---------
+def test_intentions_calmes():
+    # Roque : le drapeau is_castle est déjà posé par engine_analysis, mais
+    # detect_move_intent doit rester correct même sans lui (board fait foi).
+    b = chess.Board("rnbqk2r/pppp1ppp/5n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1")
+    i = mi.detect_move_intent(b, chosen("e1g1"))
+    check(i.kind == mi.CASTLE, f"O-O doit etre CASTLE, obtenu {i.kind}")
+
+    # Développement : fou quittant la rangée de fond, sans capture.
+    b = chess.Board("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1")
+    i = mi.detect_move_intent(b, chosen("f1c4"))
+    check(i.kind == mi.DEVELOP, f"Fc4 doit etre DEVELOP, obtenu {i.kind}")
+
+    # Tour sur colonne ouverte (colonne d vide de pions).
+    b = chess.Board("4k3/ppp2ppp/8/8/8/8/PPP2PPP/3RK3 w - - 0 1")
+    i = mi.detect_move_intent(b, chosen("d1d5"))
+    check(i.kind == mi.ROOK_FILE, f"Td5 doit etre ROOK_FILE, obtenu {i.kind}")
+
+    # Aucune de ces catégories -> QUIET résiduel (poussée de pion sur l'aile).
+    b = chess.Board("4k3/ppp2ppp/8/8/8/8/PPP2PPP/4K3 w - - 0 1")
+    i = mi.detect_move_intent(b, chosen("a2a3"))
+    check(i.kind == mi.QUIET, f"a3 doit rester QUIET, obtenu {i.kind}")
+
+    for kind in (mi.DEVELOP, mi.CASTLE, mi.ROOK_FILE, mi.REPOSITION):
+        check(kind not in mi.FORCING_KINDS,
+              f"{kind} est calme : ne doit PAS primer sur une tactique")
+
+
+def test_statut_de_colonne_reporte():
+    # Le statut de la colonne était calculé puis JETÉ : les fragments écrivaient
+    # « colonne ouverte » même sur une colonne semi-ouverte. On le reporte.
+    ouverte = chess.Board("4k3/ppp2ppp/8/8/8/8/PPP2PPP/3RK3 w - - 0 1")
+    semi = chess.Board("4k3/ppp2ppp/3p4/8/8/8/PPP2PPP/3RK3 w - - 0 1")  # pion NOIR en d6
+    i_ouverte = mi.detect_move_intent(ouverte, chosen("d1d5"))
+    i_semi = mi.detect_move_intent(semi, chosen("d1d5"))
+    check(i_ouverte.file_status == "open",
+          f"colonne d vide des 2 camps -> 'open', obtenu {i_ouverte.file_status!r}")
+    check(i_semi.kind == mi.ROOK_FILE and i_semi.file_status == "half_open",
+          f"colonne d avec un pion adverse -> 'half_open', obtenu {i_semi.file_status!r}")
+
+
+def test_capture_is_free_nomme_sa_preuve():
+    # UNE SEULE SOURCE DE VÉRITÉ : _capture_is_free retourne le NOM de la preuve
+    # et detect_move_intent le lit, au lieu de recopier ses conditions (une copie
+    # qui divergeait aurait fait écrire « sans reprise » sur une prise reprenable).
+    board = chess.Board("8/r7/8/8/4k3/8/4K3/R7 w - - 0 1")  # tour a7 non défendue
+    move = chess.Move.from_uci("a1a7")
+    check(mi._capture_is_free(board, move, ["a1a7"], 5, None) == "undefended",
+          "case sans défenseur -> preuve 'undefended'")
+    intent = mi.detect_move_intent(board, chosen("a1a7"))
+    check(intent.capture_undefended is True and intent.capture_line_gain is False,
+          "l'intent doit refléter EXACTEMENT la preuve retenue")
+
+    defendue = chess.Board("8/8/4k3/3q4/8/8/8/3R2K1 w - - 0 1")  # d5 défendue par le roi
+    d1d5 = chess.Move.from_uci("d1d5")
+    check(mi._capture_is_free(defendue, d1d5, ["d1d5", "e6d5"], 4, None) == "line_gain",
+          "case défendue mais bilan de ligne positif -> preuve 'line_gain'")
+    check(mi._capture_is_free(defendue, d1d5, ["d1d5"], 9, None) is None,
+          "PV sans reprise adverse et aucun motif -> AUCUNE preuve (None)")
+    check(mi._capture_is_free(defendue, d1d5, ["d1d5"], 9, "fork") == "motif",
+          "confirmation par why_motif seul -> preuve 'motif' (aucun gain recalculé)")
+
+
+def test_repositionnement():
+    # Cavalier déjà développé (pas sur la rangée de fond) qui change de poste,
+    # sans capture -> REPOSITION.
+    b = chess.Board("4k3/8/8/8/8/2N5/8/4K3 w - - 0 1")
+    i = mi.detect_move_intent(b, chosen("c3d5"))
+    check(i.kind == mi.REPOSITION, f"Cd5 doit etre REPOSITION, obtenu {i.kind}")
+    check(not i.forcing, "reposition: non forçant")
+
+
+def test_castle_qui_donne_echec_reste_gives_check():
+    # Roque qui délivre échec au roi adverse (tour arrivant sur la colonne f,
+    # roi noir en f8) : la priorité forçante GIVES_CHECK doit primer sur la
+    # catégorie calme CASTLE.
+    b = chess.Board("5k2/8/8/8/8/8/8/4K2R w K - 0 1")
+    i = mi.detect_move_intent(b, chosen("e1g1"))
+    check(i.kind == mi.GIVES_CHECK,
+          f"roque + echec doit rester GIVES_CHECK, obtenu {i.kind}")
+    check(i.forcing, "roque + echec : forçant")
 
 
 # --- 8. Porte de cohérence géométrique (narration_v2) ----------------------
@@ -201,11 +419,77 @@ def test_render_forcing_end_to_end():
               f"render forçant ({profile}): doit mentionner le roi -> {woven['text']!r}")
 
 
+# --- Contraste geometrique (faits comptables, sans moteur) -----------------
+# Chaque fait est un COMPTAGE, donc indiscutable. La frontiere a ne pas
+# franchir : "il vise f7, defendu par le seul roi" est un comptage ; "f7, la
+# case la plus faible" est un jugement.
+
+def _intent(fen, san, **kw):
+    import chess
+    import move_intent as mi
+    board = chess.Board(fen)
+    move = board.parse_san(san)
+    return mi.detect_move_intent(board, {"move_uci": move.uci()}, **kw), board
+
+
+def test_contraste_cases_nouvellement_controlees():
+    # Le fou sort en c4 : il controle bien plus de cases depuis c4 que depuis f1.
+    it, _ = _intent("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1", "Bc4")
+    assert it.new_squares > 0, it.new_squares
+
+
+def test_contraste_fuite_devant_une_piece_moins_chere():
+    # Fou blanc en b5 attaque par le pion a6 : Ba4 le sort de l'attaque.
+    it, _ = _intent("r1bqkbnr/1ppp1ppp/p1n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1", "Ba4")
+    assert it.escapes_attack is True
+
+
+def test_contraste_pas_de_fuite_quand_rien_nattaque():
+    it, _ = _intent("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1", "Bc4")
+    assert it.escapes_attack is False
+
+
+def test_contraste_piece_adverse_nouvellement_attaquee():
+    # Fb5 attaque le cavalier c6, qui n'etait attaque par rien avant.
+    import chess
+    it, _ = _intent("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1", "Bb5")
+    assert it.new_attack_square == chess.C6, it.new_attack_square
+
+
+def test_contraste_valeurs_neutres_par_defaut():
+    # Un coup de pion sans effet notable ne doit rien affirmer.
+    it, _ = _intent("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "h3")
+    assert it.escapes_attack is False
+    assert it.becomes_defended is False
+    assert it.new_attack_square is None
+
+
+def test_prophylaxie_transmise_telle_quelle():
+    fake = {"san": "Nxf2", "reason": "captured"}
+    it, _ = _intent("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+                    "Bc4", prophylaxis=fake)
+    assert it.prophylaxis == fake
+
+
 def main():
     for fn in (test_check_escape, test_capture_free, test_capture_free_defended_but_winning,
-               test_sacrifice, test_promotion,
-               test_gives_check, test_quiet, test_malformed, test_coherence_gate,
-               test_render_forcing_end_to_end):
+               test_sacrifice, test_faux_sacrifices_mesures_en_partie,
+               test_poussee_de_pion_passe, test_roi_actif_seulement_sans_dames,
+               test_avant_poste,
+               test_promotion, test_mate_prime_sur_tout,
+               test_mat_force_en_deux_coups, test_mat_subi_n_est_pas_une_intention_de_mat,
+               test_gives_check, test_quiet, test_malformed,
+               test_prise_qui_donne_echec_porte_le_tag,
+               test_intentions_calmes, test_statut_de_colonne_reporte,
+               test_capture_is_free_nomme_sa_preuve, test_repositionnement,
+               test_castle_qui_donne_echec_reste_gives_check,
+               test_coherence_gate, test_render_forcing_end_to_end,
+               test_contraste_cases_nouvellement_controlees,
+               test_contraste_fuite_devant_une_piece_moins_chere,
+               test_contraste_pas_de_fuite_quand_rien_nattaque,
+               test_contraste_piece_adverse_nouvellement_attaquee,
+               test_contraste_valeurs_neutres_par_defaut,
+               test_prophylaxie_transmise_telle_quelle):
         try:
             fn()
         except Exception as e:

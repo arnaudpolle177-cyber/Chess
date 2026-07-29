@@ -155,24 +155,35 @@ def _capitalize(clause):
     return clause[0].upper() + clause[1:]
 
 
-def _lead_sentence(lead_frag, inline_support_frag, inline_relation):
+def _lead_sentence(lead_frag, inline_support_frag, inline_relation, cause_first=False):
     """
-    Construit la 1re phrase : observation du principal, éventuellement
-    enrichie SOIT d'un secondaire tissé inline (si un secondaire à relation
-    forte existe), SOIT de la CAUSE du principal (sinon). On ne met jamais
+    Construit la 1re phrase : observation du principal, enrichie SOIT d'un
+    secondaire tissé inline, SOIT de la CAUSE du principal. On ne met jamais
     les deux -- garder la phrase respirable (voir fragment_library : la cause
     est une apposition, le secondaire inline est une proposition).
+
+    cause_first : la cause décrit LE COUP (« ce coup empêche Cd4 »), pas la
+    position. Elle passe alors devant le secondaire : c'est la seule
+    information que le lecteur ne peut pas lire sur l'échiquier, alors qu'un
+    thème de position est descriptif et ne perd rien à devenir une phrase à
+    part. Par défaut False -- la cause d'un fragment de THÈME (« un avantage
+    d'environ 3.0 pions ») reste derrière le tissage inline, qui est plus
+    informatif qu'elle.
+
+    Retour : (phrase, secondaire_absorbé) -- si False et qu'un secondaire
+    inline était proposé, l'appelant doit le rendre en phrase séparée, sinon
+    il disparaît du paragraphe.
     """
     obs = lead_frag["observation"]
+    if cause_first and lead_frag.get("cause"):
+        return _capitalize(obs + " -- " + lead_frag["cause"]), False
     if inline_support_frag is not None:
         conn = _INLINE_CONNECTORS.get(inline_relation, ", et ")
-        return _capitalize(obs + conn + inline_support_frag["observation"])
-    if lead_frag.get("cause"):
-        return _capitalize(obs + " -- " + lead_frag["cause"])
-    return _capitalize(obs)
+        return _capitalize(obs + conn + inline_support_frag["observation"]), True
+    return _capitalize(obs), False
 
 
-def weave(lead, supports, voice, ctx=None, caution_text=None):
+def weave(lead, supports, voice, ctx=None, caution_text=None, lead_cause=None):
     """
     Tisse le commentaire final v2.
 
@@ -206,6 +217,13 @@ def weave(lead, supports, voice, ctx=None, caution_text=None):
     supports = list(supports or [])
     lead_frag = fl.fragments_for(lead, voice, ctx)
 
+    # Cause du COUP affiché, fournie par l'appelant quand l'intention n'a pas
+    # de fragment dédié (kind "quiet" : pion, roi non-roquant -- justement
+    # l'archétype du coup prophylactique). Elle prime sur la cause du thème :
+    # elle parle de la flèche, le thème parle du décor.
+    if lead_cause:
+        lead_frag["cause"] = lead_cause
+
     # Le 1er secondaire à relation FORTE (non neutre) est tissé inline ; sinon
     # il devient une phrase à part. Les secondaires suivants sont toujours des
     # phrases à part, avec leur propre connecteur relationnel.
@@ -222,7 +240,13 @@ def weave(lead, supports, voice, ctx=None, caution_text=None):
 
     inline_support_frag = fl.fragments_for(inline_support, voice, ctx) if inline_support else None
 
-    sentences = [_lead_sentence(lead_frag, inline_support_frag, inline_relation)]
+    lead_text, absorbed = _lead_sentence(lead_frag, inline_support_frag, inline_relation,
+                                         cause_first=bool(lead_cause))
+    if inline_support is not None and not absorbed:
+        # La cause a pris la place inline : le secondaire redevient une phrase,
+        # en tête des autres (il reste le plus lié au principal).
+        sentence_supports.insert(0, (inline_support, inline_relation))
+    sentences = [lead_text]
 
     for sup, rel in sentence_supports:
         sup_frag = fl.fragments_for(sup, voice, ctx)
@@ -283,7 +307,14 @@ def weave_intent(intent, kept_support, voice, ctx=None, caution_text=None):
     intent_frag = fl.fragments_for_intent(intent, voice, ctx)
     header = _INTENT_HEADER_THEME.get(intent.kind, TACTICAL)
     if intent_frag is None:
-        return {"text": "", "lead": header, "supports": [], "voice": voice, "caution": caution_text}
+        return {"text": "", "lead": header, "supports": [], "voice": voice,
+                "caution": caution_text, "intent_kind": intent.kind}
+
+    # Un fait secondaire vrai du même coup (voir MoveIntent.tags) : on
+    # l'accroche à l'observation plutôt que d'en faire une phrase, pour ne pas
+    # diluer l'idée principale.
+    if "gives_check" in getattr(intent, "tags", frozenset()):
+        intent_frag["observation"] = f"{intent_frag['observation']}, avec échec"
 
     # Le secondaire (thème de position gardé) est tissé inline s'il a une
     # relation forte avec la FAMILLE de l'intention, sinon en phrase à part.
@@ -294,13 +325,15 @@ def weave_intent(intent, kept_support, voice, ctx=None, caution_text=None):
     if kept_support is not None:
         rel = _RELATIONS.get((theme_family(header), theme_family(kept_support.theme)), NEUTRAL)
 
-    if support_frag is not None and rel != NEUTRAL:
-        sentences = [_lead_sentence(intent_frag, support_frag, rel)]
-    else:
-        sentences = [_lead_sentence(intent_frag, None, NEUTRAL)]
-        if support_frag is not None:
-            starter = _SENTENCE_CONNECTORS[NEUTRAL]
-            sentences.append(f"{starter}, {support_frag['observation']}")
+    inline = support_frag if (support_frag is not None and rel != NEUTRAL) else None
+    # cause_first : la cause d'un fragment d'INTENTION porte toujours sur le
+    # coup affiché (voir fragment_library._explain_cause) -- elle prime.
+    lead_text, absorbed = _lead_sentence(intent_frag, inline, rel, cause_first=True)
+    sentences = [lead_text]
+    if support_frag is not None and not absorbed:
+        starter = _SENTENCE_CONNECTORS.get(rel if inline else NEUTRAL,
+                                           _SENTENCE_CONNECTORS[NEUTRAL])
+        sentences.append(f"{starter}, {support_frag['observation']}")
 
     # Le PLAN vient de l'INTENTION : l'idée directrice est le coup à jouer.
     sentences.append(_capitalize(intent_frag["plan"]))
@@ -312,4 +345,5 @@ def weave_intent(intent, kept_support, voice, ctx=None, caution_text=None):
         "supports": [kept_support.theme] if kept_support else [],
         "voice": voice,
         "caution": caution_text,
+        "intent_kind": intent.kind,
     }

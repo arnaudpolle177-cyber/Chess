@@ -26,6 +26,13 @@ from typing import Optional
 
 import chess
 
+import engine_analysis  # uniquement pour l'encodage des mats (constantes + mate_in_moves)
+import why_detector
+# theme_detector.pawn_is_passed : le fait « pion passé » doit avoir UNE seule
+# définition dans le projet, sinon la narration de finale et l'intention du
+# coup finissent par se contredire sur la même position.
+import theme_detector as td
+
 # Valeurs standard -- mêmes que why_detector / variation_narrator (source
 # recopiée volontairement : ces trois modules doivent rester autonomes et
 # testables sans s'importer mutuellement pour une simple table de constantes).
@@ -33,6 +40,7 @@ PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, 
 
 # --- Catégories d'intention -------------------------------------------
 # FORÇANTES (le coup fait quelque chose qui prime sur le thème de position) :
+MATE = "mate"                    # le coup fait MAT -- prime sur tout le reste
 CHECK_ESCAPE = "check_escape"    # mon roi était en échec -> le coup le met à l'abri
 CAPTURE_FREE = "capture_free"    # prise d'une pièce que l'adversaire ne peut pas reprendre (gain net)
 SACRIFICE = "sacrifice"          # on donne plus qu'on ne prend, mais le moteur recommande quand même
@@ -42,7 +50,19 @@ CAPTURE_TRADE = "capture_trade"  # prise à valeur ~équilibrée (échange) -- f
 # NON FORÇANTE :
 QUIET = "quiet"                  # coup calme / positionnel -> laisse parler le thème de position
 
-FORCING_KINDS = frozenset({CHECK_ESCAPE, CAPTURE_FREE, SACRIFICE, GIVES_CHECK, PROMOTION, CAPTURE_TRADE})
+# CALMES (non forçantes : elles ne priment jamais sur une tactique, mais elles
+# DÉCRIVENT le coup, ce que QUIET seul ne permettait pas -- 47% des coups
+# tombaient dans ce trou et recevaient un commentaire de position sans rapport
+# avec la flèche, mesuré à l'audit du 2026-07-28).
+DEVELOP = "develop"          # cavalier/fou quittant la rangée de fond
+CASTLE = "castle"            # le roque
+ROOK_FILE = "rook_file"      # tour/dame arrivant sur une colonne ouverte ou semi-ouverte
+REPOSITION = "reposition"    # pièce déjà développée qui change de poste, sans capture
+OUTPOST = "outpost"          # pièce qui se pose sur une case défendue par un pion, inattaquable par un pion adverse
+PASSED_PUSH = "passed_push"  # poussée d'un pion PASSÉ (aucun pion adverse devant, ni à côté)
+KING_ACTIVATION = "king_activation"  # sans dames, le roi marche vers le centre
+
+FORCING_KINDS = frozenset({MATE, CHECK_ESCAPE, CAPTURE_FREE, SACRIFICE, GIVES_CHECK, PROMOTION, CAPTURE_TRADE})
 
 # Motifs why (why_detector.py) qui, s'ils sont présents, CONFIRMENT une prise
 # nette. Gardés comme signal d'appoint uniquement : la classification ne
@@ -58,6 +78,11 @@ _FREE_CAPTURE_MOTIFS = frozenset({"undefended", "not_recaptured", "material_gain
 def _capture_is_free(board, move, pv_uci, line_delta, why_motif):
     """
     Une capture est-elle NETTE (l'adversaire ne peut pas rétablir le matériel) ?
+    Retourne le NOM de la preuve retenue -- "undefended", "line_gain",
+    "motif" -- ou None si aucune. SOURCE DE VÉRITÉ UNIQUE : l'appelant lit ce
+    nom au lieu de recopier les conditions (une copie qui divergeait aurait
+    fait écrire "sans reprise" sur une prise reprenable).
+
     Deux preuves CALCULÉES, indépendantes de l'étiquette why_detector :
 
       1. case d'arrivée NON défendue par l'adversaire (board.attackers) : la
@@ -74,10 +99,10 @@ def _capture_is_free(board, move, pv_uci, line_delta, why_motif):
     """
     opponent = not board.turn
     if not board.attackers(opponent, move.to_square):
-        return True  # rien ne défend la case -> prise imprenable
+        return "undefended"  # rien ne défend la case -> prise imprenable
     if line_delta > 0 and len(pv_uci) >= 2:
-        return True  # gain matériel net sur une ligne qui inclut la reprise adverse
-    return why_motif in _FREE_CAPTURE_MOTIFS
+        return "line_gain"  # gain matériel net sur une ligne qui inclut la reprise adverse
+    return "motif" if why_motif in _FREE_CAPTURE_MOTIFS else None
 
 
 @dataclass
@@ -102,6 +127,62 @@ class MoveIntent:
                     matériel part DÈS ce coup ; au-delà -> le déficit ne se
                     matérialise que plus loin dans la ligne forcée (voir
                     _material_delta_over_pv et fragment_library._frag_sacrifice).
+    capture_undefended : preuve DIRECTE que la pièce prise ne peut pas être
+                  reprise (aucun défenseur sur la case). Distinct de "la prise
+                  est gagnante" : un échange favorable sur une case défendue
+                  est gagnant SANS être imprenable. Seul ce booléen autorise un
+                  fragment à écrire "sans reprise".
+    capture_line_gain : seconde preuve CALCULÉE (chemin 2 de _capture_is_free) :
+                  bilan matériel de la LIGNE strictement positif (line_delta > 0)
+                  ET la PV contient la réponse adverse (len(pv_uci) >= 2). Un
+                  intent CAPTURE_FREE peut exister sans AUCUNE des deux preuves
+                  (3e chemin de _capture_is_free : simple confirmation par
+                  why_motif, ex. "fork", qui ne recalcule aucun gain matériel) --
+                  dans ce cas ni capture_undefended ni capture_line_gain ne sont
+                  vrais, et un fragment ne doit affirmer NI "sans reprise" NI
+                  "gain net de matériel". Les deux booléens sont MUTUELLEMENT
+                  EXCLUSIFS : ils reflètent la preuve RETENUE par
+                  _capture_is_free (case non défendue d'abord, bilan de ligne
+                  ensuite), pas toutes celles qui pourraient s'appliquer --
+                  "imprenable" implique déjà "gagnant", les fragments testent
+                  capture_undefended en premier.
+    file_status : pour un intent ROOK_FILE seulement -- statut RÉEL de la
+                  colonne d'arrivée calculé par why_detector._open_file_status :
+                  "open" (aucun pion des deux camps) ou "half_open" (seul
+                  l'adversaire y a un pion). L'information était calculée puis
+                  jetée, et les fragments écrivaient "colonne ouverte" en dur :
+                  sur une colonne SEMI-ouverte, c'était un fait inventé (et le
+                  conseil n'est pas le même -- un pion adverse à attaquer).
+    why_motif   : motif why_detector reçu en entrée (voir detect_move_intent),
+                  reporté tel quel sur l'intent. Sert de repli DESCRIPTIF
+                  (jamais de bilan matériel) quand ni capture_undefended ni
+                  capture_line_gain ne prouvent un gain -- voir
+                  fragment_library._frag_capture_free.
+    tags        : faits SECONDAIRES du même coup, à mentionner sans changer de
+                  catégorie. Aujourd'hui : "gives_check" quand le coup donne
+                  échec alors que son kind principal est autre chose (une
+                  prise, un sacrifice) -- sans ce champ, l'échec était
+                  purement et simplement perdu (observé sur Fxb5+).
+    mate_in     : kind MATE seulement -- nombre de COUPS avant le mat (1 = mat
+                  immédiat sur l'échiquier, 2 = mat forcé en deux coups...).
+                  Lu sur la valeur NUMÉRIQUE chosen["cp"] (encodage
+                  engine_analysis.MATE_SCORE), jamais sur la chaîne "Mat en 2"
+                  (fragile et dépendante de la langue). None hors MATE.
+    new_squares : nombre de cases que la pièce jouée contrôle DEPUIS son
+                  arrivée et ne contrôlait pas depuis son départ. Comptage pur
+                  (chess.Board.attacks), aucun jugement sur leur valeur.
+    escapes_attack : la pièce jouée était attaquée par une pièce MOINS CHÈRE
+                  qu'elle avant le coup, et ne l'est plus après. La condition
+                  « moins chère » est ce qui rend le fait intéressant : être
+                  attaqué par plus cher que soi n'est pas une menace.
+    becomes_defended : la pièce jouée n'était défendue par personne sur sa case
+                  de départ et l'est sur sa case d'arrivée.
+    new_attack_square : case d'une pièce ADVERSE que la pièce jouée attaque
+                  depuis son arrivée et n'attaquait pas depuis son départ
+                  (None si aucune). La plus chère si plusieurs.
+    prophylaxis : dict {"san", "reason"} rendu par prophylaxis.prevented_by,
+                  ou None. TRANSMIS tel quel par l'appelant, jamais calculé
+                  ici (ce module ne parle pas au moteur).
     """
     kind: str
     forcing: bool
@@ -110,8 +191,25 @@ class MoveIntent:
     moved_piece: Optional[int] = None
     captured_piece: Optional[int] = None
     material_delta: int = 0
+    # Bilan matériel de TOUTE la ligne (voir _material_delta_over_pv), positif
+    # = je ressors devant si l'adversaire suit la PV. Distinct de
+    # material_delta, qui ne compte que la prise immédiate : un coup calme qui
+    # gagne du matériel trois demi-coups plus loin a line_delta > 0 et
+    # material_delta = 0. C'est ce champ que la narration du GAIN lit.
+    line_delta: int = 0
     gives_check: bool = False
     sacrifice_ply: Optional[int] = None
+    capture_undefended: bool = False   # la case d'arrivée n'a AUCUN défenseur adverse
+    capture_line_gain: bool = False    # bilan de ligne positif, PV avec réponse adverse
+    file_status: Optional[str] = None  # ROOK_FILE : "open" / "half_open" (colonne d'arrivée)
+    why_motif: Optional[str] = None    # motif why_detector reporté tel quel (repli descriptif)
+    tags: frozenset = frozenset()      # faits secondaires vrais, ex. "gives_check" (voir docstring)
+    mate_in: Optional[int] = None      # MATE : nombre de COUPS avant le mat (1 = mat immédiat)
+    new_squares: int = 0
+    escapes_attack: bool = False
+    becomes_defended: bool = False
+    new_attack_square: Optional[int] = None
+    prophylaxis: Optional[dict] = None
 
 
 def _immediate_material_delta(board, move):
@@ -147,13 +245,11 @@ def _material_delta_over_pv(board, pv_uci):
     trop court ou illisible -> (0, None) (on ne conclut pas à un sacrifice
     sans preuve). None-safe.
 
-    Retourne (gain, sacrifice_ply) -- sacrifice_ply = demi-coup de la PV
-    (1-based) où le déficit apparaît pour la 1re fois, ou None si jamais
-    négatif. Sert à distinguer un sacrifice IMMÉDIAT (<=2 demi-coups : la
-    pièce part et est reprise tout de suite) d'un sacrifice qui ne se
-    matérialise que plus loin dans la ligne forcée -- la narration
-    (fragment_library._frag_sacrifice) en parle alors au conditionnel
-    plutôt que comme si le matériel partait déjà maintenant.
+    Retourne (gain, sacrifice_ply, sacrifice_square) -- sacrifice_ply =
+    demi-coup de la PV (1-based) où le déficit apparaît pour la 1re fois
+    (None si jamais négatif), sacrifice_square = case du coup joué à ce
+    demi-coup. L'appelant EXIGE les deux pour conclure au sacrifice : voir
+    detect_move_intent, étape 2.
 
     GARDE D'HORIZON (symétrique de _capture_is_free, qui exige déjà len>=2
     pour croire à un GAIN) : la PV est tronquée en amont (engine_analysis :
@@ -168,13 +264,15 @@ def _material_delta_over_pv(board, pv_uci):
     persistant, ou aucune reprise possible -- ex: Bxh7+ Kxh7) reste négatif.
     """
     if not pv_uci:
-        return 0, None
+        return 0, None, None
     my_side = board.turn
     tmp = board.copy()
     gain = 0
     sacrifice_ply = None
+    sacrifice_square = None
     last_ply = 0
     last_was_opponent_capture_sq = None  # case d'une prise adverse au tout dernier demi-coup
+    last_was_my_capture_sq = None        # ... et de MA prise, pour la garde symétrique côté gain
     for ply, uci in enumerate(pv_uci, start=1):
         try:
             move = chess.Move.from_uci(uci)
@@ -196,8 +294,10 @@ def _material_delta_over_pv(board, pv_uci):
         tmp.push(move)
         last_ply = ply
         last_was_opponent_capture_sq = move.to_square if (is_capture_move and not mover_is_me) else None
+        last_was_my_capture_sq = move.to_square if (is_capture_move and mover_is_me) else None
         if gain < 0 and sacrifice_ply is None:
             sacrifice_ply = ply
+            sacrifice_square = move.to_square
 
     # Garde d'horizon (voir docstring) : déficit surgi UNIQUEMENT au dernier
     # demi-coup, sur une prise adverse que je peux reprendre -> reprise
@@ -208,12 +308,120 @@ def _material_delta_over_pv(board, pv_uci):
         recapture_value = PIECE_VALUES.get(
             tmp.piece_type_at(last_was_opponent_capture_sq), 0)
         if gain + recapture_value >= 0:
-            return gain + recapture_value, None  # rendu après reprise -> pas un sacrifice
+            return gain + recapture_value, None, None  # rendu après reprise -> pas un sacrifice
 
-    return gain, sacrifice_ply
+    # Garde d'horizon SYMÉTRIQUE, côté gain : la PV se termine sur MA prise et
+    # l'adversaire a une reprise sur cette case -> le bilan positif n'est
+    # qu'un artefact de troncature, sa reprise tombe juste au-delà. Sans elle,
+    # la narration du gain (fragment_library._explain_gain) annoncerait « tu
+    # ressors une pièce devant » sur un échange parfaitement égal -- le même
+    # faux fait que les 50 faux sacrifices, dans l'autre sens.
+    if (gain > 0 and last_was_my_capture_sq is not None
+            and tmp.attackers(not my_side, last_was_my_capture_sq)):
+        exposed = PIECE_VALUES.get(tmp.piece_type_at(last_was_my_capture_sq), 0)
+        gain -= exposed
+
+    return gain, sacrifice_ply, sacrifice_square
 
 
-def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
+def _is_outpost(board, move, my_side):
+    """
+    La case d'arrivée est-elle un AVANT-POSTE pour la pièce qui s'y pose ?
+    Deux conditions, toutes deux comptées sur la position, aucune supposée :
+      1. un de MES pions défend la case (elle n'est pas simplement libre) ;
+      2. AUCUN pion adverse ne peut jamais venir l'attaquer, c'est-à-dire
+         qu'il n'existe plus de pion adverse sur les deux colonnes voisines,
+         en arrière de la case (les seuls qui pourraient l'attaquer un jour).
+    Testé APRÈS le coup : c'est la case d'arrivée qui compte, et mon propre
+    pion défenseur doit être là une fois le coup joué.
+    """
+    after = board.copy()
+    after.push(move)
+    sq = move.to_square
+    if not any(after.piece_type_at(a) == chess.PAWN
+               for a in after.attackers(my_side, sq)):
+        return False
+
+    file = chess.square_file(sq)
+    rank = chess.square_rank(sq)
+    # « En arrière de la case » du point de vue adverse = du côté d'où ses
+    # pions avancent (ils descendent vers moi si je suis blanc).
+    direction = 1 if my_side == chess.WHITE else -1
+    for f in (file - 1, file + 1):
+        if f < 0 or f > 7:
+            continue
+        r = rank + direction
+        while 0 <= r <= 7:
+            piece = after.piece_at(chess.square(f, r))
+            if piece and piece.piece_type == chess.PAWN and piece.color != my_side:
+                return False
+            r += direction
+    return True
+
+
+def _center_distance(square):
+    """Distance de Chebyshev au bloc central d4/e4/d5/e5 : 0 sur ces quatre
+    cases, 1 sur l'anneau suivant, etc. Sert à prouver qu'un roi se
+    RAPPROCHE du centre plutôt qu'à le supposer."""
+    return min(chess.square_distance(square, sq)
+               for sq in (chess.D4, chess.E4, chess.D5, chess.E5))
+
+
+def _geometric_contrast(board, move):
+    """
+    Ce que le coup CHANGE, compté sans moteur. Quatre faits, quatre comptages :
+    cases nouvellement contrôlées, fuite devant une pièce moins chère, pièce
+    qui devient défendue, pièce adverse nouvellement attaquée.
+
+    Retourne un dict prêt à être déversé dans MoveIntent (clés = noms des
+    champs). Best-effort : en cas de coup illisible, tout à sa valeur neutre.
+    """
+    neutral = {"new_squares": 0, "escapes_attack": False,
+               "becomes_defended": False, "new_attack_square": None}
+    piece = board.piece_at(move.from_square)
+    if piece is None:
+        return neutral
+    me = board.turn
+
+    after = board.copy()
+    after.push(move)
+
+    # 1. Cases nouvellement contrôlées par la pièce jouée.
+    before_att = board.attacks(move.from_square)
+    after_att = after.attacks(move.to_square)
+    new_squares = len(after_att & ~before_att)
+
+    # 2. Fuite : attaquée par MOINS CHER qu'elle avant, plus après. Attaquée
+    #    par plus cher que soi n'est pas une menace -- d'où le filtre de valeur.
+    my_value = PIECE_VALUES.get(piece.piece_type, 0)
+    def _attacked_by_cheaper(b, square, color):
+        for sq in b.attackers(not color, square):
+            attacker = b.piece_at(sq)
+            if attacker and PIECE_VALUES.get(attacker.piece_type, 0) < my_value:
+                return True
+        return False
+    escapes = (_attacked_by_cheaper(board, move.from_square, me)
+               and not _attacked_by_cheaper(after, move.to_square, me))
+
+    # 3. Devient défendue (elle ne l'était pas au départ).
+    becomes_defended = (not board.attackers(me, move.from_square)
+                        and bool(after.attackers(me, move.to_square)))
+
+    # 4. Pièce adverse nouvellement attaquée par la pièce jouée -- la plus
+    #    chère si plusieurs, c'est la seule qu'on citera.
+    new_targets = []
+    for sq in after_att & ~before_att:
+        target = after.piece_at(sq)
+        if target is not None and target.color != me and target.piece_type != chess.KING:
+            new_targets.append((PIECE_VALUES.get(target.piece_type, 0), sq))
+    new_attack_square = max(new_targets)[1] if new_targets else None
+
+    return {"new_squares": new_squares, "escapes_attack": escapes,
+            "becomes_defended": becomes_defended,
+            "new_attack_square": new_attack_square}
+
+
+def detect_move_intent(board, chosen, why_motif=None, why_detail=None, prophylaxis=None):
     """
     board : position AVANT le coup (chess.Board, même que reçu par la
         narration).
@@ -224,11 +432,15 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
         classification prouve désormais le gain elle-même (case non défendue
         ou bilan de ligne positif -- voir _capture_is_free), donc elle ne
         DÉPEND plus de ce motif. Jamais recalculé ici.
+    prophylaxis : dict {"san", "reason"} rendu par prophylaxis.prevented_by, ou
+        None. Ce module ne parle JAMAIS au moteur -- le fait est calculé par
+        l'appelant (web_bridge) et simplement reporté sur l'intent.
 
     Retourne un MoveIntent, ou None si le coup est illisible (chosen mal formé)
     -- l'appelant retombe alors sur le thème de position, jamais sur un crash.
 
     Priorité de classement (du plus marquant au plus neutre) :
+      0. le coup mate (immédiat ou forcé en N) -> MATE (mate_in = N)
       1. mon roi en échec AVANT le coup      -> CHECK_ESCAPE
       2. je donne du matériel net            -> SACRIFICE
       3. promotion                            -> PROMOTION
@@ -246,6 +458,40 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     if move not in board.legal_moves:
         return None  # désync improbable -- pas d'intent plutôt qu'un raisonnement faux
 
+    # Priorité 0 : le coup MATE -- immédiatement, OU au bout d'une séquence
+    # forcée. Rien d'autre ne mérite d'être raconté (observé en pratique, un
+    # mat sortait sous "gives_check" : "l'adversaire doit réagir tout de
+    # suite", alors qu'il ne peut plus rien ; et un mat forcé en 2 ressortait
+    # carrément en "rook_file", conseil de colonne ouverte).
+    # Le mat en N vient du SCORE du candidat, pas de l'échiquier : seule la
+    # valeur numérique chosen["cp"] le prouve (encodage engine_analysis).
+    # mate_in_moves est SIGNÉ : négatif = mat SUBI, surtout pas une intention
+    # "je mate".
+    board.push(move)
+    is_mate = board.is_checkmate()
+    board.pop()
+    scored_mate = engine_analysis.mate_in_moves(chosen.get("cp"))
+    # Garde (pas un calcul) : si l'echiquier ne prouve pas le mat immediat
+    # (is_mate faux), on n'annonce JAMAIS mate_in=1 meme si le score le
+    # suggere -- un score Mate(1) sans mat reel sur l'echiquier serait un
+    # fait invente. max(2, scored_mate) referme ce trou a cout nul : la
+    # branche non-is_mate ne peut plus jamais retomber sur 1.
+    mate_in = 1 if is_mate else (max(2, scored_mate) if scored_mate and scored_mate > 0 else None)
+    if mate_in:
+        # Pas de contraste géométrique ici : un mat forcé n'a pas besoin d'être
+        # expliqué par des comptages, et le seuil de la Task 4 le supprimerait
+        # de toute façon -- prophylaxis omis pour la même raison (chemin figé).
+        return MoveIntent(
+            kind=MATE, forcing=True,
+            from_square=move.from_square, to_square=move.to_square,
+            moved_piece=board.piece_type_at(move.from_square),
+            captured_piece=(board.piece_at(move.to_square).piece_type
+                            if board.piece_at(move.to_square) else None),
+            material_delta=_immediate_material_delta(board, move),
+            gives_check=is_mate or board.gives_check(move),
+            mate_in=mate_in,
+        )
+
     moved = board.piece_at(move.from_square)
     moved_piece = moved.piece_type if moved else None
     captured = board.piece_at(move.to_square)
@@ -255,16 +501,34 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
         captured_piece = chess.PAWN  # en passant : la case d'arrivée est vide mais on prend bien un pion
     immediate_delta = _immediate_material_delta(board, move)
     pv_uci = chosen.get("pv_uci") or [chosen.get("move_uci")]
-    line_delta, sacrifice_ply = _material_delta_over_pv(board, pv_uci)
+    line_delta, sacrifice_ply, sacrifice_square = _material_delta_over_pv(board, pv_uci)
     gives_check = board.gives_check(move)
     was_in_check = board.is_check()
 
-    def _mk(kind, forcing, delta):
+    # Faits secondaires : vrais mais non structurants pour le classement.
+    # (kind != MATE / GIVES_CHECK ici, où l'échec est déjà le sujet principal
+    # -- ces deux-là retournent avant ou sans passer par _mk.)
+    tags = frozenset({"gives_check"}) if gives_check else frozenset()
+
+    # Contraste géométrique : les mêmes quatre comptages quel que soit le kind
+    # retenu ci-dessous -> calculés UNE fois et déversés par _mk, plutôt que
+    # répétés dans les dix branches de retour.
+    contrast = _geometric_contrast(board, move)
+
+    def _mk(kind, forcing, delta, capture_undefended=False, capture_line_gain=False,
+            move_tags=tags, file_status=None):
         return MoveIntent(
             kind=kind, forcing=forcing,
             from_square=move.from_square, to_square=move.to_square,
             moved_piece=moved_piece, captured_piece=captured_piece,
-            material_delta=delta, gives_check=gives_check,
+            material_delta=delta, line_delta=line_delta, gives_check=gives_check,
+            capture_undefended=capture_undefended,
+            capture_line_gain=capture_line_gain,
+            file_status=file_status,
+            why_motif=why_motif,
+            tags=move_tags,
+            prophylaxis=prophylaxis,
+            **contrast,
         )
 
     # 1. Sortir d'un échec prime sur tout : c'est le BUT du coup, aucune
@@ -272,13 +536,24 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     if was_in_check:
         return _mk(CHECK_ESCAPE, True, immediate_delta)
 
-    # 2. Sacrifice : sur TOUTE la ligne, on finit en déficit matériel (la
-    #    reprise adverse prend plus qu'on n'a gagné), mais le moteur recommande
-    #    le coup -> il y a une compensation, à raconter. Se détecte sur la PV,
-    #    jamais sur le coup seul (qui gagne toujours >= 0). On expose le déficit
-    #    (line_delta négatif) comme material_delta pour que le fragment cite
-    #    l'ampleur réelle du sacrifice.
-    if line_delta < 0:
+    # 2. Sacrifice : le déficit doit venir DE CE COUP, et se voir tout de
+    #    suite -- l'adversaire prend sur la case même où je viens de poser ma
+    #    pièce (Fxh7+ Rxh7, Txc3 bxc3). C'est le seul motif prouvable sans
+    #    moteur, et il exclut les deux faux positifs mesurés en partie
+    #    (audit_parties.py, 50 faux « sacrifices » sur 450 positions) :
+    #      - HORIZON : la PV est coupée à 6 demi-coups, un déficit de queue
+    #        que je reprends au 7e faisait dire « ce coup abandonne du
+    #        matériel » sur un simple 4.Fg2 (… d5xc4 repris plus tard) ;
+    #      - MATÉRIEL QUI TOMBAIT DE TOUTE FAÇON : un pion déjà perdant dans
+    #        toutes les lignes n'est pas sacrifié PAR ce coup (11…Da6, le
+    #        pion d4 partait quel que soit le coup joué).
+    #    Le déficit non prouvé ne fabrique plus de phrase : le coup retombe
+    #    sur son autre motif (développement, reposition...) -- silence plutôt
+    #    qu'affirmation fausse.
+    #    On expose le déficit (line_delta négatif) comme material_delta pour
+    #    que le fragment cite l'ampleur réelle du sacrifice.
+    if (line_delta < 0 and sacrifice_ply is not None and sacrifice_ply <= 2
+            and sacrifice_square == move.to_square):
         intent = _mk(SACRIFICE, True, line_delta)
         intent.sacrifice_ply = sacrifice_ply
         return intent
@@ -292,18 +567,75 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     #    Prouvé sur la position, sans dépendre de l'étiquette why_detector
     #    (voir _capture_is_free) : c'est le correctif du cas "prise gagnante
     #    classée fork/material_gain qui retombait en simple échange".
-    if is_capture and _capture_is_free(board, move, pv_uci, line_delta, why_motif):
-        return _mk(CAPTURE_FREE, True, immediate_delta)
+    proof = _capture_is_free(board, move, pv_uci, line_delta, why_motif) if is_capture else None
+    if proof:
+        return _mk(CAPTURE_FREE, True, immediate_delta,
+                   capture_undefended=proof == "undefended",
+                   capture_line_gain=proof == "line_gain")
 
-    # 5. Le coup donne échec (sans être une prise nette déjà traitée).
+    # 5. Le coup donne échec (sans être une prise nette déjà traitée). L'échec
+    #    est déjà le sujet ici -> pas de tag "gives_check" redondant.
     if gives_check:
-        return _mk(GIVES_CHECK, True, immediate_delta)
+        return _mk(GIVES_CHECK, True, immediate_delta, move_tags=frozenset())
 
     # 6. Capture "ordinaire" (échange) : forçant léger -- on décrit la prise
     #    plutôt que de rester sur le thème de position, mais sans dramatiser.
     if is_capture:
         return _mk(CAPTURE_TRADE, True, immediate_delta)
 
-    # 7. Coup calme : aucune intention marquante -> on laisse le thème de
-    #    position parler (le commentaire positionnel a du sens ici).
+    # --- Catégories calmes (aucune ne prime sur une tactique) ---------------
+    # On arrive ici seulement si aucune catégorie forçante ci-dessus n'a
+    # matché : une tactique garde donc toujours la priorité.
+    from_rank = chess.square_rank(move.from_square)
+    home_rank = 0 if board.turn == chess.WHITE else 7
+
+    if board.is_castling(move):
+        return _mk(CASTLE, False, immediate_delta)
+
+    if moved_piece in (chess.KNIGHT, chess.BISHOP) and from_rank == home_rank:
+        return _mk(DEVELOP, False, immediate_delta)
+
+    # _open_file_status(board, file_index, my_side) -> "open" | "half_open" | None
+    # (why_detector.py:125). On regarde la colonne d'ARRIVÉE de la tour/dame.
+    if moved_piece in (chess.ROOK, chess.QUEEN):
+        status = why_detector._open_file_status(
+            board, chess.square_file(move.to_square), board.turn)
+        if status in ("open", "half_open"):
+            # On REPORTE le statut : "ouverte" et "semi-ouverte" ne se disent
+            # pas pareil et n'appellent pas le même plan (voir _frag_rook_file).
+            return _mk(ROOK_FILE, False, immediate_delta, file_status=status)
+
+    if moved_piece in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN) and from_rank != home_rank:
+        # AVANT-POSTE avant reposition : « la pièce bouge de case » était le
+        # tic n°1 du coach (89 coups sur 480 mesurés). Quand la case d'arrivée
+        # est défendue par un de mes pions ET qu'aucun pion adverse ne pourra
+        # jamais l'en chasser, il y a un vrai fait à enseigner à la place.
+        if _is_outpost(board, move, board.turn):
+            return _mk(OUTPOST, False, immediate_delta)
+        return _mk(REPOSITION, False, immediate_delta)
+
+    # 6bis. Les deux coups calmes que QUIET avalait encore -- mesuré sur 450
+    #    positions (audit_parties.py) : 26% des coups ne recevaient AUCUNE
+    #    phrase sur la flèche, et c'était systématiquement un coup de pion ou
+    #    une marche de roi. Or ce sont justement les deux gestes que la finale
+    #    enseigne. Les deux tests ci-dessous sont exacts, pas heuristiques.
+    if moved_piece == chess.PAWN:
+        after = board.copy()
+        after.push(move)
+        # Le pion est-il passé À SON ARRIVÉE ? (Testé après le coup : une
+        # poussée peut sortir le pion de l'ombre d'un pion adverse.)
+        if td.pawn_is_passed(after, move.to_square, board.turn):
+            return _mk(PASSED_PUSH, False, immediate_delta)
+
+    if moved_piece == chess.KING:
+        # « Active ton roi » est un bon conseil SANS DAMES et un très mauvais
+        # avec : on exige donc les deux dames hors de l'échiquier, et que le
+        # roi se rapproche réellement du centre (comptage, pas d'intention
+        # supposée).
+        no_queens = not board.pieces(chess.QUEEN, chess.WHITE) and not board.pieces(chess.QUEEN, chess.BLACK)
+        if no_queens and _center_distance(move.to_square) < _center_distance(move.from_square):
+            return _mk(KING_ACTIVATION, False, immediate_delta)
+
+    # 7. Coup calme résiduel : aucune intention marquante -> on laisse le
+    #    thème de position parler (le commentaire positionnel a du sens ici).
     return _mk(QUIET, False, immediate_delta)

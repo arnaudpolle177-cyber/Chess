@@ -67,6 +67,13 @@ TIER_ENRICHMENT = "enrichment"
 
 TIER_WEIGHT = {TIER_STRONG: 1000, TIER_MEDIUM: 500, TIER_ENRICHMENT: 100}
 
+# Intensités d'ENDGAME (voir collect_theme_bricks). Lues telles quelles par
+# theme_scoring (plancher 0, saturation 99) : ce sont directement des points
+# d'intensité, à comparer aux 50 des thèmes présence/absence.
+ENDGAME_STRENGTH_DECISIVE = 95.0   # règle du carré : la course est gagnée
+ENDGAME_STRENGTH_CONCRETE = 65.0   # pion passé nommé, ou opposition
+ENDGAME_STRENGTH_GENERIC = 25.0    # aucun objet à montrer -> cède le pas
+
 THEME_TIER = {
     BLUNDER: TIER_STRONG,
     TACTICAL: TIER_STRONG,
@@ -252,35 +259,104 @@ class ThemeCandidate:
     fields: dict
 
 
+def pawn_is_passed(board, square, color):
+    """
+    Le pion de `color` en `square` est-il PASSÉ ? Vrai s'il n'y a aucun pion
+    adverse sur sa colonne ni les colonnes adjacentes, en avant de lui.
+    Calcul réel via python-chess, pas une estimation.
+
+    Publique parce que move_intent s'en sert pour reconnaître la poussée d'un
+    pion passé (voir PASSED_PUSH) : le même fait ne doit pas être recodé
+    ailleurs, sous peine de diverger de ce que la narration de finale affirme.
+    """
+    direction = 1 if color == chess.WHITE else -1
+    file = chess.square_file(square)
+    rank = chess.square_rank(square)
+    for f in (file - 1, file, file + 1):
+        if f < 0 or f > 7:
+            continue
+        r = rank + direction
+        while 0 <= r <= 7:
+            other = board.piece_at(chess.square(f, r))
+            if other and other.piece_type == chess.PAWN and other.color != color:
+                return False
+            r += direction
+    return True
+
+
 def _find_passed_pawn(board, color):
     """
     Retourne la case d'un pion passé de `color`, s'il en existe un, sinon
-    None -- un pion est "passé" s'il n'y a AUCUN pion adverse sur sa
-    colonne ni les colonnes adjacentes, en avant de lui. Calcul réel via
-    python-chess, pas une estimation : sert à ce que la narration de
-    finale (ENDGAME) puisse citer un pion passé PRÉCIS quand il y en a
-    vraiment un, plutôt que de mentionner le concept dans le vide.
+    None : sert à ce que la narration de finale (ENDGAME) puisse citer un
+    pion passé PRÉCIS quand il y en a vraiment un, plutôt que de mentionner
+    le concept dans le vide.
     """
-    direction = 1 if color == chess.WHITE else -1
     for sq in board.pieces(chess.PAWN, color):
-        file = chess.square_file(sq)
-        rank = chess.square_rank(sq)
-        blocked = False
-        for f in (file - 1, file, file + 1):
-            if f < 0 or f > 7:
-                continue
-            r = rank + direction
-            while 0 <= r <= 7:
-                other = board.piece_at(chess.square(f, r))
-                if other and other.piece_type == chess.PAWN and other.color != color:
-                    blocked = True
-                    break
-                r += direction
-            if blocked:
-                break
-        if not blocked:
+        if pawn_is_passed(board, sq, color):
             return sq
     return None
+
+
+def _pawn_outruns_king(board, pawn_square, pawn_color):
+    """
+    RÈGLE DU CARRÉ : le roi adverse peut-il encore rattraper ce pion s'il
+    court seul vers la promotion ? Vrai = il ne le peut plus.
+
+    Comptage exact, pas une heuristique : distance du roi adverse à la case
+    de promotion (métrique du roi = max des écarts colonne/ligne) contre le
+    nombre de cases qu'il reste au pion, avec le bonus de première poussée
+    (un pion sur sa rangée de départ avance de deux) et le demi-coup gagné
+    quand c'est l'adversaire qui a le trait. Ne regarde AUCUNE autre pièce :
+    l'affirmation qu'il autorise doit donc rester « il ne peut plus l'arrêter
+    SEUL » -- une tour ou un fou adverse changerait tout.
+    """
+    if pawn_square is None:
+        return False
+    them = not pawn_color
+    king = board.king(them)
+    if king is None:
+        return False
+    promo_rank = 7 if pawn_color == chess.WHITE else 0
+    file = chess.square_file(pawn_square)
+    rank = chess.square_rank(pawn_square)
+    promo_sq = chess.square(file, promo_rank)
+    direction = 1 if pawn_color == chess.WHITE else -1
+
+    # Le carré suppose une course LIBRE : une seule pièce posée sur le chemin
+    # et le pion ne court plus du tout. Sans ce test, « le roi adverse est
+    # trop loin » se dirait d'un pion bloqué -- vrai sur le papier, faux dans
+    # la position.
+    for r in range(rank + direction, promo_rank + direction, direction):
+        if board.piece_at(chess.square(file, r)) is not None:
+            return False
+
+    steps = abs(promo_rank - rank)
+    start_rank = 1 if pawn_color == chess.WHITE else 6
+    if rank == start_rank:
+        steps -= 1  # la première poussée peut être double
+    king_dist = chess.square_distance(king, promo_sq)
+    if board.turn == them:
+        king_dist -= 1  # le camp au trait avance d'abord
+    return king_dist > steps
+
+
+def _kings_in_opposition(board):
+    """
+    OPPOSITION DIRECTE : les deux rois se font face sur la même colonne ou
+    la même rangée, avec UNE case entre eux. Fait binaire et vérifiable.
+
+    Qui la TIENT n'est pas dans le retour, et c'est voulu : la narration
+    tourne toujours sur le camp au trait (my_side = board.turn), et
+    l'opposition appartient par définition à celui qui n'a PAS à jouer. Le
+    fragment peut donc dire sans calcul supplémentaire que c'est l'adversaire
+    qui la tient -- voir fragment_library._frag_endgame.
+    """
+    wk, bk = board.king(chess.WHITE), board.king(chess.BLACK)
+    if wk is None or bk is None:
+        return False
+    same_line = (chess.square_file(wk) == chess.square_file(bk)
+                 or chess.square_rank(wk) == chess.square_rank(bk))
+    return same_line and chess.square_distance(wk, bk) == 2
 
 
 def _king_safety_score(board, king_color):
@@ -854,7 +930,30 @@ def collect_theme_bricks(board, candidates, swing_cp=None,
 
     # 5. ENDGAME / OPENING (phase -- exclusives entre elles, pas des autres)
     if phase == "endgame":
-        _add(ENDGAME, 1.0, {"passed_pawn_square": _find_passed_pawn(board, my_side)})
+        # Trois signaux au lieu d'un : mesuré sur 96 positions de finale, le
+        # seul passed_pawn_square renvoyait deux paragraphes en boucle. Le
+        # carré et l'opposition sont les deux notions que la finale enseigne,
+        # et toutes deux se PROUVENT sans moteur.
+        passed_sq = _find_passed_pawn(board, my_side)
+        fields = {
+            "passed_pawn_square": passed_sq,
+            "outruns_king": _pawn_outruns_king(board, passed_sq, my_side),
+            "opposition": _kings_in_opposition(board),
+        }
+        # Le strength d'ENDGAME n'est plus une constante : il dit COMBIEN ce
+        # thème a de concret à raconter. Sinon la finale sortait toujours au
+        # même rang, et « ta position est nettement meilleure » (intensité
+        # proportionnelle à l'éval) passait devant « le roi adverse est hors
+        # du carré » -- alors que le second se joue et le premier se constate.
+        # Symétrique de la rétrogradation d'OPENING (2026-07-14) : c'est le
+        # thème qui a un fait actionnable qui mène, pas le thème de phase.
+        if fields["outruns_king"]:
+            strength = ENDGAME_STRENGTH_DECISIVE   # la course est tranchée
+        elif passed_sq is not None or fields["opposition"]:
+            strength = ENDGAME_STRENGTH_CONCRETE   # un objet précis à montrer
+        else:
+            strength = ENDGAME_STRENGTH_GENERIC    # "le roi devient actif" : vrai, générique
+        _add(ENDGAME, strength, fields)
     elif phase == "opening":
         _add(OPENING, 1.0, {})
 

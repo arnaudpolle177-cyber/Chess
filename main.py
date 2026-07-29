@@ -20,6 +20,14 @@ import os
 import sys
 import threading
 
+# La console Windows par défaut (cp1252/cp936 selon la locale) plante sur les
+# caractères comme "⚠" utilisés un peu partout dans les messages -- forcer
+# l'UTF-8 ici, une fois, au tout début, plutôt que d'éviter ces caractères
+# dans chaque print().
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 def _make_process_dpi_aware():
     """
@@ -53,6 +61,10 @@ def _make_process_dpi_aware():
 _make_process_dpi_aware()
 
 from webview_ui import CoachWebview
+import app_paths
+import self_update
+import update_checker
+import version
 
 
 class BrowserBridgeApp:
@@ -66,11 +78,15 @@ class BrowserBridgeApp:
     page web, pas dans cette fenêtre.
     """
 
-    def __init__(self, stockfish_path, explain_mode, port, threads=None, hash_mb=1024):
+    def __init__(self, stockfish_path, explain_mode, port, threads=None, hash_mb=1024, lc0_path=None):
         self.overlay = CoachWebview(
             on_refresh_click=self.trigger_refresh,
             on_toggle_side_click=self.toggle_side,
             on_elo_change=self.change_elo_tier,
+            on_show_report_click=self.show_game_report,
+            on_request_scenario=self.request_scenario,
+            on_open_release_page=self.open_release_page,
+            on_start_update=self.start_update,
         )
         self.server = None
         self.state = None
@@ -79,6 +95,11 @@ class BrowserBridgeApp:
         self.port = port
         self.threads = threads
         self.hash_mb = hash_mb
+        self.lc0_path = lc0_path
+        # Rempli par _check_for_update_async dès qu'une mise à jour est
+        # détectée -- start_update (clic "Mettre à jour" du bandeau) le
+        # relit, pas besoin que le JS renvoie l'URL lui-même.
+        self._pending_update_info = None
 
     def trigger_refresh(self):
         if self.state:
@@ -110,6 +131,81 @@ class BrowserBridgeApp:
         if self.state.last_fen is not None:
             threading.Thread(target=self.state.refresh_last_profiles, daemon=True).start()
 
+    def request_scenario(self, profile_id):
+        # Carte de profil réellement affichée dans la fenêtre coach (voir
+        # webview_ui.py, maybeRequestScenario) -- request_scenario côté
+        # BridgeState lance déjà son propre thread, pas besoin d'en ouvrir
+        # un ici.
+        if self.state:
+            self.state.request_scenario(profile_id)
+
+    def show_game_report(self):
+        # Bouton manuel "Voir le rapport" (voir webview_ui.py) -- secours
+        # si la détection auto (scraping DOM game-over côté userscript, ou
+        # fin de partie déductible du FEN) n'a pas déclenché le rapport.
+        # Dans un thread séparé : appelé directement depuis le pont JS de
+        # la fenêtre coach, ne doit pas la geler pendant le calcul.
+        if self.state:
+            threading.Thread(target=self.state.finalize_game_report, daemon=True).start()
+
+    def open_release_page(self, url):
+        # Repli MANUEL uniquement : plus de fichier .zip attaché à la
+        # release (asset_url absent), ou l'auto-update a échoué (voir
+        # _apply_update_async) -- ouvre la page de Release dans le
+        # navigateur par défaut pour que l'utilisateur télécharge/installe
+        # lui-même.
+        if url:
+            import webbrowser
+            webbrowser.open(url)
+
+    def _check_for_update_async(self):
+        # Best-effort total (voir update_checker.check_for_update) : hors
+        # ligne ou build dev (pas de version.txt) -> ne montre simplement
+        # rien, jamais bloquant.
+        info = update_checker.check_for_update()
+        if info.get("available"):
+            self._pending_update_info = info
+            self.overlay.show_update_notice(info)
+
+    def start_update(self):
+        # Clic "Mettre à jour" du bandeau -- déclenché depuis le pont JS,
+        # DANS UN THREAD séparé : télécharger 100+ Mo puis réécrire des
+        # fichiers ne doit jamais geler la fenêtre coach.
+        threading.Thread(target=self._apply_update_async, daemon=True).start()
+
+    def _apply_update_async(self):
+        info = self._pending_update_info
+        if not info or not info.get("asset_url"):
+            # Release sans zip attaché (créée à la main sans build) -- pas
+            # de quoi faire un auto-update, repli manuel direct.
+            self.overlay.show_update_error(
+                "Pas de fichier de mise à jour attaché à cette release.",
+                info.get("release_url") if info else None,
+            )
+            return
+        try:
+            self.overlay.show_update_progress("Téléchargement... 0%")
+            zip_path = update_checker.download_update(
+                info["asset_url"],
+                progress_cb=lambda frac: self.overlay.show_update_progress(
+                    f"Téléchargement... {int(frac * 100)}%"),
+            )
+            self.overlay.show_update_progress("Installation...")
+            extracted = update_checker.extract_update(zip_path)
+            self.overlay.show_update_progress("Redémarrage...")
+            # Ne retourne JAMAIS normalement pour un build packagé (termine
+            # le process, voir self_update.py) -- ce qui suit ne s'exécute
+            # que si ce n'est PAS un build packagé (dev).
+            applied = self_update.apply_update_and_restart(extracted)
+            if not applied:
+                self.overlay.show_update_error(
+                    "Mode développement : impossible de remplacer un exe qui n'existe pas.",
+                    info.get("release_url"),
+                )
+        except Exception as e:
+            self.overlay.show_update_error(
+                f"Échec de la mise à jour automatique : {e}", info.get("release_url"))
+
     def run(self):
         from web_bridge import start_bridge_server
         self.server, self.state = start_bridge_server(
@@ -117,14 +213,21 @@ class BrowserBridgeApp:
             explain_mode=self.explain_mode,
             on_update=self._on_update,
             on_profile_update=self._on_profile_update,
+            on_game_over=self._on_game_over,
             port=self.port,
             threads=self.threads,
             hash_mb=self.hash_mb,
+            lc0_path=self.lc0_path,
         )
         self.overlay.show_status(
             f"En attente de ton site... vérifie que chess_coach_bridge.user.js "
             f"est bien activé dans Tampermonkey sur ta page de jeu (port {self.port})."
         )
+        threading.Thread(target=self._check_for_update_async, daemon=True).start()
+        threading.Thread(
+            target=lambda: self.overlay.set_version_badge(version.get_local_version() or "dev"),
+            daemon=True,
+        ).start()
         try:
             self.overlay.run()
         finally:
@@ -143,6 +246,9 @@ class BrowserBridgeApp:
         # indépendante des autres.
         self.overlay.update_profile(profile_id, entry)
 
+    def _on_game_over(self, report):
+        self.overlay.show_report(report)
+
 
 def resolve_stockfish_path(cli_path):
     if cli_path:
@@ -151,6 +257,23 @@ def resolve_stockfish_path(cli_path):
     if env_path:
         return env_path
     return "stockfish"  # suppose que c'est dans le PATH
+
+
+def resolve_lc0_path(cli_path):
+    """
+    Comme resolve_stockfish_path, mais lc0 est OPTIONNEL (voir
+    web_bridge.BridgeState._start_lc0_engine, qui bascule automatiquement
+    sur engines/lc0/cpu/lc0.exe si CE chemin échoue, puis sur Stockfish si
+    aucun des deux ne démarre) -- le défaut pointe vers le build GPU
+    (onnx-dml), largement plus rapide et qui ne charge pas le CPU partagé
+    avec Stockfish.
+    """
+    if cli_path:
+        return cli_path
+    env_path = os.environ.get("LC0_PATH")
+    if env_path:
+        return env_path
+    return os.path.join(app_paths.get_base_dir(), "engines", "lc0", "gpu", "lc0.exe")
 
 
 def _pause_avant_fermeture():
@@ -177,12 +300,13 @@ def interactive_menu():
                 "(laisse vide pour utiliser STOCKFISH_PATH ou le PATH système) : "
             ).strip()
             stockfish_path = resolve_stockfish_path(sf_input or None)
+            lc0_path = resolve_lc0_path(None)
             print("Démarrage du coach...")
             print("N'oublie pas d'activer chess_coach_bridge.user.js dans Tampermonkey sur ta page de jeu si ce n'est pas déjà fait.")
             try:
                 app = BrowserBridgeApp(
                     stockfish_path, explain_mode="local", port=8765,
-                    threads=None, hash_mb=1024,
+                    threads=None, hash_mb=1024, lc0_path=lc0_path,
                 )
                 app.run()
             except Exception as e:
@@ -207,13 +331,16 @@ def main():
                          help="Threads donnés au moteur (défaut: nb coeurs CPU - 1)")
     parser.add_argument("--hash", type=int, default=1024, dest="hash_mb",
                          help="Mémoire (Mo) pour la table de transposition du moteur (défaut: 1024)")
+    parser.add_argument("--lc0", default=None, dest="lc0_path",
+                         help="Chemin vers l'exécutable lc0 (profil \"classical\" -- défaut: LC0_PATH ou engines/lc0/gpu/lc0.exe, optionnel)")
     args = parser.parse_args()
 
     if args.web_bridge:
         stockfish_path = resolve_stockfish_path(args.stockfish)
+        lc0_path = resolve_lc0_path(args.lc0_path)
         app = BrowserBridgeApp(
             stockfish_path, args.explain_mode, args.bridge_port,
-            threads=args.threads, hash_mb=args.hash_mb,
+            threads=args.threads, hash_mb=args.hash_mb, lc0_path=lc0_path,
         )
         app.run()
         return

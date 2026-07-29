@@ -122,11 +122,6 @@ def _sq(square):
     return chess.square_name(square) if square is not None else ""
 
 
-def _piece_name(board, square):
-    piece = board.piece_at(square) if square is not None else None
-    return PIECE_NAMES_FR.get(piece.piece_type, "pièce") if piece else "pièce"
-
-
 def _pawns(cp):
     """Ampleur en pions (arrondie à 0.1) à partir de centipawns. None -> None."""
     return round(abs(cp) / 100, 1) if cp is not None else None
@@ -163,6 +158,11 @@ class FragmentContext:
     eval_cp     : éval en centipawns du point de vue de mon camp (voir
                   ThemeResult.eval_cp) -- certains fragments (INITIATIVE_SHIFT)
                   changent selon que je suis en avantage ou non.
+    explain     : le commentaire a-t-il le DROIT d'expliquer ? Posé par
+                  narration_v2.render selon l'écart entre les deux meilleurs
+                  coups (voir le seuil, Task 4) : quand le coup s'impose de
+                  lui-même, une explication est du bruit. False -> aucune
+                  cause n'est ajoutée.
 
     Tous optionnels : un fragment qui a besoin d'un champ absent retombe sur
     sa formulation générale (jamais d'invention, jamais d'exception).
@@ -172,11 +172,27 @@ class FragmentContext:
     why_motif: Optional[str] = None
     why_detail: Optional[dict] = None
     eval_cp: int = 0
+    explain: bool = True
 
 
 def _f(observation, plan, cause=None):
     """Fabrique un dict de fragment normalisé (les 3 clés toujours présentes)."""
     return {"observation": observation, "cause": cause, "plan": plan}
+
+
+def _pick_variant(options, intent, ctx):
+    """
+    Choisit une formulation parmi `options` (liste non vide, de la plus
+    naturelle à la moins), en s'écartant de celle déjà servie récemment pour
+    ce même kind (voir narration_v2.render, recent_kinds). Déterministe :
+    même position + même historique -> même texte (pas de random, sinon deux
+    profils ou deux rafraîchissements donneraient des textes différents pour
+    la même position).
+    """
+    recent = getattr(ctx, "recent_kinds", ()) if ctx else ()
+    seen = sum(1 for k in recent if k == intent.kind)
+    base = (intent.to_square or 0) % len(options)
+    return options[(base + seen) % len(options)]
 
 
 # ---------------------------------------------------------------------
@@ -273,7 +289,7 @@ def _frag_defense(fields, voice, ctx):
 
 # --- MISSED_OPPORTUNITY ------------------------------------------------
 def _frag_missed(fields, voice, ctx):
-    san = fields.get("opponent_better_move_san")
+    san = _san_fr(fields.get("opponent_better_move_san"))
     swing = fields.get("swing_cp")
     pawns = _pawns(swing)
     ampleur = f"environ {pawns} {_pawns_word(pawns)}" if pawns else None
@@ -304,6 +320,37 @@ def _frag_missed(fields, voice, ctx):
 def _frag_endgame(fields, voice, ctx):
     passed = fields.get("passed_pawn_square")
     has_passed = passed is not None
+
+    # ORDRE : du plus décisif au plus général. Le carré tranche la partie (le
+    # pion passe ou ne passe pas), l'opposition décide qui cède le terrain ;
+    # le pion passé simple et le roi actif viennent après. Sans ces deux
+    # premiers, la finale ne disposait que d'un signal et sortait les mêmes
+    # deux paragraphes sur 96 positions mesurées.
+    if has_passed and fields.get("outruns_king"):
+        # « seul » n'est pas une précaution de style : _pawn_outruns_king ne
+        # regarde QUE le roi adverse, jamais ses autres pièces.
+        case = _sq(passed)
+        if voice == CREATIVE:
+            return _f(f"le roi adverse est sorti du carré du pion en {case}",
+                      "pousse-le, la course est gagnée pour lui", None)
+        if voice == CLASSICAL:
+            return _f(f"le roi adverse ne peut plus rattraper seul le pion en {case}",
+                      "pousse ce pion sans attendre, chaque temps compte", None)
+        return _f(f"le roi adverse est trop loin pour arrêter seul le pion en {case}",
+                  "pousse-le tout de suite, compte les cases jusqu'à la promotion", None)
+
+    if fields.get("opposition"):
+        # C'est à MOI de jouer (my_side = board.turn), donc l'opposition est
+        # à l'adversaire : celui qui doit bouger la perd.
+        if voice == CREATIVE:
+            return _f("les rois se font face et c'est à toi d'avancer",
+                      "cherche un coup de pion à jouer plutôt que de céder du terrain avec le roi", None)
+        if voice == CLASSICAL:
+            return _f("l'adversaire tient l'opposition, c'est à toi de rompre le face-à-face",
+                      "cherche à reprendre l'opposition par un coup d'attente", None)
+        return _f("les rois se font face à une case d'écart et c'est à toi de bouger",
+                  "ton roi va devoir céder le passage : joue un autre coup si tu en as un", None)
+
     if voice == CREATIVE:
         if has_passed:
             obs = f"ton pion passé en {_sq(passed)} a la voie libre vers la promotion"
@@ -506,8 +553,10 @@ def _frag_pawn_structure(fields, voice, ctx):
         obs = f"{cible} est une faiblesse structurelle permanente"
         plan = "empêche d'abord qu'elle soit réparée, puis attaque-la avec assez de pièces"
         return _f(obs, plan, None)
-    # popular
-    obs = f"l'adversaire a {cible} qui ne disparaîtra pas tout seul"
+    # popular : « l'adversaire a un pion isolé ADVERSE » disait deux fois à
+    # qui est le pion (27 occurrences mesurées). Le sujet le dit déjà.
+    sans_adverse = cible.replace(" adverse", "", 1)
+    obs = f"l'adversaire a {sans_adverse} qui ne disparaîtra pas tout seul"
     plan = "garde cette faiblesse en tête et fais peser la pression au bon moment"
     return _f(obs, plan, None)
 
@@ -613,6 +662,40 @@ def _piece_type_name(piece_type):
     return PIECE_NAMES_FR.get(piece_type, "pièce")
 
 
+# Genre grammatical des noms de pièces -- "tour" et "dame" sont FÉMININS.
+# Les fragments écrivaient "le {nom}" en dur, d'où "le tour adverse" observé
+# en pratique. Le repli "pièce" est féminin lui aussi, donc cohérent.
+_PIECE_IS_FEMININE = {chess.ROOK, chess.QUEEN}
+
+
+def _piece_is_feminine(piece_type):
+    """
+    Genre grammatical du nom de la pièce -- SOURCE UNIQUE de l'accord. Les
+    articles étaient déjà accordés, mais les ADJECTIFS et les PRONOMS restaient
+    en dur dans les formulations ("la tour adverse n'est pas défendu",
+    "prends cette tour, personne ne peut le reprendre"). Tout accord passe
+    désormais par ici, sinon le bug revient à chaque nouvelle variante.
+    """
+    return piece_type in _PIECE_IS_FEMININE or _piece_type_name(piece_type) == "pièce"
+
+
+def _piece_with_article(piece_type, definite=True):
+    """
+    Nom FR d'un type de pièce précédé de son article accordé :
+    "la tour", "le cavalier", "une dame", "un fou". None/inconnu -> "la pièce".
+    """
+    name = _piece_type_name(piece_type)
+    feminine = _piece_is_feminine(piece_type)
+    if definite:
+        return f"{'la' if feminine else 'le'} {name}"
+    return f"{'une' if feminine else 'un'} {name}"
+
+
+def _piece_demonstrative(piece_type):
+    """"ce cavalier" / "cette tour" -- accord identique à _piece_with_article."""
+    return f"{'cette' if _piece_is_feminine(piece_type) else 'ce'} {_piece_type_name(piece_type)}"
+
+
 def _frag_check_escape(intent, voice, ctx):
     # Le roi était en échec : le coup le met à l'abri. On nomme la case
     # d'arrivée si on l'a. On distingue "le roi bouge" d'une parade (une autre
@@ -643,26 +726,109 @@ def _frag_check_escape(intent, voice, ctx):
 
 
 def _frag_capture_free(intent, voice, ctx):
-    # Prise NETTE : soit la pièce ne peut pas être reprise, soit l'échange
-    # laisse un gain net (voir move_intent._capture_is_free). Le texte reste
-    # donc vrai dans les DEUX cas -- on n'affirme pas "non défendue", ce qui
-    # serait faux pour une prise défendue mais gagnante à l'échange.
+    # Prise classée CAPTURE_FREE par _capture_is_free, qui a TROIS chemins,
+    # mais seuls DEUX sont des preuves matérielles CALCULÉES :
+    #   - capture_undefended : case non défendue -> prise imprenable ;
+    #   - capture_line_gain  : bilan de ligne strictement positif (PV avec
+    #     la réponse adverse).
+    # Le 3e chemin (confirmation par why_motif seul, ex. "fork") ne recalcule
+    # AUCUN gain -- une prise défendue à valeur égale peut y passer si le
+    # coup fourchette aussi une autre pièce. Dans ce cas ("proven" ci-dessous
+    # False) on ne dit RIEN sur le matériel (ni "sans reprise", ni "gain
+    # net") : on décrit la prise et, si connu, le motif réellement détecté
+    # (cause = concept, jamais une pièce ou un gain fabriqués).
     dest = _sq(intent.to_square)
-    prise = _piece_type_name(intent.captured_piece)
-    par = _piece_type_name(intent.moved_piece)
+    prise = _piece_with_article(intent.captured_piece)
+    par = _piece_with_article(intent.moved_piece)
     where = f"en {dest}" if dest else ""
+    proven = intent.capture_undefended or intent.capture_line_gain
+    concept = None if proven else _concept_name(intent.why_motif)
+
+    demo = _piece_demonstrative(intent.captured_piece)
+    # Accords en dur supprimés : le pronom COD et les adjectifs qui se
+    # rapportent à la PIÈCE PRISE suivent son genre (voir _piece_is_feminine).
+    fem = _piece_is_feminine(intent.captured_piece)
+    pron = "la" if fem else "le"
+    defendu = "défendue" if fem else "défendu"
+    # « de » + article défini se CONTRACTE au masculin : "de le cavalier" est
+    # fautif, il faut "du cavalier" ("de la tour" reste correct au féminin).
+    # Sortait réellement à l'écran -- ni la garde d'accents ni celle d'accord
+    # ne pouvaient le voir, aucune des deux ne regardait les prépositions.
+    de_prise = f"de {prise}" if fem else f"du {_piece_type_name(intent.captured_piece)}"
+
     if voice == CREATIVE:
-        obs = f"le {prise} adverse {where} tombe sans compensation".replace("  ", " ").rstrip()
-        plan = "prends-le, puis enchaîne pendant que tu tiens l'avantage matériel"
-        return _f(obs, plan, None)
+        # "sans compensation" affirme la même chose que "sans reprise" (la
+        # pièce ne peut pas revenir dans le camp adverse) -- gardé par la
+        # même preuve. "tourne largement à ton avantage" affirme un gain ->
+        # exige capture_line_gain. Sans aucune des deux preuves, description
+        # neutre de la prise, sans bilan matériel -- même règle pour la 2e
+        # formulation (_pick_variant, voir anti-répétition).
+        if intent.capture_undefended:
+            options = [
+                (f"{prise} adverse {where} tombe sans compensation".replace("  ", " ").rstrip(),
+                 f"prends {demo}, puis enchaîne pendant que tu tiens l'avantage matériel"),
+                (f"{prise} adverse {where} n'a personne pour {pron} reprendre".replace("  ", " ").rstrip(),
+                 f"encaisse {demo}, l'initiative reste avec toi"),
+            ]
+        elif intent.capture_line_gain:
+            options = [
+                (f"l'échange {where} tourne largement à ton avantage".replace("  ", " ").rstrip(),
+                 f"prends {demo}, puis enchaîne pendant que tu tiens l'avantage matériel"),
+                (f"la séquence {where} laisse plus de matériel dans ton camp".replace("  ", " ").rstrip(),
+                 f"engage l'échange, le bilan te reste favorable"),
+            ]
+        else:
+            options = [
+                (f"{par} prend {prise} {where}".replace("  ", " ").rstrip(),
+                 f"prends {demo}, puis évalue calmement la suite"),
+                (f"{par} se saisit {de_prise} {where}".replace("  ", " ").rstrip(),
+                 f"prends {demo}, puis observe ce que ça donne"),
+            ]
+        obs, plan = _pick_variant(options, intent, ctx)
+        return _f(obs, plan, concept)
     if voice == CLASSICAL:
-        obs = f"le {par} capture le {prise} {where} avec un gain net de matériel".replace("  ", " ")
-        plan = "encaisse le matériel, puis convertis proprement l'avantage"
-        return _f(obs, plan, None)
+        # "gain net de matériel" est un bilan -- ne l'affirmer que prouvé,
+        # dans les deux formulations.
+        if proven:
+            options = [
+                (f"{par} capture {prise} {where} avec un gain net de matériel".replace("  ", " ").rstrip(),
+                 "encaisse le matériel, puis convertis proprement l'avantage"),
+                (f"{par} capture {prise} {where}, le bilan matériel est acquis".replace("  ", " ").rstrip(),
+                 "prends ce gain, puis joue simplement sur l'avantage acquis"),
+            ]
+        else:
+            options = [
+                (f"{par} capture {prise} {where}".replace("  ", " ").rstrip(),
+                 "vérifie le motif tactique avant de t'engager dans la suite"),
+                (f"{par} prend {prise} {where}, sans bilan matériel établi".replace("  ", " ").rstrip(),
+                 "confirme le motif avant de poursuivre la ligne"),
+            ]
+        obs, plan = _pick_variant(options, intent, ctx)
+        return _f(obs, plan, concept)
     # popular
-    obs = f"le {prise} adverse {where} tombe sans reprise à ta hauteur".replace("  ", " ")
-    plan = "prends la pièce, c'est du matériel gagné"
-    return _f(obs, plan, None)
+    if intent.capture_undefended:
+        options = [
+            (f"{prise} adverse {where} n'est pas {defendu}".replace("  ", " ").rstrip(),
+             f"prends {demo}, c'est du matériel gagné"),
+            (f"{prise} adverse {where} est libre à prendre".replace("  ", " ").rstrip(),
+             f"prends {demo}, personne ne peut {pron} reprendre"),
+        ]
+    elif intent.capture_line_gain:
+        options = [
+            (f"l'échange {where} tourne à ton avantage".replace("  ", " ").rstrip(),
+             f"prends {demo}, c'est du matériel gagné"),
+            (f"l'échange {where} te laisse en tête au niveau matériel".replace("  ", " ").rstrip(),
+             f"prends {demo}, le bilan te reste favorable"),
+        ]
+    else:
+        options = [
+            (f"{prise} adverse {where} tombe".replace("  ", " ").rstrip(),
+             f"prends {demo}, puis regarde ce que ça donne"),
+            (f"{prise} adverse {where} est à portée".replace("  ", " ").rstrip(),
+             f"prends {demo}, puis juge la suite calmement"),
+        ]
+    obs, plan = _pick_variant(options, intent, ctx)
+    return _f(obs, plan, concept)
 
 
 def _frag_sacrifice(intent, voice, ctx):
@@ -671,51 +837,32 @@ def _frag_sacrifice(intent, voice, ctx):
     # l'attaque). On reste factuel sur ce qu'on voit -- on ne PROMET pas un mat
     # qu'on n'a pas vérifié.
     #
-    # intent.sacrifice_ply : demi-coup de la PV où le déficit matériel
-    # apparaît pour la 1re fois (voir move_intent._material_delta_over_pv).
-    # <=2 -> le matériel part DÈS ce coup (prise rendue tout de suite) :
-    # phrasing existant. Au-delà -> ce coup précis ne perd encore rien, il
-    # ENGAGE une séquence forcée qui débouche sur un sacrifice plus loin --
-    # on le dit au conditionnel plutôt que de laisser croire qu'on donne la
-    # pièce maintenant.
-    par = _piece_type_name(intent.moved_piece)
+    # Le sacrifice est toujours IMMÉDIAT ici : move_intent n'en déclare un que
+    # si l'adversaire reprend sur la case d'arrivée dès sa réponse (voir
+    # detect_move_intent, étape 2). La variante « sacrifice différé dans N
+    # coups » a été SUPPRIMÉE avec le motif qui la produisait : elle ne sortait
+    # que sur des artefacts d'horizon de PV (mesuré : 21 occurrences pour 0
+    # vrai sacrifice, dont « 55.Rb3 met en route un sacrifice »).
+    par = _piece_with_article(intent.moved_piece)
     dest = _sq(intent.to_square)
     where = f"en {dest}" if dest else ""
-    immediate = intent.sacrifice_ply is None or intent.sacrifice_ply <= 2
-    moves_away = None if immediate else (intent.sacrifice_ply + 1) // 2
 
-    if immediate:
-        if voice == CREATIVE:
-            obs = f"ce coup sacrifie du matériel {where} pour ouvrir la position".replace("  ", " ").rstrip()
-            plan = "lance la combinaison : ici l'activité vaut plus que les points"
-            return _f(obs, plan, None)
-        if voice == CLASSICAL:
-            obs = f"le {par} se donne {where} au profit de l'initiative".replace("  ", " ")
-            plan = "calcule la suite jusqu'au bout avant de t'engager dans le sacrifice"
-            return _f(obs, plan, None)
-        # popular
-        obs = f"ce coup abandonne du matériel volontairement {where}".replace("  ", " ").rstrip()
-        plan = "ose le sacrifice, la compensation est bien réelle ici"
-        return _f(obs, plan, None)
-
-    # Sacrifice différé : le déficit n'apparaît que plus loin dans la ligne
-    # forcée, pas sur ce coup.
     if voice == CREATIVE:
-        obs = f"ce coup {where} lance une séquence qui force un sacrifice dans {moves_away} coups".replace("  ", " ").rstrip()
-        plan = "engage-toi : la ligne forcée vaut le matériel qui partira plus loin"
+        obs = f"ce coup sacrifie du matériel {where} pour ouvrir la position".replace("  ", " ").rstrip()
+        plan = "lance la combinaison : ici l'activité vaut plus que les points"
         return _f(obs, plan, None)
     if voice == CLASSICAL:
-        obs = f"le {par} {where} prépare une ligne forcée où du matériel sera cédé dans {moves_away} coups".replace("  ", " ").rstrip()
-        plan = "vérifie toute la séquence forcée avant de t'y engager"
+        obs = f"{par} se donne {where} au profit de l'initiative".replace("  ", " ")
+        plan = "calcule la suite jusqu'au bout avant de t'engager dans le sacrifice"
         return _f(obs, plan, None)
     # popular
-    obs = f"ce coup {where} met en route un sacrifice qui n'arrive que dans {moves_away} coups".replace("  ", " ").rstrip()
-    plan = "suis la ligne forcée jusqu'au bout, la compensation arrive après le sacrifice"
+    obs = f"ce coup abandonne du matériel volontairement {where}".replace("  ", " ").rstrip()
+    plan = "ose le sacrifice, la compensation est bien réelle ici"
     return _f(obs, plan, None)
 
 
 def _frag_gives_check(intent, voice, ctx):
-    par = _piece_type_name(intent.moved_piece)
+    par = _piece_with_article(intent.moved_piece)
     dest = _sq(intent.to_square)
     where = f"en {dest}" if dest else ""
     if voice == CREATIVE:
@@ -723,7 +870,7 @@ def _frag_gives_check(intent, voice, ctx):
         plan = "enchaîne les coups forçants tant que l'adversaire n'a pas le choix"
         return _f(obs, plan, None)
     if voice == CLASSICAL:
-        obs = f"le {par} donne échec {where}, un coup forçant".replace("  ", " ")
+        obs = f"{par} donne échec {where}, un coup forçant".replace("  ", " ")
         plan = "vérifie chaque réponse à l'échec avant de poursuivre le plan"
         return _f(obs, plan, None)
     # popular
@@ -751,32 +898,542 @@ def _frag_promotion(intent, voice, ctx):
 
 def _frag_capture_trade(intent, voice, ctx):
     # Échange à valeur ~égale : on décrit la prise sans dramatiser.
-    prise = _piece_type_name(intent.captured_piece)
-    par = _piece_type_name(intent.moved_piece)
+    prise = _piece_with_article(intent.captured_piece)
+    par = _piece_with_article(intent.moved_piece)
     dest = _sq(intent.to_square)
     where = f"en {dest}" if dest else ""
     if voice == CREATIVE:
-        obs = f"le {par} prend le {prise} {where} et relance la position".replace("  ", " ")
+        obs = f"{par} prend {prise} {where} et relance la position".replace("  ", " ")
         plan = "engage l'échange, puis cherche à en tirer l'initiative"
         return _f(obs, plan, None)
     if voice == CLASSICAL:
-        obs = f"le {par} échange le {prise} {where}".replace("  ", " ")
+        obs = f"{par} échange {prise} {where}".replace("  ", " ")
         plan = "réalise l'échange, il clarifie la position"
         return _f(obs, plan, None)
     # popular
-    obs = f"le {par} prend le {prise} {where}".replace("  ", " ")
+    obs = f"{par} prend {prise} {where}".replace("  ", " ")
     plan = "fais l'échange, il simplifie la position sans rien concéder"
     return _f(obs, plan, None)
 
 
+def _frag_mate(intent, voice, ctx):
+    # Le coup MATE. Aucune nuance à apporter : c'est la fin de la partie, le
+    # seul message utile est "joue-le". Deux cas distincts, jamais confondus :
+    # le mat est-il DÉJÀ sur l'échiquier (mate_in == 1) ou au bout d'une
+    # séquence forcée (mate_in > 1) ? On ne dit "fait mat" que dans le premier
+    # cas -- sinon on annonce le compte, prouvé par le score du candidat (voir
+    # move_intent.mate_in), jamais deviné.
+    dest = _sq(intent.to_square)
+    par = _piece_with_article(intent.moved_piece)
+    where = f"en {dest}" if dest else ""
+    n = intent.mate_in or 1
+    if n > 1:
+        if voice == CREATIVE:
+            obs = f"{par} {where} lance le mat en {n} coups".replace("  ", " ")
+            return _f(obs, "va au bout de la séquence, elle est forcée", None)
+        if voice == CLASSICAL:
+            obs = f"{par} {where} force le mat en {n} coups".replace("  ", " ")
+            return _f(obs, "conduis la séquence jusqu'au mat, elle ne laisse aucune parade", None)
+        obs = f"{par} {where} force le mat en {n} coups".replace("  ", " ")
+        return _f(obs, "joue-le et enchaîne, la partie est gagnée", None)
+    if voice == CREATIVE:
+        obs = f"{par} {where} met le roi adverse échec et mat".replace("  ", " ")
+        plan = "c'est fini, joue-le"
+        return _f(obs, plan, None)
+    if voice == CLASSICAL:
+        obs = f"{par} {where} donne mat, la partie s'arrête ici".replace("  ", " ")
+        plan = "joue ce coup, aucune autre considération n'a de valeur"
+        return _f(obs, plan, None)
+    # popular
+    obs = f"{par} {where} fait mat".replace("  ", " ")
+    plan = "joue-le, la partie est gagnée"
+    return _f(obs, plan, None)
+
+
+def _frag_develop(intent, voice, ctx):
+    # Une mineure sort de la rangee de fond. Fait verifiable : la pièce et sa
+    # case d'arrivee, lues sur l'intent. Au moins 2 formulations par voix
+    # (choisies via _pick_variant) : a l'audit, 3 coups de développement de
+    # suite sortaient le meme paragraphe mot pour mot.
+    dest = _sq(intent.to_square)
+    par = _piece_with_article(intent.moved_piece)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        options = [
+            (f"{par} entre dans la partie {where}".replace("  ", " ").rstrip(),
+             "sors tes pièces d'abord, les idées viendront après"),
+            (f"{par} rejoint le jeu {where}".replace("  ", " ").rstrip(),
+             "chaque pièce sortie ajoute une option, continue"),
+        ]
+    elif voice == CLASSICAL:
+        options = [
+            (f"{par} se développe {where}".replace("  ", " ").rstrip(),
+             "termine ton développement avant d'ouvrir le jeu"),
+            (f"{par} quitte sa case de départ {where}".replace("  ", " ").rstrip(),
+             "achève la mobilisation des pièces mineures avant tout plan"),
+        ]
+    else:
+        # "puis roque" AFFIRME que le roque est encore possible : vérifié sur la
+        # position (_castle_state lit has_castling_rights), sinon on conseillait
+        # un coup illégal (observé sur une position sans aucun droit de roque).
+        options = [
+            (f"{par} sort {where}".replace("  ", " ").rstrip(),
+             "développe, puis roque" if _castle_state(ctx) != _CASTLE_DONE
+             else "développe, puis mets ton roi à l'abri derrière ses pions"),
+            (f"{par} se met en jeu {where}".replace("  ", " ").rstrip(),
+             "sors une pièce de plus avant de lancer une action"),
+        ]
+    obs, plan = _pick_variant(options, intent, ctx)
+    return _f(obs, plan, None)
+
+
+def _frag_castle(intent, voice, ctx):
+    # Le roque : deux effets réels et simultanés (roi à l'abri, tour reliée).
+    if voice == CREATIVE:
+        return _f("ton roi se met à l'abri et ta tour rejoint le jeu",
+                  "mets-toi en sécurité, tu attaqueras plus librement ensuite", None)
+    if voice == CLASSICAL:
+        return _f("le roque met le roi en sécurité et active la tour",
+                  "sécurise le roi avant d'entamer une opération au centre", None)
+    return _f("tu roques : roi à l'abri, tour connectée",
+              "roque maintenant, c'est le bon moment", None)
+
+
+def _has_other_rook(ctx):
+    """
+    Me reste-t-il une AUTRE tour que celle qui joue ? Compté sur la position
+    (ctx.board, AVANT le coup : la tour qui joue y figure encore, donc >= 2).
+    Sans position -> False : on ne conseille pas de doubler des tours qu'on
+    n'a pas comptées (les plans "amène ta seconde tour" / "double tes tours"
+    sortaient tels quels sur des finales à UNE seule tour).
+    """
+    board = getattr(ctx, "board", None) if ctx else None
+    if board is None:
+        return False
+    try:
+        return len(board.pieces(chess.ROOK, board.turn)) >= 2
+    except Exception:
+        return False
+
+
+def _frag_rook_file(intent, voice, ctx):
+    # Tour/dame arrivant sur une colonne ouverte ou semi-ouverte (fait calcule
+    # par why_detector._open_file_status, voir move_intent). Le plan doit
+    # s'accorder a la piece REELLEMENT jouee (intent.moved_piece) : une tour
+    # sur colonne ouverte appelle a doubler les tours, une dame sur colonne
+    # ouverte est plus exposee et sert plutot d'appui a une autre piece --
+    # les deux plans ne sont pas interchangeables (voir audit, "les tours
+    # aiment les colonnes ouvertes" affirme a tort sur une dame). Au moins
+    # 2 formulations par voix, choisies via _pick_variant (ce coup revient
+    # plusieurs fois par partie, une tour prenant souvent des colonnes
+    # successives).
+    dest = _sq(intent.to_square)
+    par = _piece_with_article(intent.moved_piece)
+    where = f"en {dest}" if dest else ""
+    is_queen = intent.moved_piece == chess.QUEEN
+    # STATUT RÉEL de la colonne (intent.file_status) : ROOK_FILE accepte AUSSI
+    # les colonnes semi-ouvertes, et le texte écrivait "colonne ouverte" en dur
+    # -- fait inventé, et conseil faux : sur une semi-ouverte il reste un pion
+    # adverse sur la colonne, c'est LUI la cible.
+    half = intent.file_status == "half_open"
+    colonne = "colonne semi-ouverte" if half else "colonne ouverte"
+    # "ta seconde tour" / "double tes tours" AFFIRME qu'une autre tour existe :
+    # on ne le dit que si on l'a comptée sur la position (finales à une tour).
+    double = _has_other_rook(ctx)
+
+    if voice == CREATIVE:
+        if is_queen:
+            options = [
+                (f"{par} prend la {colonne} {where}".replace("  ", " ").rstrip(),
+                 f"reste vigilant, une dame avancée sur une {colonne} est une cible facile"),
+                (f"{par} s'installe sur la {colonne} {where}".replace("  ", " ").rstrip(),
+                 "prépare plutôt une autre pièce à profiter de cette colonne derrière la dame"),
+            ]
+        else:
+            if half:
+                plan_a = "pousse sur le pion adverse resté sur cette colonne, il ne peut pas fuir"
+                plan_b = ("amène ta seconde tour derrière, ce pion ne tiendra pas à deux contre un"
+                          if double else "fais de ce pion ta cible, la colonne s'ouvrira quand il tombera")
+            else:
+                plan_a = "une colonne ouverte, c'est une autoroute : occupe-la avant lui"
+                plan_b = ("amène ta seconde tour derrière, la colonne devient une vraie autoroute"
+                          if double else "garde cette colonne pour toi, il ne doit jamais te la disputer")
+            options = [
+                (f"{par} prend la {colonne} {where}".replace("  ", " ").rstrip(), plan_a),
+                (f"{par} s'installe sur la {colonne} {where}".replace("  ", " ").rstrip(), plan_b),
+            ]
+    elif voice == CLASSICAL:
+        if is_queen:
+            options = [
+                (f"{par} occupe la {colonne} {where}".replace("  ", " ").rstrip(),
+                 "la dame y est exposée, prévois de la soutenir ou de la retirer si l'adversaire la conteste"),
+                (f"{par} vient s'établir sur la {colonne} {where}".replace("  ", " ").rstrip(),
+                 "utilise cette colonne pour amener une autre pièce, la dame n'y reste pas seule longtemps"),
+            ]
+        else:
+            if half:
+                plan_a = "exerce la pression sur le pion adverse de cette colonne avant tout autre plan"
+                plan_b = ("double ensuite sur la colonne, la pression sur ce pion en sera doublée"
+                          if double else "fixe ce pion, puis attaque-le avec une pièce de plus")
+            else:
+                plan_a = ("double ensuite sur la colonne pour en tirer profit"
+                          if double else "occupe durablement la colonne et cherche la pénétration sur les rangées faibles")
+                plan_b = ("amène l'autre tour sur la même colonne avant de poursuivre"
+                          if double else "installe-toi sur la rangée de pénétration avant qu'il ne conteste la colonne")
+            options = [
+                (f"{par} occupe la {colonne} {where}".replace("  ", " ").rstrip(), plan_a),
+                (f"{par} vient s'établir sur la {colonne} {where}".replace("  ", " ").rstrip(), plan_b),
+            ]
+    else:
+        if is_queen:
+            options = [
+                (f"{par} se poste sur la {colonne} {where}".replace("  ", " ").rstrip(),
+                 "surveille cette dame avancée, elle peut vite être attaquée"),
+                (f"{par} se met sur la {colonne} {where}".replace("  ", " ").rstrip(),
+                 "sers-t'en comme appui, mais ne la laisse pas avancer seule trop loin"),
+            ]
+        else:
+            if half:
+                plan_a = "vise le pion adverse qui reste sur cette colonne, il ne peut pas bouger"
+                plan_b = ("double tes tours sur cette colonne, ce pion va souffrir"
+                          if double else "garde la pression sur ce pion, c'est la cible de la colonne")
+            else:
+                plan_a = "les tours aiment les colonnes ouvertes, garde celle-ci"
+                plan_b = ("double tes tours sur cette colonne, c'est un bon plan"
+                          if double else "reste sur cette colonne, elle t'ouvre le camp adverse")
+            options = [
+                (f"{par} se poste sur la {colonne} {where}".replace("  ", " ").rstrip(), plan_a),
+                (f"{par} se met sur la {colonne} {where}".replace("  ", " ").rstrip(), plan_b),
+            ]
+
+    obs, plan = _pick_variant(options, intent, ctx)
+    return _f(obs, plan, None)
+
+
+def _frag_reposition(intent, voice, ctx):
+    # Piece deja developpee qui change de poste, sans capture : on ne peut pas
+    # affirmer POURQUOI sans detecteur dedie, donc on decrit le fait seul --
+    # AUCUN jugement sur la case d'arrivee (pas de "mieux"/"meilleur"/"bon
+    # poste") dans l'observation, dans AUCUNE des formulations (voir
+    # test_reposition_isole). Au moins 2 formulations par voix, choisies via
+    # _pick_variant pour ne pas repeter le meme texte a chaque reposition.
+    dest = _sq(intent.to_square)
+    par = _piece_with_article(intent.moved_piece)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        options = [
+            (f"{par} part chercher un autre poste {where}".replace("  ", " ").rstrip(),
+             "améliore ta pièce la moins bien placée, c'est souvent le bon coup"),
+            (f"{par} va voir ailleurs {where}".replace("  ", " ").rstrip(),
+             "bouge ta pièce la moins utile, garde l'initiative dans le jeu"),
+        ]
+    elif voice == CLASSICAL:
+        options = [
+            (f"{par} se replace {where}".replace("  ", " ").rstrip(),
+             "améliore la pièce la moins active avant de forcer le jeu"),
+            (f"{par} se redéploie {where}".replace("  ", " ").rstrip(),
+             "réoriente les pièces mal placées avant d'ouvrir les hostilités"),
+        ]
+    else:
+        options = [
+            (f"{par} change de poste {where}".replace("  ", " ").rstrip(),
+             "repositionne, il n'y a rien de forcé ici"),
+            (f"{par} bouge de case {where}".replace("  ", " ").rstrip(),
+             "recycle cette pièce, le jeu n'est pas encore forcé"),
+        ]
+    obs, plan = _pick_variant(options, intent, ctx)
+    return _f(obs, plan, None)
+
+
+def _frag_outpost(intent, voice, ctx):
+    # Les deux faits sont comptés dans move_intent._is_outpost : la case est
+    # défendue par un de mes pions, et plus aucun pion adverse ne peut venir
+    # l'attaquer. On peut donc dire « aucun pion ne l'en délogera » sans
+    # jugement -- c'est un comptage, pas une appréciation de la case.
+    par = _piece_with_article(intent.moved_piece)
+    dest = _sq(intent.to_square)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        return _f(f"{par} plante son drapeau {where}, hors d'atteinte des pions adverses".replace("  ", " "),
+                  "laisse cette pièce là et joue autour, elle ne se délogera pas", None)
+    if voice == CLASSICAL:
+        # Pas de participe accordé ici : « défendu » se rapporterait à
+        # l'avant-poste (masculin) mais suit une pièce parfois féminine, et
+        # la garde d'accords ne peut pas distinguer les deux. Tournure
+        # verbale, aucun accord à faire.
+        return _f(f"{par} occupe un avant-poste {where} : un pion le couvre, aucun pion adverse ne l'attaquera".replace("  ", " "),
+                  "appuie cette pièce et construis le jeu autour d'elle", None)
+    return _f(f"{par} s'installe {where} sur une case qu'aucun pion adverse ne peut attaquer".replace("  ", " "),
+              "garde cette pièce sur sa case, elle y est chez elle", None)
+
+
+def _frag_passed_push(intent, voice, ctx):
+    # Le pion est PASSÉ à son arrivée (verifié case par case, voir
+    # theme_detector.pawn_is_passed) : on peut donc affirmer qu'aucun pion
+    # adverse ne l'arrête. On n'affirme RIEN sur les pièces adverses, qui
+    # peuvent parfaitement le bloquer -- d'où « aucun pion » et pas « rien ».
+    dest = _sq(intent.to_square)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        return _f(f"le pion passé avance {where}, plus aucun pion adverse sur sa route".replace("  ", " "),
+                  "escorte-le : un pion passé se pousse avec du soutien, jamais seul", None)
+    if voice == CLASSICAL:
+        return _f(f"le pion passé progresse {where}, aucune chaîne adverse ne le contrarie".replace("  ", " "),
+                  "amène une pièce derrière lui avant de le pousser plus loin", None)
+    return _f(f"ce pion avance {where} et aucun pion adverse ne peut plus le bloquer".replace("  ", " "),
+              "pousse-le en le soutenant, compte les cases jusqu'à la promotion", None)
+
+
+def _frag_king_activation(intent, voice, ctx):
+    # Sans dames sur l'échiquier (condition vérifiée dans move_intent) et roi
+    # qui se rapproche réellement du centre : les deux moitiés du conseil
+    # classique « le roi est une pièce de finale » sont donc établies.
+    dest = _sq(intent.to_square)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        return _f(f"le roi se met en marche vers le centre {where}".replace("  ", " ").rstrip(),
+                  "fais-le avancer case par case, c'est une pièce d'attaque en finale", None)
+    if voice == CLASSICAL:
+        return _f(f"le roi se rapproche du centre {where}, les dames ayant quitté l'échiquier".replace("  ", " "),
+                  "centralise-le encore, il soutiendra tes pions", None)
+    return _f(f"sans les dames, ton roi avance vers le centre {where}".replace("  ", " ").rstrip(),
+              "continue de le centraliser, il vaut une pièce de plus ici", None)
+
+
 _INTENT_FUNCS = {
+    "mate": _frag_mate,
     "check_escape": _frag_check_escape,
     "capture_free": _frag_capture_free,
     "sacrifice": _frag_sacrifice,
     "gives_check": _frag_gives_check,
     "promotion": _frag_promotion,
     "capture_trade": _frag_capture_trade,
+    "develop": _frag_develop,
+    "castle": _frag_castle,
+    "rook_file": _frag_rook_file,
+    "reposition": _frag_reposition,
+    "outpost": _frag_outpost,
+    "passed_push": _frag_passed_push,
+    "king_activation": _frag_king_activation,
 }
+
+
+# Ordre de priorité des explications : la prophylaxie d'abord (ce que le coup
+# ENLÈVE à l'adversaire -- le seul « pourquoi » profond d'un coup calme), puis
+# le contraste géométrique (ce qu'il CHANGE -- moins profond, toujours vrai).
+# On n'en rend JAMAIS deux : la cause est une apposition, pas un paragraphe.
+#
+# new_squares est calculé (Task 2) mais volontairement PAS narré ici : « le
+# fou contrôle 7 cases de plus » est un comptage vrai et parfaitement creux --
+# le champ reste disponible pour un futur seuil ou une future formulation, il
+# n'a pas sa place dans une phrase aujourd'hui.
+# Bandes de conversion centipawns -> mots. Volontairement GROSSIÈRES : les
+# écarts d'éval bougent d'une analyse à l'autre (23cp -> 68cp observé sur la
+# même position), donc « 0,45 pion » afficherait une précision qui n'existe
+# pas et qui changerait sous les yeux du lecteur. Un ordre de grandeur en
+# matériel, lui, reste vrai des deux côtés du jitter.
+_GAIN_BANDS = (
+    (900, "l'équivalent d'une dame"),
+    (500, "l'équivalent d'une tour"),
+    (300, "l'équivalent d'une pièce"),
+    (150, "près de deux pions"),
+    (0, "environ un pion"),
+)
+
+
+def _material_words(cp):
+    """Ordre de grandeur en matériel d'un écart en centipawns."""
+    for floor, words in _GAIN_BANDS:
+        if cp >= floor:
+            return words
+    return _GAIN_BANDS[-1][1]
+
+
+def _explain_gain(voice, ctx=None):
+    """
+    Clause « ce que ce coup rapporte », ou None. Même forme et même
+    emplacement que la cause (apposition après l'observation) -- les deux ne
+    coexistent JAMAIS, et c'est voulu : voir narration_v2.render, où le seuil
+    d'écart choisit lequel des deux le lecteur a besoin de lire.
+
+    Deux sources, la plus concrète d'abord :
+      1. ctx.gain_material : bilan matériel de la LIGNE, positif (voir
+         move_intent.MoveIntent.line_delta). Conditionnel, parce qu'il
+         suppose que l'adversaire suit la ligne principale.
+      2. ctx.gain_cp : perte du MEILLEUR coup suivant. Les candidats étant
+         triés par éval, tout autre coup coûte AU MOINS ça -- « au moins »
+         est donc exact, pas une précaution de style.
+
+    Aucun jugement comparatif : on dit ce qui est compté, jamais que le coup
+    est « le meilleur » (règle centrale du projet).
+    """
+    if ctx is None:
+        return None
+
+    material = getattr(ctx, "gain_material", None)
+    if material:
+        mots = _material_words(material * 100)
+        if voice == CREATIVE:
+            return f"au bout de la ligne, {mots} reste dans ta poche"
+        if voice == CLASSICAL:
+            return f"la ligne principale se solde par un gain de {mots}"
+        return f"si l'adversaire suit la ligne, tu ressors avec {mots} de plus"
+
+    gain_cp = getattr(ctx, "gain_cp", None)
+    if not gain_cp:
+        return None
+    mots = _material_words(gain_cp)
+    if voice == CREATIVE:
+        return f"jouer autre chose coûte au moins {mots}"
+    if voice == CLASSICAL:
+        return f"toute autre suite concède au moins {mots}"
+    return f"les autres coups laissent filer au moins {mots}"
+
+
+# python-chess écrit le SAN en notation ANGLAISE (K/Q/R/B/N). Dans une phrase
+# française, « Rxd8+ » se lit « ROI prend en d8 » alors qu'il s'agit d'une
+# TOUR, et « Bb4 » ne veut rien dire. Ce n'est pas une coquetterie de style :
+# c'est un coup mal lu.
+#
+# Conversion d'AFFICHAGE seulement, appliquée ici, au moment où le SAN entre
+# dans une phrase. engine_analysis n'est PAS touché : son `move_san` est de la
+# DONNÉE (parse_san, historique de coups, identité d'ouverture) -- le traduire
+# casserait tout ce qui le relit.
+_SAN_PIECES_FR = {"K": "R", "Q": "D", "R": "T", "B": "F", "N": "C"}
+
+
+def _san_fr(san):
+    """SAN anglais -> français. Ne touche QUE la lettre de pièce initiale et
+    celle d'une promotion : les colonnes (minuscules), le roque, les prises
+    et les suffixes +/# passent tels quels. None-safe."""
+    if not san:
+        return san
+    out = san
+    if out[0] in _SAN_PIECES_FR:
+        out = _SAN_PIECES_FR[out[0]] + out[1:]
+    i = out.find("=")
+    if i != -1 and i + 1 < len(out) and out[i + 1] in _SAN_PIECES_FR:
+        out = out[:i + 1] + _SAN_PIECES_FR[out[i + 1]] + out[i + 2:]
+    return out
+
+
+def threat_caution(menace):
+    """
+    Texte de l'avertissement « menace adverse », ou None.
+
+    Rendu HORS du paragraphe (voir narration_weaver.weave : le caution est
+    transversal, jamais tissé) parce qu'un danger doit sauter aux yeux, pas
+    se fondre dans une idée. Une seule phrase, pas de variante de voix : une
+    alerte n'a pas de style.
+
+    `menace` vient de prophylaxis.threat_is_real -- qui a DÉJÀ écarté les 85%
+    de positions où l'adversaire a simplement un coup à jouer sans menacer
+    quoi que ce soit. L'appelant n'affiche rien quand son propre coup pare
+    la menace : la cause du paragraphe le dit alors déjà (« ce coup empêche
+    Fxa5 »), et le redire ici serait contradictoire.
+    """
+    if not menace:
+        return None
+    san = _san_fr(menace.get("san"))
+    if not san:
+        return None
+    if menace.get("kind") == "mate":
+        return f"Attention : il menace {san}, qui fait mat -- ton coup doit y répondre."
+    mots = _material_words(menace.get("gain", 0) * 100)
+    return f"Attention : il menace {san}, soit {mots} pour lui -- vérifie que ton coup y répond."
+
+
+def _followup_plan(voice, ctx=None):
+    """
+    Plan CONCRET tiré de la ligne principale (voir
+    narration_v2._followup_from_pv), ou None : « si l'adversaire répond Fxd5,
+    enchaîne par Txd7 ».
+
+    Remplace le plan générique, ne s'y ajoute pas -- le paragraphe garde son
+    nombre de phrases. La formulation est CONDITIONNELLE parce que le fait
+    l'est : mon coup suivant n'arrive que si l'adversaire joue bien la
+    réponse de la ligne. Annoncer « puis prends en d7 » sans cette condition
+    serait une promesse que la position ne garantit pas.
+    """
+    fu = getattr(ctx, "followup", None) if ctx is not None else None
+    if not fu:
+        return None
+    reply, nxt = _san_fr(fu.get("reply")), _san_fr(fu.get("next"))
+    if not reply or not nxt:
+        return None
+    if voice == CREATIVE:
+        return f"si {reply} arrive, tu as {nxt} derrière"
+    if voice == CLASSICAL:
+        return f"sur {reply}, la suite prévue est {nxt}"
+    return f"si l'adversaire répond {reply}, enchaîne par {nxt}"
+
+
+def _explain_cause(intent, voice, ctx=None):
+    """
+    Clause « pourquoi ce coup », ou None. Initiale minuscule, sans ponctuation
+    finale (le tissage compose « observation -- cause »).
+
+    Chaque formulation ci-dessous est adossée à un fait CALCULÉ (voir
+    MoveIntent : prophylaxis, new_attack_square, escapes_attack,
+    becomes_defended). Aucun jugement comparatif : on dit ce qui est compté,
+    jamais que c'est bien.
+
+    Jamais de pronom faisant référence à une pièce nommée ailleurs (son genre
+    dépendrait du type de pièce, invisible ici) : le sujet reste "la pièce"
+    ou "la case", tous deux grammaticalement féminins, pour que les accords
+    soient toujours corrects sans connaître le type de pièce.
+    """
+    if ctx is not None and not getattr(ctx, "explain", True):
+        return None
+    if intent is None:
+        return None
+
+    proph = getattr(intent, "prophylaxis", None)
+    if proph and proph.get("san"):
+        san = _san_fr(proph["san"])
+        if proph.get("reason") == "captured":
+            if voice == CREATIVE:
+                return f"la pièce qui permettait {san} n'est plus là"
+            if voice == CLASSICAL:
+                return f"le coup supprime la pièce qui rendait {san} possible"
+            return f"ce coup enlève {san} à l'adversaire"
+        if voice == CREATIVE:
+            return f"après ce coup, {san} ne passe plus"
+        if voice == CLASSICAL:
+            return f"le coup rend {san} impossible"
+        return f"ce coup empêche {san}"
+
+    # Les trois causes suivantes sont des CONTRASTES GÉOMÉTRIQUES (comptages
+    # sur MoveIntent). Vraies, mais banales -- coupées quand l'écart d'éval
+    # ne peut pas les filtrer (mode livre, voir narration_v2). Défaut True :
+    # tout appelant sans ctx garde le comportement d'avant.
+    if ctx is not None and not getattr(ctx, "explain_geometry", True):
+        return None
+
+    target = getattr(intent, "new_attack_square", None)
+    if target is not None:
+        case = _sq(target)
+        if voice == CREATIVE:
+            return f"la pièce adverse en {case} se retrouve sous le feu"
+        if voice == CLASSICAL:
+            return f"le coup crée une attaque sur {case}"
+        return f"ce coup attaque la pièce en {case}"
+
+    if getattr(intent, "escapes_attack", False):
+        if voice == CREATIVE:
+            return "la pièce s'éloigne de la menace qui pesait sur elle"
+        if voice == CLASSICAL:
+            return "le coup soustrait la pièce à l'attaque qu'elle subissait"
+        return "la pièce n'est plus prise pour cible par la pièce qui la menaçait"
+
+    if getattr(intent, "becomes_defended", False):
+        if voice == CREATIVE:
+            return "la pièce se pose sur une case couverte par tes autres pièces"
+        if voice == CLASSICAL:
+            return "la pièce arrive sur une case défendue, contrairement à sa case de départ"
+        return "la pièce arrive sur une case défendue"
+
+    return None
 
 
 def fragments_for_intent(intent, voice, ctx=None):
@@ -789,9 +1446,17 @@ def fragments_for_intent(intent, voice, ctx=None):
              fragment dédié -> retourne None (l'appelant garde le thème de
              position). Un kind inconnu -> None aussi (jamais d'exception).
     voice  : "popular" / "creative" / "classical". Inconnue -> VOICE_FALLBACK.
-    ctx    : FragmentContext optionnel (non utilisé aujourd'hui par ces
-             fragments -- tout vient de l'intent -- mais accepté pour rester
-             homogène avec fragments_for et permettre un enrichissement futur).
+    ctx    : FragmentContext optionnel, mais RÉELLEMENT UTILISÉ -- le passer
+             change le texte :
+               - ctx.recent_kinds alimente _pick_variant (anti-répétition) ;
+                 sans ctx, les variantes ne tournent plus et le même paragraphe
+                 ressort à chaque coup de même kind ;
+               - ctx.board sert aux fragments qui doivent COMPTER quelque chose
+                 avant de l'affirmer (droits de roque dans _frag_develop,
+                 seconde tour dans _frag_rook_file). Sans board, ils retombent
+                 sur la formulation qui n'affirme rien.
+             ctx=None reste sûr (jamais d'exception, jamais d'invention), mais
+             appauvrit le texte.
 
     Retour : dict fragment, ou None si aucune intention à narrer.
     """
@@ -802,7 +1467,19 @@ def fragments_for_intent(intent, voice, ctx=None):
     fn = _INTENT_FUNCS.get(intent.kind)
     if fn is None:
         return None  # "quiet" ou inconnu : pas d'intention marquante à raconter
-    return fn(intent, voice, ctx)
+    frag = fn(intent, voice, ctx)
+    # La cause du fragment gagne si elle existe (_frag_capture_free pose le
+    # concept why détecté, plus précis qu'un comptage géométrique). Sinon on
+    # remplit ici, à l'UNIQUE point de passage des onze fragments d'intention,
+    # plutôt que d'éparpiller la même logique dans chacun.
+    if frag is not None and not frag.get("cause"):
+        # Le POURQUOI ou le COMBIEN, jamais les deux : les deux appels sont
+        # mutuellement exclusifs par construction (narration_v2 n'arme
+        # ctx.explain et ctx.gain_cp que dans des cas disjoints).
+        frag["cause"] = _explain_cause(intent, voice, ctx) or _explain_gain(voice, ctx)
+    if frag is not None:
+        frag["plan"] = _followup_plan(voice, ctx) or frag["plan"]
+    return frag
 
 
 def fragments_for(brick, voice, ctx=None):
@@ -830,4 +1507,12 @@ def fragments_for(brick, voice, ctx=None):
         voice = VOICE_FALLBACK
     fn = _FRAGMENT_FUNCS.get(brick.theme, _frag_equal)
     fields = brick.fields if brick.fields else {}
-    return fn(fields, voice, ctx)
+    frag = fn(fields, voice, ctx)
+    # Même substitution que pour les fragments d'intention : le plan concret
+    # tiré de la ligne prime sur le conseil général. Appliqué ici aussi pour
+    # que les coups CALMES (qui retombent sur le tissage de thème) en
+    # profitent -- c'était le trou historique. Sur un fragment SECONDAIRE le
+    # plan n'est jamais lu (le weaver ne prend que l'observation), donc
+    # aucune conséquence de ce côté.
+    frag["plan"] = _followup_plan(voice, ctx) or frag["plan"]
+    return frag

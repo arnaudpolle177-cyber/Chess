@@ -187,6 +187,36 @@ def test_empty_input():
     check(lead is None and supports == [], "entrée vide gérée proprement")
 
 
+def test_finale_concrete_passe_devant_lavantage_general():
+    """La finale mène quand elle a un objet à montrer (règle du carré), et
+    cède quand elle n'a que « le roi devient actif » -- les deux sens, sinon
+    le réglage ne serait qu'un coup de pouce déguisé."""
+    import theme_detector as td
+
+    def endgame(strength, **f):
+        fields = dict(f)
+        fields["_tier"] = td.theme_tier(ENDGAME)
+        fields["_family"] = td.theme_family(ENDGAME)
+        return ThemeCandidate(ENDGAME, strength, fields)
+
+    def strategic(cp):
+        fields = {"_tier": td.theme_tier(STRATEGIC_ADVANTAGE),
+                  "_family": td.theme_family(STRATEGIC_ADVANTAGE)}
+        return ThemeCandidate(STRATEGIC_ADVANTAGE, cp, fields)
+
+    # +400cp est un avantage net ; la course de pion tranchée passe devant.
+    lead, _ = ts.select_lead_and_support(
+        [strategic(400), endgame(td.ENDGAME_STRENGTH_DECISIVE, outruns_king=True)])
+    check(lead.theme == ENDGAME,
+          f"la règle du carré doit mener devant +400cp (lead={lead.theme})")
+
+    # Même avantage, finale sans rien de précis : c'est l'avantage qui mène.
+    lead, _ = ts.select_lead_and_support(
+        [strategic(400), endgame(td.ENDGAME_STRENGTH_GENERIC)])
+    check(lead.theme == STRATEGIC_ADVANTAGE,
+          f"une finale sans objet doit céder le lead (lead={lead.theme})")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     print(f"theme_scoring : {len(tests)} tests\n")
