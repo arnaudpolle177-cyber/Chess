@@ -553,8 +553,10 @@ def _frag_pawn_structure(fields, voice, ctx):
         obs = f"{cible} est une faiblesse structurelle permanente"
         plan = "empêche d'abord qu'elle soit réparée, puis attaque-la avec assez de pièces"
         return _f(obs, plan, None)
-    # popular
-    obs = f"l'adversaire a {cible} qui ne disparaîtra pas tout seul"
+    # popular : « l'adversaire a un pion isolé ADVERSE » disait deux fois à
+    # qui est le pion (27 occurrences mesurées). Le sujet le dit déjà.
+    sans_adverse = cible.replace(" adverse", "", 1)
+    obs = f"l'adversaire a {sans_adverse} qui ne disparaîtra pas tout seul"
     plan = "garde cette faiblesse en tête et fais peser la pression au bon moment"
     return _f(obs, plan, None)
 
@@ -1096,7 +1098,7 @@ def _frag_rook_file(intent, voice, ctx):
                 plan_b = ("double tes tours sur cette colonne, ce pion va souffrir"
                           if double else "garde la pression sur ce pion, c'est la cible de la colonne")
             else:
-                plan_a = "les tours aiment les colonnes ouvertes, garde-la"
+                plan_a = "les tours aiment les colonnes ouvertes, garde celle-ci"
                 plan_b = ("double tes tours sur cette colonne, c'est un bon plan"
                           if double else "reste sur cette colonne, elle t'ouvre le camp adverse")
             options = [
@@ -1153,7 +1155,7 @@ def _frag_outpost(intent, voice, ctx):
     where = f"en {dest}" if dest else ""
     if voice == CREATIVE:
         return _f(f"{par} plante son drapeau {where}, hors d'atteinte des pions adverses".replace("  ", " "),
-                  "laisse-la là et joue autour, une pièce pareille ne se déloge pas", None)
+                  "laisse cette pièce là et joue autour, elle ne se délogera pas", None)
     if voice == CLASSICAL:
         # Pas de participe accordé ici : « défendu » se rapporterait à
         # l'avant-poste (masculin) mais suit une pièce parfois féminine, et
@@ -1162,7 +1164,7 @@ def _frag_outpost(intent, voice, ctx):
         return _f(f"{par} occupe un avant-poste {where} : un pion le couvre, aucun pion adverse ne l'attaquera".replace("  ", " "),
                   "appuie cette pièce et construis le jeu autour d'elle", None)
     return _f(f"{par} s'installe {where} sur une case qu'aucun pion adverse ne peut attaquer".replace("  ", " "),
-              "garde-la sur cette case, elle y est chez elle", None)
+              "garde cette pièce sur sa case, elle y est chez elle", None)
 
 
 def _frag_passed_push(intent, voice, ctx):

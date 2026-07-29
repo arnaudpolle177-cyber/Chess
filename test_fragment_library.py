@@ -536,6 +536,14 @@ def test_accord_genre_dans_les_fragments_dintention():
     faux_si_masculin = [
         r"\bla (cavalier|fou)\b", r"\bcette (cavalier|fou)\b", r"\bune (cavalier|fou)\b",
         r"\bdéfendue\b", r"\bla reprendre\b",
+        # Pronom COD accolé à un impératif qui vise LA PIÈCE : « garde-la »,
+        # « laisse-la », « pousse-la ». Faux dès que la pièce nommée est
+        # masculine, et rien ne l'attrapait -- « Le fou s'installe en d5 [...]
+        # Garde-la sur cette case » est sorti tel quel en partie
+        # (audit_parties.py). Liste de verbes explicite et NON « -la » tout
+        # court : _frag_rook_file écrit légitimement « occupe-la » en parlant
+        # de LA COLONNE. Un verbe de plus qui désigne une pièce s'ajoute ici.
+        r"\b(garde|laisse|pousse|recycle|replace|avance)-la\b",
     ]
     kinds = ("capture_free", "capture_trade", "mate", "sacrifice", "gives_check",
              "develop", "rook_file", "reposition", "outpost", "passed_push", "king_activation")
