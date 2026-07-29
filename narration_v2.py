@@ -38,6 +38,7 @@ import theme_detector as td
 import theme_scoring as ts
 import narration_weaver as nw
 import move_intent as mi
+import fragment_library as fl
 from fragment_library import FragmentContext
 
 # Champs de brique portant une CASE-CLÉ de position (voir ThemeResult) : c'est
@@ -126,6 +127,11 @@ class Selection:
     gap_cp   : perte d'éval du DEUXIÈME meilleur coup par rapport au premier
                (candidates[1]["eval_loss"]) -- mesure à quel point le meilleur
                coup se détache. 0 si un seul candidat. Profil-indépendant.
+    book     : les candidats viennent du LIVRE d'ouvertures (cp absent, voir
+               opening_book.candidates_from_book_entries). Leur `eval_loss`
+               est synthétique et plafonné à 40 -- il passe donc TOUJOURS
+               sous EXPLAIN_GAP_MAX_CP : sans ce drapeau, le seuil est inerte
+               pendant toute l'ouverture.
     bricks   : toutes les briques collectées (debug / introspection ; pas
                requis par render()).
     """
@@ -133,6 +139,7 @@ class Selection:
     supports: List[td.ThemeCandidate]
     eval_cp: int = 0
     gap_cp: int = 0
+    book: bool = False
     bricks: List[td.ThemeCandidate] = field(default_factory=list)
 
 
@@ -187,6 +194,7 @@ def build_selection(board, candidates, swing_cp=None, opponent_better_move_san=N
         bricks, max_supports=max_supports, relation_ok=relation_ok,
     )
     return Selection(lead=lead, supports=supports, eval_cp=eval_cp, gap_cp=gap_cp,
+                     book=bool(candidates) and candidates[0].get("cp") is None,
                      bricks=bricks)
 
 
@@ -231,6 +239,15 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
     # multi-scénarios a déjà montré qu'un texte qui revient devient du bruit.
     ctx.explain = selection.gap_cp <= EXPLAIN_GAP_MAX_CP
 
+    # En mode LIVRE, gap_cp est synthétique (plafonné à 40 par
+    # opening_book) : le seuil ci-dessus est toujours vrai et ne filtre plus
+    # rien. On y garde la prophylaxie -- « ce coup empêche Fb4 » est un fait
+    # moteur, calculé pareil dans le livre et hors livre, et c'est l'idée
+    # d'ouverture elle-même -- mais on coupe le contraste géométrique, qui
+    # sortirait « la pièce arrive sur une case défendue » à chaque coup de
+    # développement.
+    ctx.explain_geometry = not selection.book
+
     # Intention du COUP recommandé (voir move_intent). Calculé par profil
     # (chosen diffère selon le profil) -> différencie enfin les 3 profils et
     # débloque le figement du thème de position.
@@ -259,7 +276,14 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
             return woven
         # Repli : kind sans fragment (QUIET résiduel) -> tissage de thème.
 
-    return nw.weave(selection.lead, selection.supports, profile_id, ctx, caution_text=caution_text)
+    # Le coup calme n'a pas de fragment d'intention, mais il a un POURQUOI
+    # (prophylaxie, contraste géométrique) calculé sur son MoveIntent. Sans
+    # ça, la cause était structurellement inatteignable pour tout coup de pion
+    # et tout coup de roi non-roquant -- soit l'archétype même du coup que la
+    # cause devait expliquer.
+    lead_cause = fl._explain_cause(intent, profile_id, ctx) if intent is not None else None
+    return nw.weave(selection.lead, selection.supports, profile_id, ctx,
+                    caution_text=caution_text, lead_cause=lead_cause)
 
 
 def narrate(board, candidates, profile_id, swing_cp=None, opponent_better_move_san=None,

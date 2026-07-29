@@ -1190,6 +1190,13 @@ def _explain_cause(intent, voice, ctx=None):
             return f"le coup rend {san} impossible"
         return f"ce coup empêche {san}"
 
+    # Les trois causes suivantes sont des CONTRASTES GÉOMÉTRIQUES (comptages
+    # sur MoveIntent). Vraies, mais banales -- coupées quand l'écart d'éval
+    # ne peut pas les filtrer (mode livre, voir narration_v2). Défaut True :
+    # tout appelant sans ctx garde le comportement d'avant.
+    if ctx is not None and not getattr(ctx, "explain_geometry", True):
+        return None
+
     target = getattr(intent, "new_attack_square", None)
     if target is not None:
         case = _sq(target)
