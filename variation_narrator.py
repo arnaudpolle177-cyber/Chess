@@ -144,6 +144,8 @@ def analyze_variation(engine, board, pv_moves, compute_eval=True, depth=DEFAULT_
     moved_squares = {}  # square d'origine -> nb de fois qu'une pièce en est repartie (repositionnement)
     exchange_square = None
     exchange_delta = 0
+    last_capture_square = None   # case de la prise du demi-coup précédent...
+    last_capture_by = None       # ... et couleur qui l'a jouée (voir ÉCHANGE plus bas)
     breakthrough_square = None
     breakthrough_piece = None
     king_pressure_hits = 0
@@ -181,9 +183,21 @@ def analyze_variation(engine, board, pv_moves, compute_eval=True, depth=DEFAULT_
             cap_value = PIECE_VALUES.get(captured.piece_type, 0) if captured else 1  # 1 = en passant
             signed = cap_value if mover_color == root_color else -cap_value
             material_delta += signed
-            if exchange_square is None:
+            # ÉCHANGE = une prise SUIVIE d'une reprise sur la MÊME case. Avant,
+            # la première prise venue suffisait -- y compris une prise ADVERSE
+            # (le test était `abs(delta) >= 1`), et le gabarit annonçait quand
+            # même « un échange qui simplifie la position en ma faveur » alors
+            # que je venais de perdre une pièce. Mesuré : le motif sortait sur
+            # 28 lignes sur 80.
+            if (exchange_square is None and last_capture_square == move.to_square
+                    and last_capture_by is not None and last_capture_by != mover_color):
                 exchange_square = move.to_square
                 exchange_delta = signed
+            last_capture_square = move.to_square
+            last_capture_by = mover_color
+        else:
+            last_capture_square = None
+            last_capture_by = None
 
         if was_pawn_push_to_open_file and breakthrough_square is None:
             breakthrough_square = move.to_square
@@ -221,7 +235,7 @@ def analyze_variation(engine, board, pv_moves, compute_eval=True, depth=DEFAULT_
             material_delta=material_delta, eval_trend=eval_trend,
             eval_start_cp=eval_start_cp, eval_end_cp=eval_end_cp,
         )
-    if exchange_square is not None and abs(exchange_delta) >= 1:
+    if exchange_square is not None:
         return VariationFacts(
             motif=EXCHANGE, square=exchange_square, material_delta=material_delta,
             eval_trend=eval_trend, eval_start_cp=eval_start_cp, eval_end_cp=eval_end_cp,
@@ -257,26 +271,50 @@ _TREND_SUFFIX = {
 }
 
 _TEMPLATES = {
-    (EXCHANGE, "popular"): "L'idée est de provoquer un échange qui simplifie la position en ma faveur.",
-    (EXCHANGE, "creative"): "Cette suite cherche l'échange pour ouvrir des lignes vers les pièces adverses restantes.",
-    (EXCHANGE, "classical"): "L'échange proposé ici allège la position -- une technique classique quand on tient l'avantage.",
+    # « en ma faveur » et « quand on tient l'avantage » ont été retirés : rien
+    # ne les calculait, et le motif sortait même quand la ligne PERDAIT du
+    # matériel. Le bilan réel est ajouté par _MATERIAL_CLAUSE ci-dessous, qui
+    # lui est compté.
+    (EXCHANGE, "popular"): "Les pièces s'échangent dans cette suite, la position se simplifie.",
+    (EXCHANGE, "creative"): "Cette suite passe par un échange, qui dégage des lignes vers les pièces restantes.",
+    (EXCHANGE, "classical"): "Un échange intervient dans cette ligne, allégeant la position.",
 
     (BREAKTHROUGH, "popular"): "Cette rupture de pion ouvre la position et donne plus d'activité à mes pièces.",
     (BREAKTHROUGH, "creative"): "La rupture centrale déstabilise la position adverse et ouvre des lignes d'attaque.",
     (BREAKTHROUGH, "classical"): "Cette poussée de pion ouvre la position selon les principes classiques -- plus d'espace pour les pièces.",
 
-    (KING_PRESSURE, "popular"): "L'idée est de continuer à rapprocher mes pièces du roi adverse pour augmenter la pression.",
+    # Ce qui est compté ici, c'est que DEUX de mes coups au moins arrivent à
+    # deux cases ou moins du roi adverse (king_pressure_hits) -- pas une
+    # intention.
+    (KING_PRESSURE, "popular"): "Dans cette suite, plusieurs de mes pièces viennent se poster près du roi adverse.",
     (KING_PRESSURE, "creative"): "L'attaque continue en resserrant l'étau autour du roi adverse.",
     (KING_PRESSURE, "classical"): "Cette suite concentre les forces vers le roi adverse, en accord avec les principes d'attaque.",
 
-    (REPOSITION, "popular"): "Cette suite replace mes pièces sur de meilleures cases avant de passer à l'action.",
-    (REPOSITION, "creative"): "Je prépare mes pièces sur de meilleures cases pour préparer une complication à venir.",
-    (REPOSITION, "classical"): "Cette manœuvre améliore la position des pièces avant de fixer un plan précis.",
+    # « de meilleures cases » est un jugement comparatif que rien ne mesure
+    # (règle centrale du projet) -- et ce motif est le REPLI, donc il sortait
+    # sur 47 lignes sur 80. On décrit ce qui est vrai : les pièces bougent,
+    # aucune prise n'intervient.
+    (REPOSITION, "popular"): "Cette suite déplace mes pièces sans qu'aucune prise n'intervienne.",
+    (REPOSITION, "creative"): "Aucune prise dans cette ligne : les pièces manœuvrent, la tension reste entière.",
+    (REPOSITION, "classical"): "Cette manœuvre réorganise les pièces, sans échange ni rupture.",
 
     (QUIET_IMPROVE, "popular"): "Cette suite consolide la position sans rien précipiter.",
     (QUIET_IMPROVE, "creative"): "Rien d'immédiat ici, mais la position garde des ressources à exploiter plus tard.",
     (QUIET_IMPROVE, "classical"): "Cette suite améliore la position coup après coup, sans rien forcer.",
 }
+
+
+# Bilan matériel de la ligne : COMPTÉ depuis toujours (material_delta), jamais
+# dit. C'est pourtant le fait le plus concret de la carte, et il s'applique à
+# TOUS les motifs -- d'où l'ajout ici plutôt que dans cinq gabarits. Pas de
+# valeur chiffrée sous 2 : à 1 pion près, un décompte sur une ligne tronquée
+# n'est pas un fait solide (voir move_intent, gardes d'horizon).
+def _material_clause(material_delta):
+    if material_delta >= 2:
+        return f" Au bout de la ligne, {material_delta} points de matériel de plus pour moi."
+    if material_delta <= -2:
+        return f" Au bout de la ligne, {abs(material_delta)} points de matériel en moins pour moi."
+    return ""
 
 
 def narrate_variation(facts, profile_id):
@@ -287,5 +325,4 @@ def narrate_variation(facts, profile_id):
     Retourne le texte du scénario, jamais une liste de coups.
     """
     base = _TEMPLATES.get((facts.motif, profile_id)) or _TEMPLATES[(QUIET_IMPROVE, "popular")]
-    suffix = _TREND_SUFFIX.get(facts.eval_trend, "")
-    return base + suffix
+    return base + _material_clause(facts.material_delta) + _TREND_SUFFIX.get(facts.eval_trend, "")

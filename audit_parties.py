@@ -29,6 +29,7 @@ import why_detector
 import prophylaxis
 import narration_v2
 import move_intent as mi
+import variation_narrator as vn
 
 ENGINE = r"C:\Users\Triv\Desktop\Vivado\test\Coach.EXE\CoachEchecs\stockfish.exe"
 
@@ -36,6 +37,19 @@ DEPTH = 14          # milieu de la fourchette du tier 1 en production (13-15)
 MULTIPV = 4
 N_GAMES = int(sys.argv[1]) if len(sys.argv) > 1 else 4
 MAX_PLIES = int(sys.argv[2]) if len(sys.argv) > 2 else 90
+
+
+def _motif_de_la_ligne(board, chosen):
+    """Motif que variation_narrator lit sur la PV du coup recommande.
+    compute_eval=False : aucun appel moteur, la detection de motif n'en a
+    pas besoin (seul le ton -- la tendance d'eval -- en dependrait)."""
+    try:
+        moves = [chess.Move.from_uci(u) for u in (chosen.get("pv_uci") or [])]
+        if not moves:
+            return "-"
+        return vn.analyze_variation(None, board, moves, compute_eval=False).motif
+    except Exception as e:
+        return f"ERREUR {e}"
 
 
 def phase_of(board):
@@ -108,6 +122,7 @@ def play_and_narrate(eng, proph_eng, seed):
             "proph": (proph or {}).get("san"),
             "fen": board.fen(),
             "pv": " ".join(chosen.get("pv_uci") or []),
+            "motif": _motif_de_la_ligne(board, chosen),
             "delta": dbg.material_delta if dbg else None,
             "sac_ply": getattr(dbg, "sacrifice_ply", None),
             "texte": (out.get("text") or "").strip(),
@@ -175,6 +190,9 @@ def main():
             s = s.strip().rstrip(".")
             if s:
                 phrases[s] += 1
+    print("\n--- motifs de VARIATION (variation_narrator) :",
+          Counter(r["motif"] for r in all_rows).most_common())
+
     print("\n--- phrases les plus repetees (toutes phases) :")
     for s, n in phrases.most_common(12):
         print(f"   x{n:3d}  {s[:130]}")
