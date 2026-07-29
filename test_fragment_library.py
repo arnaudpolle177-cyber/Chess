@@ -538,7 +538,7 @@ def test_accord_genre_dans_les_fragments_dintention():
         r"\bdéfendue\b", r"\bla reprendre\b",
     ]
     kinds = ("capture_free", "capture_trade", "mate", "sacrifice", "gives_check",
-             "develop", "rook_file", "reposition")
+             "develop", "rook_file", "reposition", "outpost", "passed_push", "king_activation")
     # Les 3 etats de preuve de capture_free : chaque branche a ses propres
     # formulations, donc ses propres accords a verifier.
     preuves = ({}, {"capture_undefended": True}, {"capture_line_gain": True})
@@ -746,6 +746,15 @@ def test_finale_regle_du_carre():
     check("a5" in frag["observation"] and "carré" in frag["observation"].lower()
           or "arrêter seul" in frag["observation"] or "trop loin" in frag["observation"],
           f"le carré doit être narré -> {frag['observation']!r}")
+
+
+def test_finale_pion_bloque_ne_court_pas():
+    """Même pion a5, roi noir loin en h8 -- mais une tour noire posée en a7 :
+    le carré est vrai sur le papier, la course n'existe pas."""
+    frag, fields = _endgame_frag("7k/r7/8/P7/8/8/8/K7 w - - 0 1")
+    check(fields["outruns_king"] is False, f"pion bloqué : pas de course : {fields}")
+    check("trop loin" not in frag["observation"],
+          f"pas de phrase de carré sur un pion bloqué -> {frag['observation']!r}")
 
 
 def test_finale_roi_dans_le_carre_ne_reclame_rien():

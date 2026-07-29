@@ -97,6 +97,66 @@ def test_sacrifice():
     check(intent.material_delta < 0, f"sacrifice: material_delta négatif (={intent.material_delta})")
 
 
+# --- 3quater. Les deux coups calmes que QUIET avalait ----------------------
+def test_poussee_de_pion_passe():
+    """Pion blanc a5, aucun pion noir sur a/b devant lui -> a6 est la poussée
+    d'un pion passé. Le pion noir en b7, lui, l'empêcherait : deuxième moitié
+    du test, sans quoi le détecteur pourrait dire toujours oui."""
+    board = chess.Board("7k/8/8/P7/8/8/8/K7 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("a5a6"))
+    check(intent.kind == mi.PASSED_PUSH, f"a6 = poussée de pion passé (kind={intent.kind})")
+
+    board = chess.Board("7k/1p6/8/P7/8/8/8/K7 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("a5a6"))
+    check(intent.kind != mi.PASSED_PUSH,
+          f"le pion b7 contrôle a6/b6 : pion NON passé (kind={intent.kind})")
+
+
+def test_avant_poste():
+    """Cavalier e3->d5, case couverte par mon pion e4. Les pions noirs qui
+    comptent sont ceux des colonnes c et e ENCORE EN ARRIÈRE (c6/c7, e6/e7) :
+    eux seuls pourront un jour attaquer d5. Un pion noir déjà en c5 ne le
+    pourra plus jamais."""
+    # Pion noir en c5, déjà passé devant : plus aucune menace de pion sur d5.
+    board = chess.Board("4k3/8/8/2p5/4P3/4N3/8/4K3 w - - 0 1")
+    check(chess.Move.from_uci("e3d5") in board.legal_moves, "setup : Cd5 doit être légal")
+    intent = mi.detect_move_intent(board, chosen("e3d5"))
+    check(intent.kind == mi.OUTPOST, f"d5 est un avant-poste (kind={intent.kind})")
+
+    # Le même pion en c7 : il descend en c6 et chasse le cavalier.
+    board = chess.Board("4k3/2p5/8/8/4P3/4N3/8/4K3 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("e3d5"))
+    check(intent.kind != mi.OUTPOST,
+          f"le pion c7 peut chasser le cavalier : pas un avant-poste (kind={intent.kind})")
+
+    # Case NON couverte par un de mes pions (pion e4 retiré) : ce n'est qu'une
+    # case libre, pas un avant-poste.
+    board = chess.Board("4k3/8/8/2p5/8/4N3/8/4K3 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("e3d5"))
+    check(intent.kind != mi.OUTPOST,
+          f"sans pion défenseur, pas d'avant-poste (kind={intent.kind})")
+
+
+def test_roi_actif_seulement_sans_dames():
+    """Roi qui se rapproche du centre : intention réelle SANS dames, coup
+    calme banal AVEC (où « active ton roi » serait un très mauvais conseil)."""
+    board = chess.Board("7k/8/8/8/8/8/8/K7 w - - 0 1")
+    check(mi._center_distance(chess.B2) < mi._center_distance(chess.A1),
+          "setup : b2 doit être plus près du centre que a1")
+    intent = mi.detect_move_intent(board, chosen("a1b2"))
+    check(intent.kind == mi.KING_ACTIVATION, f"roi actif sans dames (kind={intent.kind})")
+
+    board = chess.Board("6qk/8/8/8/8/8/8/K5Q1 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("a1b2"))
+    check(intent.kind != mi.KING_ACTIVATION,
+          f"avec les dames, pas d'activation de roi (kind={intent.kind})")
+
+    board = chess.Board("7k/8/8/8/8/8/8/1K6 w - - 0 1")
+    intent = mi.detect_move_intent(board, chosen("b1a1"))
+    check(intent.kind != mi.KING_ACTIVATION,
+          f"un roi qui S'ÉLOIGNE du centre ne s'active pas (kind={intent.kind})")
+
+
 # --- 3ter. PAS un sacrifice : positions RÉELLES mesurées en partie ---------
 def test_faux_sacrifices_mesures_en_partie():
     """Les deux motifs de faux positif relevés par audit_parties.py (50
@@ -414,6 +474,8 @@ def test_prophylaxie_transmise_telle_quelle():
 def main():
     for fn in (test_check_escape, test_capture_free, test_capture_free_defended_but_winning,
                test_sacrifice, test_faux_sacrifices_mesures_en_partie,
+               test_poussee_de_pion_passe, test_roi_actif_seulement_sans_dames,
+               test_avant_poste,
                test_promotion, test_mate_prime_sur_tout,
                test_mat_force_en_deux_coups, test_mat_subi_n_est_pas_une_intention_de_mat,
                test_gives_check, test_quiet, test_malformed,

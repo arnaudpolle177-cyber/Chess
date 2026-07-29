@@ -28,6 +28,10 @@ import chess
 
 import engine_analysis  # uniquement pour l'encodage des mats (constantes + mate_in_moves)
 import why_detector
+# theme_detector.pawn_is_passed : le fait « pion passé » doit avoir UNE seule
+# définition dans le projet, sinon la narration de finale et l'intention du
+# coup finissent par se contredire sur la même position.
+import theme_detector as td
 
 # Valeurs standard -- mêmes que why_detector / variation_narrator (source
 # recopiée volontairement : ces trois modules doivent rester autonomes et
@@ -54,6 +58,9 @@ DEVELOP = "develop"          # cavalier/fou quittant la rangée de fond
 CASTLE = "castle"            # le roque
 ROOK_FILE = "rook_file"      # tour/dame arrivant sur une colonne ouverte ou semi-ouverte
 REPOSITION = "reposition"    # pièce déjà développée qui change de poste, sans capture
+OUTPOST = "outpost"          # pièce qui se pose sur une case défendue par un pion, inattaquable par un pion adverse
+PASSED_PUSH = "passed_push"  # poussée d'un pion PASSÉ (aucun pion adverse devant, ni à côté)
+KING_ACTIVATION = "king_activation"  # sans dames, le roi marche vers le centre
 
 FORCING_KINDS = frozenset({MATE, CHECK_ESCAPE, CAPTURE_FREE, SACRIFICE, GIVES_CHECK, PROMOTION, CAPTURE_TRADE})
 
@@ -298,6 +305,49 @@ def _material_delta_over_pv(board, pv_uci):
     return gain, sacrifice_ply, sacrifice_square
 
 
+def _is_outpost(board, move, my_side):
+    """
+    La case d'arrivée est-elle un AVANT-POSTE pour la pièce qui s'y pose ?
+    Deux conditions, toutes deux comptées sur la position, aucune supposée :
+      1. un de MES pions défend la case (elle n'est pas simplement libre) ;
+      2. AUCUN pion adverse ne peut jamais venir l'attaquer, c'est-à-dire
+         qu'il n'existe plus de pion adverse sur les deux colonnes voisines,
+         en arrière de la case (les seuls qui pourraient l'attaquer un jour).
+    Testé APRÈS le coup : c'est la case d'arrivée qui compte, et mon propre
+    pion défenseur doit être là une fois le coup joué.
+    """
+    after = board.copy()
+    after.push(move)
+    sq = move.to_square
+    if not any(after.piece_type_at(a) == chess.PAWN
+               for a in after.attackers(my_side, sq)):
+        return False
+
+    file = chess.square_file(sq)
+    rank = chess.square_rank(sq)
+    # « En arrière de la case » du point de vue adverse = du côté d'où ses
+    # pions avancent (ils descendent vers moi si je suis blanc).
+    direction = 1 if my_side == chess.WHITE else -1
+    for f in (file - 1, file + 1):
+        if f < 0 or f > 7:
+            continue
+        r = rank + direction
+        while 0 <= r <= 7:
+            piece = after.piece_at(chess.square(f, r))
+            if piece and piece.piece_type == chess.PAWN and piece.color != my_side:
+                return False
+            r += direction
+    return True
+
+
+def _center_distance(square):
+    """Distance de Chebyshev au bloc central d4/e4/d5/e5 : 0 sur ces quatre
+    cases, 1 sur l'anneau suivant, etc. Sert à prouver qu'un roi se
+    RAPPROCHE du centre plutôt qu'à le supposer."""
+    return min(chess.square_distance(square, sq)
+               for sq in (chess.D4, chess.E4, chess.D5, chess.E5))
+
+
 def _geometric_contrast(board, move):
     """
     Ce que le coup CHANGE, compté sans moteur. Quatre faits, quatre comptages :
@@ -537,7 +587,35 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None, prophylax
             return _mk(ROOK_FILE, False, immediate_delta, file_status=status)
 
     if moved_piece in (chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN) and from_rank != home_rank:
+        # AVANT-POSTE avant reposition : « la pièce bouge de case » était le
+        # tic n°1 du coach (89 coups sur 480 mesurés). Quand la case d'arrivée
+        # est défendue par un de mes pions ET qu'aucun pion adverse ne pourra
+        # jamais l'en chasser, il y a un vrai fait à enseigner à la place.
+        if _is_outpost(board, move, board.turn):
+            return _mk(OUTPOST, False, immediate_delta)
         return _mk(REPOSITION, False, immediate_delta)
+
+    # 6bis. Les deux coups calmes que QUIET avalait encore -- mesuré sur 450
+    #    positions (audit_parties.py) : 26% des coups ne recevaient AUCUNE
+    #    phrase sur la flèche, et c'était systématiquement un coup de pion ou
+    #    une marche de roi. Or ce sont justement les deux gestes que la finale
+    #    enseigne. Les deux tests ci-dessous sont exacts, pas heuristiques.
+    if moved_piece == chess.PAWN:
+        after = board.copy()
+        after.push(move)
+        # Le pion est-il passé À SON ARRIVÉE ? (Testé après le coup : une
+        # poussée peut sortir le pion de l'ombre d'un pion adverse.)
+        if td.pawn_is_passed(after, move.to_square, board.turn):
+            return _mk(PASSED_PUSH, False, immediate_delta)
+
+    if moved_piece == chess.KING:
+        # « Active ton roi » est un bon conseil SANS DAMES et un très mauvais
+        # avec : on exige donc les deux dames hors de l'échiquier, et que le
+        # roi se rapproche réellement du centre (comptage, pas d'intention
+        # supposée).
+        no_queens = not board.pieces(chess.QUEEN, chess.WHITE) and not board.pieces(chess.QUEEN, chess.BLACK)
+        if no_queens and _center_distance(move.to_square) < _center_distance(move.from_square):
+            return _mk(KING_ACTIVATION, False, immediate_delta)
 
     # 7. Coup calme résiduel : aucune intention marquante -> on laisse le
     #    thème de position parler (le commentaire positionnel a du sens ici).

@@ -252,33 +252,40 @@ class ThemeCandidate:
     fields: dict
 
 
+def pawn_is_passed(board, square, color):
+    """
+    Le pion de `color` en `square` est-il PASSÉ ? Vrai s'il n'y a aucun pion
+    adverse sur sa colonne ni les colonnes adjacentes, en avant de lui.
+    Calcul réel via python-chess, pas une estimation.
+
+    Publique parce que move_intent s'en sert pour reconnaître la poussée d'un
+    pion passé (voir PASSED_PUSH) : le même fait ne doit pas être recodé
+    ailleurs, sous peine de diverger de ce que la narration de finale affirme.
+    """
+    direction = 1 if color == chess.WHITE else -1
+    file = chess.square_file(square)
+    rank = chess.square_rank(square)
+    for f in (file - 1, file, file + 1):
+        if f < 0 or f > 7:
+            continue
+        r = rank + direction
+        while 0 <= r <= 7:
+            other = board.piece_at(chess.square(f, r))
+            if other and other.piece_type == chess.PAWN and other.color != color:
+                return False
+            r += direction
+    return True
+
+
 def _find_passed_pawn(board, color):
     """
     Retourne la case d'un pion passé de `color`, s'il en existe un, sinon
-    None -- un pion est "passé" s'il n'y a AUCUN pion adverse sur sa
-    colonne ni les colonnes adjacentes, en avant de lui. Calcul réel via
-    python-chess, pas une estimation : sert à ce que la narration de
-    finale (ENDGAME) puisse citer un pion passé PRÉCIS quand il y en a
-    vraiment un, plutôt que de mentionner le concept dans le vide.
+    None : sert à ce que la narration de finale (ENDGAME) puisse citer un
+    pion passé PRÉCIS quand il y en a vraiment un, plutôt que de mentionner
+    le concept dans le vide.
     """
-    direction = 1 if color == chess.WHITE else -1
     for sq in board.pieces(chess.PAWN, color):
-        file = chess.square_file(sq)
-        rank = chess.square_rank(sq)
-        blocked = False
-        for f in (file - 1, file, file + 1):
-            if f < 0 or f > 7:
-                continue
-            r = rank + direction
-            while 0 <= r <= 7:
-                other = board.piece_at(chess.square(f, r))
-                if other and other.piece_type == chess.PAWN and other.color != color:
-                    blocked = True
-                    break
-                r += direction
-            if blocked:
-                break
-        if not blocked:
+        if pawn_is_passed(board, sq, color):
             return sq
     return None
 
@@ -306,6 +313,15 @@ def _pawn_outruns_king(board, pawn_square, pawn_color):
     file = chess.square_file(pawn_square)
     rank = chess.square_rank(pawn_square)
     promo_sq = chess.square(file, promo_rank)
+    direction = 1 if pawn_color == chess.WHITE else -1
+
+    # Le carré suppose une course LIBRE : une seule pièce posée sur le chemin
+    # et le pion ne court plus du tout. Sans ce test, « le roi adverse est
+    # trop loin » se dirait d'un pion bloqué -- vrai sur le papier, faux dans
+    # la position.
+    for r in range(rank + direction, promo_rank + direction, direction):
+        if board.piece_at(chess.square(file, r)) is not None:
+            return False
 
     steps = abs(promo_rank - rank)
     start_rank = 1 if pawn_color == chess.WHITE else 6

@@ -1143,6 +1143,61 @@ def _frag_reposition(intent, voice, ctx):
     return _f(obs, plan, None)
 
 
+def _frag_outpost(intent, voice, ctx):
+    # Les deux faits sont comptés dans move_intent._is_outpost : la case est
+    # défendue par un de mes pions, et plus aucun pion adverse ne peut venir
+    # l'attaquer. On peut donc dire « aucun pion ne l'en délogera » sans
+    # jugement -- c'est un comptage, pas une appréciation de la case.
+    par = _piece_with_article(intent.moved_piece)
+    dest = _sq(intent.to_square)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        return _f(f"{par} plante son drapeau {where}, hors d'atteinte des pions adverses".replace("  ", " "),
+                  "laisse-la là et joue autour, une pièce pareille ne se déloge pas", None)
+    if voice == CLASSICAL:
+        # Pas de participe accordé ici : « défendu » se rapporterait à
+        # l'avant-poste (masculin) mais suit une pièce parfois féminine, et
+        # la garde d'accords ne peut pas distinguer les deux. Tournure
+        # verbale, aucun accord à faire.
+        return _f(f"{par} occupe un avant-poste {where} : un pion le couvre, aucun pion adverse ne l'attaquera".replace("  ", " "),
+                  "appuie cette pièce et construis le jeu autour d'elle", None)
+    return _f(f"{par} s'installe {where} sur une case qu'aucun pion adverse ne peut attaquer".replace("  ", " "),
+              "garde-la sur cette case, elle y est chez elle", None)
+
+
+def _frag_passed_push(intent, voice, ctx):
+    # Le pion est PASSÉ à son arrivée (verifié case par case, voir
+    # theme_detector.pawn_is_passed) : on peut donc affirmer qu'aucun pion
+    # adverse ne l'arrête. On n'affirme RIEN sur les pièces adverses, qui
+    # peuvent parfaitement le bloquer -- d'où « aucun pion » et pas « rien ».
+    dest = _sq(intent.to_square)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        return _f(f"le pion passé avance {where}, plus aucun pion adverse sur sa route".replace("  ", " "),
+                  "escorte-le : un pion passé se pousse avec du soutien, jamais seul", None)
+    if voice == CLASSICAL:
+        return _f(f"le pion passé progresse {where}, aucune chaîne adverse ne le contrarie".replace("  ", " "),
+                  "amène une pièce derrière lui avant de le pousser plus loin", None)
+    return _f(f"ce pion avance {where} et aucun pion adverse ne peut plus le bloquer".replace("  ", " "),
+              "pousse-le en le soutenant, compte les cases jusqu'à la promotion", None)
+
+
+def _frag_king_activation(intent, voice, ctx):
+    # Sans dames sur l'échiquier (condition vérifiée dans move_intent) et roi
+    # qui se rapproche réellement du centre : les deux moitiés du conseil
+    # classique « le roi est une pièce de finale » sont donc établies.
+    dest = _sq(intent.to_square)
+    where = f"en {dest}" if dest else ""
+    if voice == CREATIVE:
+        return _f(f"le roi se met en marche vers le centre {where}".replace("  ", " ").rstrip(),
+                  "fais-le avancer case par case, c'est une pièce d'attaque en finale", None)
+    if voice == CLASSICAL:
+        return _f(f"le roi se rapproche du centre {where}, les dames ayant quitté l'échiquier".replace("  ", " "),
+                  "centralise-le encore, il soutiendra tes pions", None)
+    return _f(f"sans les dames, ton roi avance vers le centre {where}".replace("  ", " ").rstrip(),
+              "continue de le centraliser, il vaut une pièce de plus ici", None)
+
+
 _INTENT_FUNCS = {
     "mate": _frag_mate,
     "check_escape": _frag_check_escape,
@@ -1155,6 +1210,9 @@ _INTENT_FUNCS = {
     "castle": _frag_castle,
     "rook_file": _frag_rook_file,
     "reposition": _frag_reposition,
+    "outpost": _frag_outpost,
+    "passed_push": _frag_passed_push,
+    "king_activation": _frag_king_activation,
 }
 
 
