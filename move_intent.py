@@ -232,13 +232,11 @@ def _material_delta_over_pv(board, pv_uci):
     trop court ou illisible -> (0, None) (on ne conclut pas à un sacrifice
     sans preuve). None-safe.
 
-    Retourne (gain, sacrifice_ply) -- sacrifice_ply = demi-coup de la PV
-    (1-based) où le déficit apparaît pour la 1re fois, ou None si jamais
-    négatif. Sert à distinguer un sacrifice IMMÉDIAT (<=2 demi-coups : la
-    pièce part et est reprise tout de suite) d'un sacrifice qui ne se
-    matérialise que plus loin dans la ligne forcée -- la narration
-    (fragment_library._frag_sacrifice) en parle alors au conditionnel
-    plutôt que comme si le matériel partait déjà maintenant.
+    Retourne (gain, sacrifice_ply, sacrifice_square) -- sacrifice_ply =
+    demi-coup de la PV (1-based) où le déficit apparaît pour la 1re fois
+    (None si jamais négatif), sacrifice_square = case du coup joué à ce
+    demi-coup. L'appelant EXIGE les deux pour conclure au sacrifice : voir
+    detect_move_intent, étape 2.
 
     GARDE D'HORIZON (symétrique de _capture_is_free, qui exige déjà len>=2
     pour croire à un GAIN) : la PV est tronquée en amont (engine_analysis :
@@ -253,11 +251,12 @@ def _material_delta_over_pv(board, pv_uci):
     persistant, ou aucune reprise possible -- ex: Bxh7+ Kxh7) reste négatif.
     """
     if not pv_uci:
-        return 0, None
+        return 0, None, None
     my_side = board.turn
     tmp = board.copy()
     gain = 0
     sacrifice_ply = None
+    sacrifice_square = None
     last_ply = 0
     last_was_opponent_capture_sq = None  # case d'une prise adverse au tout dernier demi-coup
     for ply, uci in enumerate(pv_uci, start=1):
@@ -283,6 +282,7 @@ def _material_delta_over_pv(board, pv_uci):
         last_was_opponent_capture_sq = move.to_square if (is_capture_move and not mover_is_me) else None
         if gain < 0 and sacrifice_ply is None:
             sacrifice_ply = ply
+            sacrifice_square = move.to_square
 
     # Garde d'horizon (voir docstring) : déficit surgi UNIQUEMENT au dernier
     # demi-coup, sur une prise adverse que je peux reprendre -> reprise
@@ -293,9 +293,9 @@ def _material_delta_over_pv(board, pv_uci):
         recapture_value = PIECE_VALUES.get(
             tmp.piece_type_at(last_was_opponent_capture_sq), 0)
         if gain + recapture_value >= 0:
-            return gain + recapture_value, None  # rendu après reprise -> pas un sacrifice
+            return gain + recapture_value, None, None  # rendu après reprise -> pas un sacrifice
 
-    return gain, sacrifice_ply
+    return gain, sacrifice_ply, sacrifice_square
 
 
 def _geometric_contrast(board, move):
@@ -432,7 +432,7 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None, prophylax
         captured_piece = chess.PAWN  # en passant : la case d'arrivée est vide mais on prend bien un pion
     immediate_delta = _immediate_material_delta(board, move)
     pv_uci = chosen.get("pv_uci") or [chosen.get("move_uci")]
-    line_delta, sacrifice_ply = _material_delta_over_pv(board, pv_uci)
+    line_delta, sacrifice_ply, sacrifice_square = _material_delta_over_pv(board, pv_uci)
     gives_check = board.gives_check(move)
     was_in_check = board.is_check()
 
@@ -467,13 +467,24 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None, prophylax
     if was_in_check:
         return _mk(CHECK_ESCAPE, True, immediate_delta)
 
-    # 2. Sacrifice : sur TOUTE la ligne, on finit en déficit matériel (la
-    #    reprise adverse prend plus qu'on n'a gagné), mais le moteur recommande
-    #    le coup -> il y a une compensation, à raconter. Se détecte sur la PV,
-    #    jamais sur le coup seul (qui gagne toujours >= 0). On expose le déficit
-    #    (line_delta négatif) comme material_delta pour que le fragment cite
-    #    l'ampleur réelle du sacrifice.
-    if line_delta < 0:
+    # 2. Sacrifice : le déficit doit venir DE CE COUP, et se voir tout de
+    #    suite -- l'adversaire prend sur la case même où je viens de poser ma
+    #    pièce (Fxh7+ Rxh7, Txc3 bxc3). C'est le seul motif prouvable sans
+    #    moteur, et il exclut les deux faux positifs mesurés en partie
+    #    (audit_parties.py, 50 faux « sacrifices » sur 450 positions) :
+    #      - HORIZON : la PV est coupée à 6 demi-coups, un déficit de queue
+    #        que je reprends au 7e faisait dire « ce coup abandonne du
+    #        matériel » sur un simple 4.Fg2 (… d5xc4 repris plus tard) ;
+    #      - MATÉRIEL QUI TOMBAIT DE TOUTE FAÇON : un pion déjà perdant dans
+    #        toutes les lignes n'est pas sacrifié PAR ce coup (11…Da6, le
+    #        pion d4 partait quel que soit le coup joué).
+    #    Le déficit non prouvé ne fabrique plus de phrase : le coup retombe
+    #    sur son autre motif (développement, reposition...) -- silence plutôt
+    #    qu'affirmation fausse.
+    #    On expose le déficit (line_delta négatif) comme material_delta pour
+    #    que le fragment cite l'ampleur réelle du sacrifice.
+    if (line_delta < 0 and sacrifice_ply is not None and sacrifice_ply <= 2
+            and sacrifice_square == move.to_square):
         intent = _mk(SACRIFICE, True, line_delta)
         intent.sacrifice_ply = sacrifice_ply
         return intent

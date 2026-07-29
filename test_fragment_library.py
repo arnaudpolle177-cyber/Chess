@@ -728,6 +728,50 @@ def test_cause_du_fragment_nest_pas_ecrasee():
     check(bool(frag["cause"]) and "c6" not in frag["cause"], frag["cause"])
 
 
+def _endgame_frag(fen, voice="popular"):
+    """Bout en bout : FEN -> collect_theme_bricks -> fragment ENDGAME."""
+    import theme_detector as td
+    board = chess.Board(fen)
+    bricks = td.collect_theme_bricks(board, [{"move_uci": "a1a1", "cp": 0}])
+    eg = [b for b in bricks if b.theme == ENDGAME]
+    assert eg, f"aucune brique ENDGAME pour {fen}"
+    return fragments_for(eg[0], voice, FragmentContext(board=board)), eg[0].fields
+
+
+def test_finale_regle_du_carre():
+    """Roi noir en h8, pion blanc en a5 : le pion court en 4 coups (a5-a8),
+    le roi met 7 cases pour rejoindre a8 -- hors du carré, fait exact."""
+    frag, fields = _endgame_frag("7k/8/8/P7/8/8/8/K7 w - - 0 1")
+    check(fields["outruns_king"] is True, f"le roi doit être hors du carré : {fields}")
+    check("a5" in frag["observation"] and "carré" in frag["observation"].lower()
+          or "arrêter seul" in frag["observation"] or "trop loin" in frag["observation"],
+          f"le carré doit être narré -> {frag['observation']!r}")
+
+
+def test_finale_roi_dans_le_carre_ne_reclame_rien():
+    """Même pion, roi noir en b7 : il rattrape. La phrase du carré ne doit
+    PAS sortir (c'est la moitié qui compte -- une regle du carre qui dit
+    toujours oui ne dit rien)."""
+    frag, fields = _endgame_frag("8/1k6/8/P7/8/8/8/K7 w - - 0 1")
+    check(fields["outruns_king"] is False, f"le roi rattrape le pion : {fields}")
+    check("carré" not in frag["observation"] and "trop loin" not in frag["observation"],
+          f"pas de phrase de carré ici -> {frag['observation']!r}")
+
+
+def test_finale_opposition():
+    """Rois en e4/e6, trait aux blancs : opposition directe, tenue par les
+    NOIRS (celui qui doit jouer la perd)."""
+    frag, fields = _endgame_frag("8/8/4k3/8/4K3/8/8/8 w - - 0 1")
+    check(fields["opposition"] is True, f"opposition attendue : {fields}")
+    check("face" in frag["observation"] or "opposition" in frag["observation"],
+          f"l'opposition doit être narrée -> {frag['observation']!r}")
+
+
+def test_finale_rois_eloignes_pas_dopposition():
+    frag, fields = _endgame_frag("8/8/8/4k3/8/8/4K3/8 w - - 0 1")
+    check(fields["opposition"] is False, f"pas d'opposition à 3 cases : {fields}")
+
+
 def _run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for t in tests:

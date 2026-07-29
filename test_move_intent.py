@@ -97,6 +97,30 @@ def test_sacrifice():
     check(intent.material_delta < 0, f"sacrifice: material_delta négatif (={intent.material_delta})")
 
 
+# --- 3ter. PAS un sacrifice : positions RÉELLES mesurées en partie ---------
+def test_faux_sacrifices_mesures_en_partie():
+    """Les deux motifs de faux positif relevés par audit_parties.py (50
+    « sacrifices » sur 450 positions). Les FEN et les PV sortent telles
+    quelles de l'audit, pas d'une position inventée."""
+    # 1) HORIZON : 4.Fg2, la PV finit sur ...dxc4 ; le pion est repris au-delà
+    #    des 6 demi-coups fournis. Le coach annonçait « met en route un
+    #    sacrifice dans 2 coups » sur un simple coup de développement.
+    board = chess.Board("rnbqkb1r/pp1p1ppp/4pn2/2p5/2P5/5NP1/PP1PPP1P/RNBQKB1R w KQkq - 1 4")
+    intent = mi.detect_move_intent(board, chosen(
+        "f1g2", pv_uci=["f1g2", "d7d5", "d2d4", "d5c4", "e1g1", "b8c6"]))
+    check(intent is not None and intent.kind != mi.SACRIFICE,
+          f"Fg2 n'est pas un sacrifice (kind={intent.kind if intent else None})")
+
+    # 2) MATÉRIEL QUI TOMBAIT DE TOUTE FAÇON : 11...Da6, la dame va en a6 mais
+    #    c'est le pion d4 que le cavalier prend au coup suivant -- il partait
+    #    quel que soit le coup joué. Le déficit n'est pas sur la case d'arrivée.
+    board = chess.Board("r3k2r/pp1bbppp/1qn1p3/3n4/2Np4/1P3NP1/PB2PPBP/R2Q1RK1 b kq - 3 11")
+    intent = mi.detect_move_intent(board, chosen(
+        "b6a6", pv_uci=["b6a6", "f3d4", "e8g8", "e2e4", "d5f6", "e4e5"]))
+    check(intent is not None and intent.kind != mi.SACRIFICE,
+          f"Da6 n'est pas un sacrifice (kind={intent.kind if intent else None})")
+
+
 # --- 3bis. PAS un sacrifice : reprise coupée par l'horizon de la PV ---------
 def test_not_sacrifice_recapture_beyond_horizon():
     # Échange parfaitement égal dont la PV s'arrête PILE sur la prise adverse :
@@ -389,7 +413,8 @@ def test_prophylaxie_transmise_telle_quelle():
 
 def main():
     for fn in (test_check_escape, test_capture_free, test_capture_free_defended_but_winning,
-               test_sacrifice, test_promotion, test_mate_prime_sur_tout,
+               test_sacrifice, test_faux_sacrifices_mesures_en_partie,
+               test_promotion, test_mate_prime_sur_tout,
                test_mat_force_en_deux_coups, test_mat_subi_n_est_pas_une_intention_de_mat,
                test_gives_check, test_quiet, test_malformed,
                test_prise_qui_donne_echec_porte_le_tag,

@@ -20,7 +20,18 @@ Deux temps, dont un seul coûte un appel moteur :
 import chess
 import chess.engine
 
-THREAT_DEPTH = 10
+# Profondeur de la sonde de menace adverse, alignée sur la profondeur qui
+# dessine la flèche (ELO_TIERS tier 1 : 13-15) -- une menace vue moins loin
+# que le coup recommandé produit des « ce coup empêche X » où X n'est plus la
+# vraie menace.
+#
+# Coût MESURÉ (stockfish.exe local, threads=1, 4 positions ouverture/milieu/
+# finale) : depth 10 -> 4-34 ms, 12 -> 8-23 ms, 14 -> 7-98 ms, 16 -> 21-120 ms.
+# 14 est le compromis retenu : la sonde est SYNCHRONE dans le fil de la
+# requête, juste avant l'affichage (voir web_bridge._opponent_threat), mais
+# le cache par FEN la fait payer UNE fois par position pour les 3 profils.
+# Au-delà de 16, repasser cette mesure avant de monter.
+THREAT_DEPTH = 14
 
 
 def opponent_threat(engine, board, depth=THREAT_DEPTH):

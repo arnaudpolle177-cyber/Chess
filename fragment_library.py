@@ -320,6 +320,37 @@ def _frag_missed(fields, voice, ctx):
 def _frag_endgame(fields, voice, ctx):
     passed = fields.get("passed_pawn_square")
     has_passed = passed is not None
+
+    # ORDRE : du plus décisif au plus général. Le carré tranche la partie (le
+    # pion passe ou ne passe pas), l'opposition décide qui cède le terrain ;
+    # le pion passé simple et le roi actif viennent après. Sans ces deux
+    # premiers, la finale ne disposait que d'un signal et sortait les mêmes
+    # deux paragraphes sur 96 positions mesurées.
+    if has_passed and fields.get("outruns_king"):
+        # « seul » n'est pas une précaution de style : _pawn_outruns_king ne
+        # regarde QUE le roi adverse, jamais ses autres pièces.
+        case = _sq(passed)
+        if voice == CREATIVE:
+            return _f(f"le roi adverse est sorti du carré du pion en {case}",
+                      "pousse-le, la course est gagnée pour lui", None)
+        if voice == CLASSICAL:
+            return _f(f"le roi adverse ne peut plus rattraper seul le pion en {case}",
+                      "pousse ce pion sans attendre, chaque temps compte", None)
+        return _f(f"le roi adverse est trop loin pour arrêter seul le pion en {case}",
+                  "pousse-le tout de suite, compte les cases jusqu'à la promotion", None)
+
+    if fields.get("opposition"):
+        # C'est à MOI de jouer (my_side = board.turn), donc l'opposition est
+        # à l'adversaire : celui qui doit bouger la perd.
+        if voice == CREATIVE:
+            return _f("les rois se font face et c'est à toi d'avancer",
+                      "cherche un coup de pion à jouer plutôt que de céder du terrain avec le roi", None)
+        if voice == CLASSICAL:
+            return _f("l'adversaire tient l'opposition, c'est à toi de rompre le face-à-face",
+                      "cherche à reprendre l'opposition par un coup d'attente", None)
+        return _f("les rois se font face à une case d'écart et c'est à toi de bouger",
+                  "ton roi va devoir céder le passage : joue un autre coup si tu en as un", None)
+
     if voice == CREATIVE:
         if has_passed:
             obs = f"ton pion passé en {_sq(passed)} a la voie libre vers la promotion"
@@ -804,46 +835,27 @@ def _frag_sacrifice(intent, voice, ctx):
     # l'attaque). On reste factuel sur ce qu'on voit -- on ne PROMET pas un mat
     # qu'on n'a pas vérifié.
     #
-    # intent.sacrifice_ply : demi-coup de la PV où le déficit matériel
-    # apparaît pour la 1re fois (voir move_intent._material_delta_over_pv).
-    # <=2 -> le matériel part DÈS ce coup (prise rendue tout de suite) :
-    # phrasing existant. Au-delà -> ce coup précis ne perd encore rien, il
-    # ENGAGE une séquence forcée qui débouche sur un sacrifice plus loin --
-    # on le dit au conditionnel plutôt que de laisser croire qu'on donne la
-    # pièce maintenant.
+    # Le sacrifice est toujours IMMÉDIAT ici : move_intent n'en déclare un que
+    # si l'adversaire reprend sur la case d'arrivée dès sa réponse (voir
+    # detect_move_intent, étape 2). La variante « sacrifice différé dans N
+    # coups » a été SUPPRIMÉE avec le motif qui la produisait : elle ne sortait
+    # que sur des artefacts d'horizon de PV (mesuré : 21 occurrences pour 0
+    # vrai sacrifice, dont « 55.Rb3 met en route un sacrifice »).
     par = _piece_with_article(intent.moved_piece)
     dest = _sq(intent.to_square)
     where = f"en {dest}" if dest else ""
-    immediate = intent.sacrifice_ply is None or intent.sacrifice_ply <= 2
-    moves_away = None if immediate else (intent.sacrifice_ply + 1) // 2
 
-    if immediate:
-        if voice == CREATIVE:
-            obs = f"ce coup sacrifie du matériel {where} pour ouvrir la position".replace("  ", " ").rstrip()
-            plan = "lance la combinaison : ici l'activité vaut plus que les points"
-            return _f(obs, plan, None)
-        if voice == CLASSICAL:
-            obs = f"{par} se donne {where} au profit de l'initiative".replace("  ", " ")
-            plan = "calcule la suite jusqu'au bout avant de t'engager dans le sacrifice"
-            return _f(obs, plan, None)
-        # popular
-        obs = f"ce coup abandonne du matériel volontairement {where}".replace("  ", " ").rstrip()
-        plan = "ose le sacrifice, la compensation est bien réelle ici"
-        return _f(obs, plan, None)
-
-    # Sacrifice différé : le déficit n'apparaît que plus loin dans la ligne
-    # forcée, pas sur ce coup.
     if voice == CREATIVE:
-        obs = f"ce coup {where} lance une séquence qui force un sacrifice dans {moves_away} coups".replace("  ", " ").rstrip()
-        plan = "engage-toi : la ligne forcée vaut le matériel qui partira plus loin"
+        obs = f"ce coup sacrifie du matériel {where} pour ouvrir la position".replace("  ", " ").rstrip()
+        plan = "lance la combinaison : ici l'activité vaut plus que les points"
         return _f(obs, plan, None)
     if voice == CLASSICAL:
-        obs = f"{par} {where} prépare une ligne forcée où du matériel sera cédé dans {moves_away} coups".replace("  ", " ").rstrip()
-        plan = "vérifie toute la séquence forcée avant de t'y engager"
+        obs = f"{par} se donne {where} au profit de l'initiative".replace("  ", " ")
+        plan = "calcule la suite jusqu'au bout avant de t'engager dans le sacrifice"
         return _f(obs, plan, None)
     # popular
-    obs = f"ce coup {where} met en route un sacrifice qui n'arrive que dans {moves_away} coups".replace("  ", " ").rstrip()
-    plan = "suis la ligne forcée jusqu'au bout, la compensation arrive après le sacrifice"
+    obs = f"ce coup abandonne du matériel volontairement {where}".replace("  ", " ").rstrip()
+    plan = "ose le sacrifice, la compensation est bien réelle ici"
     return _f(obs, plan, None)
 
 

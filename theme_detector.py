@@ -283,6 +283,59 @@ def _find_passed_pawn(board, color):
     return None
 
 
+def _pawn_outruns_king(board, pawn_square, pawn_color):
+    """
+    RÈGLE DU CARRÉ : le roi adverse peut-il encore rattraper ce pion s'il
+    court seul vers la promotion ? Vrai = il ne le peut plus.
+
+    Comptage exact, pas une heuristique : distance du roi adverse à la case
+    de promotion (métrique du roi = max des écarts colonne/ligne) contre le
+    nombre de cases qu'il reste au pion, avec le bonus de première poussée
+    (un pion sur sa rangée de départ avance de deux) et le demi-coup gagné
+    quand c'est l'adversaire qui a le trait. Ne regarde AUCUNE autre pièce :
+    l'affirmation qu'il autorise doit donc rester « il ne peut plus l'arrêter
+    SEUL » -- une tour ou un fou adverse changerait tout.
+    """
+    if pawn_square is None:
+        return False
+    them = not pawn_color
+    king = board.king(them)
+    if king is None:
+        return False
+    promo_rank = 7 if pawn_color == chess.WHITE else 0
+    file = chess.square_file(pawn_square)
+    rank = chess.square_rank(pawn_square)
+    promo_sq = chess.square(file, promo_rank)
+
+    steps = abs(promo_rank - rank)
+    start_rank = 1 if pawn_color == chess.WHITE else 6
+    if rank == start_rank:
+        steps -= 1  # la première poussée peut être double
+    king_dist = chess.square_distance(king, promo_sq)
+    if board.turn == them:
+        king_dist -= 1  # le camp au trait avance d'abord
+    return king_dist > steps
+
+
+def _kings_in_opposition(board):
+    """
+    OPPOSITION DIRECTE : les deux rois se font face sur la même colonne ou
+    la même rangée, avec UNE case entre eux. Fait binaire et vérifiable.
+
+    Qui la TIENT n'est pas dans le retour, et c'est voulu : la narration
+    tourne toujours sur le camp au trait (my_side = board.turn), et
+    l'opposition appartient par définition à celui qui n'a PAS à jouer. Le
+    fragment peut donc dire sans calcul supplémentaire que c'est l'adversaire
+    qui la tient -- voir fragment_library._frag_endgame.
+    """
+    wk, bk = board.king(chess.WHITE), board.king(chess.BLACK)
+    if wk is None or bk is None:
+        return False
+    same_line = (chess.square_file(wk) == chess.square_file(bk)
+                 or chess.square_rank(wk) == chess.square_rank(bk))
+    return same_line and chess.square_distance(wk, bk) == 2
+
+
 def _king_safety_score(board, king_color):
     """
     Compte, sur les cases autour du roi de `king_color` (roi compris),
@@ -854,7 +907,16 @@ def collect_theme_bricks(board, candidates, swing_cp=None,
 
     # 5. ENDGAME / OPENING (phase -- exclusives entre elles, pas des autres)
     if phase == "endgame":
-        _add(ENDGAME, 1.0, {"passed_pawn_square": _find_passed_pawn(board, my_side)})
+        # Trois signaux au lieu d'un : mesuré sur 96 positions de finale, le
+        # seul passed_pawn_square renvoyait deux paragraphes en boucle. Le
+        # carré et l'opposition sont les deux notions que la finale enseigne,
+        # et toutes deux se PROUVENT sans moteur.
+        passed_sq = _find_passed_pawn(board, my_side)
+        _add(ENDGAME, 1.0, {
+            "passed_pawn_square": passed_sq,
+            "outruns_king": _pawn_outruns_king(board, passed_sq, my_side),
+            "opposition": _kings_in_opposition(board),
+        })
     elif phase == "opening":
         _add(OPENING, 1.0, {})
 
