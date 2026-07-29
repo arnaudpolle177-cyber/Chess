@@ -941,21 +941,42 @@ class BridgeState:
         ce projet). En pratique, prophylaxis.opponent_threat n'est déjà
         censé jamais lever (il avale et journalise ses propres échecs
         moteur) -- ce try/except est une garde de second rang contre un bug
-        inattendu ou une panne de _timed_engine_lock lui-même.
+        inattendu.
+
+        PAS de _timed_engine_lock ici (contrairement à _attach_scenario_async)
+        : cette méthode s'exécute SYNCHRONE dans le fil de la requête HTTP,
+        juste avant que l'entrée ne soit renvoyée au navigateur pour dessiner
+        la flèche -- _timed_engine_lock BLOQUE jusqu'à obtenir le verrou, et
+        scenario_engine_lock peut être tenu par _attach_scenario_async
+        pendant tout narration.compute_scenario_facts (plusieurs analyses
+        moteur -- des centaines de ms, pas les ~87 ms de ce seul appel-ci).
+        Attendre ce verrou retarderait la flèche du coup suivant derrière un
+        scénario différé sans rapport -- exactement ce que la conception
+        "scenario_engine dédié" existe pour éviter. D'où acquire(blocking=False) :
+        verrou libre -> calcule ; verrou pris -> skip immédiat, jamais
+        d'attente. Le cache n'est écrit QUE si le calcul a réellement eu
+        lieu : un skip par contention doit se retenter au prochain appel, pas
+        s'installer comme un None définitif pour cette position (voir aussi
+        le test test_threat_cache_contention).
         """
         with self.lock:
             if self._threat_cache_key == fen:
                 return self._threat_cache_value
-        threat = None
+        if not self.scenario_engine_lock.acquire(blocking=False):
+            print("⚠ Menace adverse ignorée (moteur scénario occupé par un scénario différé) : pas de retard sur la flèche.")
+            return None  # ne PAS cacher ce skip -- prochain appel réessaiera
         try:
-            with self._timed_engine_lock("threat", lock=self.scenario_engine_lock):
+            threat = None
+            try:
                 threat = prophylaxis.opponent_threat(self.scenario_engine, board)
-        except Exception as e:
-            print(f"⚠ Menace adverse indisponible : {e}")
-        with self.lock:
-            self._threat_cache_key = fen
-            self._threat_cache_value = threat
-        return threat
+            except Exception as e:
+                print(f"⚠ Menace adverse indisponible : {e}")
+            with self.lock:
+                self._threat_cache_key = fen
+                self._threat_cache_value = threat
+            return threat
+        finally:
+            self.scenario_engine_lock.release()
 
     def _attach_scenario_async(self, fen, board, chosen, profile_id, position_seq, elo_tier_id, entry):
         """

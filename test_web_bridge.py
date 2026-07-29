@@ -11,6 +11,7 @@ BLANCS, quel que soit le camp au trait sur la position analysée.
 """
 import sys
 import threading
+import time
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -81,7 +82,6 @@ class _FakeState:
         self._threat_cache_key = None
         self._threat_cache_value = None
 
-    _timed_engine_lock = web_bridge.BridgeState._timed_engine_lock
     _opponent_threat = web_bridge.BridgeState._opponent_threat
 
 
@@ -110,10 +110,34 @@ def test_threat_cache_par_fen():
         prophylaxis.opponent_threat = real_opponent_threat
 
 
+# --- 6. Contention sur scenario_engine_lock : jamais d'attente, jamais un
+#        skip mis en cache comme un None définitif -----------------------
+def test_threat_cache_contention():
+    state = _FakeState()
+    state.scenario_engine_lock.acquire()  # simule _attach_scenario_async en cours
+    try:
+        board = chess.Board()
+        t0 = time.perf_counter()
+        result = state._opponent_threat(board.fen(), board)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        check(result is None, f"verrou occupé -> doit rendre None immédiatement, reçu {result!r}")
+        check(elapsed_ms < 50, f"acquire(blocking=False) ne doit jamais attendre : {elapsed_ms:.1f}ms")
+        check(state._threat_cache_key is None,
+              "un skip par contention ne doit PAS être mis en cache (sinon il se fige pour cette position)")
+    finally:
+        state.scenario_engine_lock.release()
+
+    # Le verrou est maintenant libre : un appel normal doit calculer et
+    # remplir le cache (preuve que le skip précédent n'a pas poisonné l'état).
+    board = chess.Board()
+    result = state._opponent_threat(board.fen(), board)
+    check(state._threat_cache_key == board.fen(), "une fois le verrou libre, le calcul doit se faire et être caché")
+
+
 def main():
     for fn in (test_blancs_trait_mat_donne, test_blancs_trait_mat_subi,
                test_noirs_trait_mat_donne_par_noirs, test_pas_de_mat,
-               test_threat_cache_par_fen):
+               test_threat_cache_par_fen, test_threat_cache_contention):
         try:
             fn()
         except Exception as e:
