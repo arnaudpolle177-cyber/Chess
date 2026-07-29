@@ -1317,6 +1317,32 @@ def _san_fr(san):
     return out
 
 
+def threat_caution(menace):
+    """
+    Texte de l'avertissement « menace adverse », ou None.
+
+    Rendu HORS du paragraphe (voir narration_weaver.weave : le caution est
+    transversal, jamais tissé) parce qu'un danger doit sauter aux yeux, pas
+    se fondre dans une idée. Une seule phrase, pas de variante de voix : une
+    alerte n'a pas de style.
+
+    `menace` vient de prophylaxis.threat_is_real -- qui a DÉJÀ écarté les 85%
+    de positions où l'adversaire a simplement un coup à jouer sans menacer
+    quoi que ce soit. L'appelant n'affiche rien quand son propre coup pare
+    la menace : la cause du paragraphe le dit alors déjà (« ce coup empêche
+    Fxa5 »), et le redire ici serait contradictoire.
+    """
+    if not menace:
+        return None
+    san = _san_fr(menace.get("san"))
+    if not san:
+        return None
+    if menace.get("kind") == "mate":
+        return f"Attention : il menace {san}, qui fait mat -- ton coup doit y répondre."
+    mots = _material_words(menace.get("gain", 0) * 100)
+    return f"Attention : il menace {san}, soit {mots} pour lui -- vérifie que ton coup y répond."
+
+
 def _followup_plan(voice, ctx=None):
     """
     Plan CONCRET tiré de la ligne principale (voir

@@ -103,6 +103,54 @@ def test_en_echec_pas_de_coup_nul():
     assert sentinel.called is False
 
 
+def test_menace_reelle_mat_ou_materiel_seulement():
+    """threat_is_real tranche entre « une menace » et « le coup qu'il jouerait
+    de toute facon ». Sans ce filtre, l'avertissement sortirait sur 97% des
+    positions (mesure sur 80 positions reelles) et l'oeil apprendrait a le
+    sauter -- y compris le jour ou il annonce un mat.
+
+    Les quatre cas sont verifies AFFICHES avant d'etre crus : mes premieres
+    positions etaient fausses (la dame ne pouvait pas atteindre la tour, et
+    le "mat" n'en etait pas un).
+    """
+    # PRISE NON DEFENDUE : Dxd1 ramasse une tour que rien ne reprend.
+    b = chess.Board("3qk3/8/8/8/8/8/6PP/3R2K1 w - - 0 1")
+    m = prophylaxis.threat_is_real(b, chess.Move.from_uci("d8d1"))
+    assert m and m["kind"] == "material" and m["gain"] == 5, m
+    assert m["san"] == "Qxd1+", m["san"]   # SAN calcule trait inverse
+
+    # COUP CALME : meme position, la dame va en d5. Rien a signaler.
+    assert prophylaxis.threat_is_real(b, chess.Move.from_uci("d8d5")) is None
+
+    # ECHANGE EGAL : Txd2 est repris par Td1 -> solde 0, sous le seuil.
+    egal = chess.Board("3rk3/8/8/8/8/8/3R4/3R2K1 w - - 0 1")
+    assert prophylaxis.threat_is_real(egal, chess.Move.from_uci("d8d2")) is None
+
+    # MAT du couloir : aucune prise, mais c'est LA menace a montrer.
+    mat = chess.Board("r3k3/8/8/8/8/8/5PPP/6K1 w - - 0 1")
+    m = prophylaxis.threat_is_real(mat, chess.Move.from_uci("a8a1"))
+    assert m and m["kind"] == "mate" and m["san"] == "Ra1#", m
+
+
+def test_menace_en_echec_ne_sonde_rien():
+    """Meme garde non negociable que opponent_threat : en echec, le coup nul
+    est illegal et python-chess fabrique une position invalide SANS lever."""
+    b = chess.Board("4k3/8/8/8/8/8/8/r3K3 w - - 0 1")
+    assert b.is_check()
+    assert prophylaxis.threat_is_real(b, chess.Move.from_uci("a1a8")) is None
+
+
+def test_texte_de_lalerte_est_en_francais():
+    """Le SAN de l'alerte passe par la conversion d'affichage : « Ra1# » se
+    lirait ROI a1 en francais alors que c'est une TOUR."""
+    import fragment_library
+    txt = fragment_library.threat_caution({"san": "Ra1#", "kind": "mate", "gain": 0})
+    assert "Ta1#" in txt and "Ra1#" not in txt, txt
+    txt = fragment_library.threat_caution({"san": "Qxd1+", "kind": "material", "gain": 5})
+    assert "Dxd1+" in txt and "tour" in txt, txt   # 5 points = l'equivalent d'une tour
+    assert fragment_library.threat_caution(None) is None
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

@@ -46,6 +46,7 @@ import theme_detector
 import why_detector
 import narration
 import narration_v2
+import fragment_library  # threat_caution : le texte de l'alerte « menace adverse »
 import opening_identity
 import variation_narrator
 import lichess_explorer
@@ -1377,11 +1378,25 @@ class BridgeState:
                 # reste None -- le paragraphe se rend quand même, juste sans
                 # la phrase prophylactique.
                 proph = None
+                menace_caution = None
                 try:
                     threat = self._opponent_threat(fen, board)
                     if threat is not None:
                         proph = prophylaxis.prevented_by(
                             board, chess.Move.from_uci(chosen["move_uci"]), threat)
+                        # La menace était calculée à chaque position et JETÉE
+                        # dès qu'elle survivait à notre coup. C'est pourtant là
+                        # qu'elle est utile : le joueur doit la voir.
+                        # Deux filtres, sinon l'avertissement s'afficherait sur
+                        # 97% des coups (mesuré) et l'oeil apprendrait à le
+                        # sauter -- y compris le jour où il annonce un mat :
+                        #   - threat_is_real : mat ou matériel, pas « le coup
+                        #     qu'il jouerait » (97% -> 15%) ;
+                        #   - proph is None : si NOTRE coup pare la menace, la
+                        #     cause du paragraphe le dit déjà (15% -> 10%).
+                        if proph is None:
+                            menace_caution = fragment_library.threat_caution(
+                                prophylaxis.threat_is_real(board, threat))
                 except Exception as e:
                     print(f"⚠ Prophylaxie indisponible ({profile_id}) : {e}")
 
@@ -1393,6 +1408,13 @@ class BridgeState:
                 )
                 if woven.get("text"):
                     entry["narration"]["paragraph"] = woven["text"]
+                    # Le caution de la v1 (risque de PAT) garde la priorité :
+                    # il annonce que MON coup peut annuler une partie gagnée,
+                    # ce qui prime sur une menace adverse. Sans ce garde-fou,
+                    # la menace l'écraserait justement dans les finales
+                    # gagnantes, où le pat guette.
+                    if menace_caution and not entry["narration"].get("caution"):
+                        entry["narration"]["caution"] = menace_caution
                     kind = (woven.get("intent_kind")
                             or (woven.get("lead") and str(woven["lead"])) or "")
                     history = list(self._recent_intent_kinds.get(profile_id, ()))

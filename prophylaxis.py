@@ -111,3 +111,72 @@ def prevented_by(board, my_move, threat):
     except Exception as e:
         print(f"⚠ Prophylaxie indisponible : {e}")
         return None
+
+
+# Valeurs standard, recopiées comme dans move_intent/why_detector (ces modules
+# restent volontairement autonomes pour une simple table de constantes).
+_PIECE_VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3,
+                 chess.ROOK: 5, chess.QUEEN: 9}
+
+# En dessous, on se tait. Un pion qui tombe n'est pas une alerte -- et une
+# alerte qui s'affiche à chaque coup n'est plus une alerte : l'oeil apprend à
+# la sauter, y compris le jour où elle annonce un mat. 2 = un vrai déséquilibre
+# (une pièce non défendue, ou un échange qui tourne mal d'au moins deux points).
+THREAT_MIN_GAIN = 2
+
+
+def threat_is_real(board, threat):
+    """
+    `threat` (le meilleur coup adverse, voir opponent_threat) est-il une
+    MENACE, ou juste le coup qu'il jouerait ?
+
+    C'est LA question de ce module : opponent_threat rend un coup dans
+    quasiment toutes les positions, donc l'utiliser tel quel afficherait un
+    avertissement à chaque coup de la partie.
+
+    Une menace, ici, c'est un fait vérifiable et rien d'autre :
+      - un MAT (board.is_checkmate() après le coup) ;
+      - une prise qui GAGNE du matériel : soit la case n'est défendue par
+        aucune de mes pièces, soit ce qu'il prend vaut au moins
+        THREAT_MIN_GAIN de plus que ce qu'il engage.
+
+    Un coup de développement, une poussée, un échec sans suite : rien. On se
+    tait -- « on ne sait pas quoi dire » est toujours préférable à une alerte
+    qui ne veut rien dire.
+
+    board  : position AVANT mon coup, à MOI de jouer.
+    Retourne {"san", "kind": "mate"|"material", "gain": int} ou None.
+    Jamais d'exception : sur le moindre doute, None.
+    """
+    if threat is None or board.is_check() or board.is_game_over():
+        return None
+    try:
+        probe = board.copy()
+        probe.push(chess.Move.null())
+        if not probe.is_valid() or threat not in probe.legal_moves:
+            return None
+        san = probe.san(threat)  # SAN dans la SEULE position où la menace est légale
+
+        after = probe.copy()
+        after.push(threat)
+        if after.is_checkmate():
+            return {"san": san, "kind": "mate", "gain": 0}
+
+        if not probe.is_capture(threat):
+            return None
+        captured = probe.piece_at(threat.to_square)
+        pris = _PIECE_VALUES.get(captured.piece_type, 0) if captured else 1  # 1 = en passant
+        attaquant = probe.piece_at(threat.from_square)
+        engage = _PIECE_VALUES.get(attaquant.piece_type, 0) if attaquant else 0
+
+        # Puis-je reprendre ? Test dans la position APRÈS sa prise, sinon on
+        # compte des défenseurs qui n'existent plus (ou qui viennent d'être
+        # cloués par le coup lui-même).
+        if not after.attackers(board.turn, threat.to_square):
+            gain = pris                      # imprenable : il empoche tout
+        else:
+            gain = pris - engage             # échange : le solde statique
+        return {"san": san, "kind": "material", "gain": gain} if gain >= THREAT_MIN_GAIN else None
+    except Exception as e:
+        print(f"⚠ Évaluation de la menace indisponible : {e}")
+        return None
