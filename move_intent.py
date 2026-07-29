@@ -343,7 +343,7 @@ def _geometric_contrast(board, move):
     new_targets = []
     for sq in after_att & ~before_att:
         target = after.piece_at(sq)
-        if target is not None and target.color != me:
+        if target is not None and target.color != me and target.piece_type != chess.KING:
             new_targets.append((PIECE_VALUES.get(target.piece_type, 0), sq))
     new_attack_square = max(new_targets)[1] if new_targets else None
 

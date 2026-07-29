@@ -80,6 +80,16 @@ LICHESS_EXPLORER_ENABLED = False
 # RTX 3070) -- ajuster si trop lent (autre GPU) ou trop faible.
 LC0_MOVETIME_S = 2.0
 
+# Attente MAXIMALE de _opponent_threat sur scenario_engine_lock avant de
+# renoncer (voir BridgeState._opponent_threat). Compromis délibéré : assez
+# long pour absorber la sonde ~87 ms d'un PROFIL FRÈRE (les 3 profils
+# arrivent quasi simultanément côté client et se disputent le même verrou --
+# c'est le cas COURANT, pas la queue derrière un scénario différé qui dure
+# plusieurs centaines de ms et reste rare, déclenché seulement par un clic
+# sur une carte) ; assez court pour ne jamais finir assis derrière un
+# scénario différé complet.
+THREAT_LOCK_TIMEOUT_S = 0.5
+
 
 def _objective_eval_white(top_candidate, board):
     """
@@ -946,26 +956,34 @@ class BridgeState:
         PAS de _timed_engine_lock ici (contrairement à _attach_scenario_async)
         : cette méthode s'exécute SYNCHRONE dans le fil de la requête HTTP,
         juste avant que l'entrée ne soit renvoyée au navigateur pour dessiner
-        la flèche -- _timed_engine_lock BLOQUE jusqu'à obtenir le verrou, et
-        scenario_engine_lock peut être tenu par _attach_scenario_async
-        pendant tout narration.compute_scenario_facts (plusieurs analyses
-        moteur -- des centaines de ms, pas les ~87 ms de ce seul appel-ci).
-        Attendre ce verrou retarderait la flèche du coup suivant derrière un
-        scénario différé sans rapport -- exactement ce que la conception
-        "scenario_engine dédié" existe pour éviter. D'où acquire(blocking=False) :
-        verrou libre -> calcule ; verrou pris -> skip immédiat, jamais
-        d'attente. Le cache n'est écrit QUE si le calcul a réellement eu
-        lieu : un skip par contention doit se retenter au prochain appel, pas
-        s'installer comme un None définitif pour cette position (voir aussi
-        le test test_threat_cache_contention).
+        la flèche. Le disputeur COURANT de scenario_engine_lock n'est PAS
+        _attach_scenario_async (rare : seulement sur clic d'une carte, verrou
+        tenu plusieurs centaines de ms) mais un PROFIL FRÈRE : le client tire
+        les 3 profils quasiment en même temps, leurs candidats viennent tous
+        de _candidates_cache, donc les 3 arrivent ici à quelques microsecondes
+        d'écart et se disputent le même verrou pour une sonde de ~87 ms
+        chacune. D'où acquire(timeout=THREAT_LOCK_TIMEOUT_S) plutôt qu'un
+        blocking=False sec : attendre ce court instant absorbe la contention
+        entre frères sans jamais risquer de s'asseoir derrière un scénario
+        différé complet (voir la constante pour le compromis exact). Le cache
+        n'est écrit QUE si le calcul a réellement eu lieu : un skip par
+        contention doit se retenter au prochain appel, pas s'installer comme
+        un None définitif pour cette position (voir aussi le test
+        test_threat_cache_contention).
         """
         with self.lock:
             if self._threat_cache_key == fen:
                 return self._threat_cache_value
-        if not self.scenario_engine_lock.acquire(blocking=False):
-            print("⚠ Menace adverse ignorée (moteur scénario occupé par un scénario différé) : pas de retard sur la flèche.")
+        if not self.scenario_engine_lock.acquire(timeout=THREAT_LOCK_TIMEOUT_S):
+            print("⚠ Menace adverse ignorée (verrou moteur scénario toujours occupé après attente -- probablement un scénario différé en cours) : pas de retard sur la flèche.")
             return None  # ne PAS cacher ce skip -- prochain appel réessaiera
         try:
+            # Le détenteur précédent (souvent un profil frère) a pu calculer
+            # et cacher exactement ce FEN pendant notre attente -- re-vérifier
+            # évite de refaire une sonde de ~87 ms pour un résultat déjà là.
+            with self.lock:
+                if self._threat_cache_key == fen:
+                    return self._threat_cache_value
             threat = None
             try:
                 threat = prophylaxis.opponent_threat(self.scenario_engine, board)

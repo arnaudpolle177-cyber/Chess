@@ -52,6 +52,17 @@ from fragment_library import FragmentContext
 # niveau-là le choix ne se discute plus, et une explication devient du
 # remplissage.
 EXPLAIN_GAP_MAX_CP = 60
+# Fait mesuré : 60cp est à l'échelle du BRUIT d'une recherche multi-thread en
+# profondeur 14 -- rejouer l'analyse de la MÊME position peut faire franchir
+# le seuil à un coup (observé : un coup passé de 23cp à 68cp entre deux
+# analyses successives, sans rien d'autre changé). Ce n'est PAS un problème
+# en coaching live : les 3 profils PARTAGENT une seule analyse par position
+# via _candidates_cache, donc gap_cp y est stable -- ce bruit n'est
+# observable qu'à travers des RÉ-analyses (ex: audit_narration.py qui relance
+# le moteur). Si jamais observé en live malgré tout, la réponse est
+# d'ÉLARGIR cette constante (~120), jamais d'ajouter un second appel moteur
+# pour la stabiliser -- un coût de latence permanent pour corriger un bruit
+# qui n'existe déjà pas dans ce chemin.
 
 _THEME_KEY_SQUARE_FIELDS = (
     "pawn_weakness_square",     # PAWN_STRUCTURE : le pion faible ciblé
@@ -259,6 +270,13 @@ def narrate(board, candidates, profile_id, swing_cp=None, opponent_better_move_s
     le chemin non caché. En production, PRÉFÉRER build_selection() une fois
     par position puis render() par profil, pour mutualiser la sélection
     entre les 3 profils (voir étape 6).
+
+    NE FORWARDE PAS le paramètre `prophylaxis` de render() (pas de paramètre
+    correspondant ici) : tout appelant qui passe par narrate() -- notamment
+    audit_narration.py -- ne peut donc JAMAIS produire de cause prophylactique,
+    même sur une position où prophylaxis.opponent_threat en trouverait une ;
+    ne pas prendre ça pour un signe que la détection prophylactique ne
+    fonctionne pas.
     """
     selection = build_selection(
         board, candidates, swing_cp=swing_cp,

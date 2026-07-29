@@ -110,18 +110,35 @@ def test_threat_cache_par_fen():
         prophylaxis.opponent_threat = real_opponent_threat
 
 
-# --- 6. Contention sur scenario_engine_lock : jamais d'attente, jamais un
-#        skip mis en cache comme un None définitif -----------------------
+# --- 6. Contention sur scenario_engine_lock : attente BORNÉE (voir
+#        THREAT_LOCK_TIMEOUT_S), jamais un skip mis en cache comme un None
+#        définitif, jamais une attente illimitée -------------------------
 def test_threat_cache_contention():
+    # Le verrou doit être tenu par un AUTRE thread : avec un acquire(timeout=)
+    # (contrairement à l'ancien acquire(blocking=False)), le tenir dans CE
+    # thread ferait bloquer l'appel pour de vrai pendant le timeout entier au
+    # lieu d'échouer immédiatement -- un thread daemon + join(timeout=...)
+    # fait échouer le test PROPREMENT (au lieu de suspendre la suite) si la
+    # régression réapparaît.
     state = _FakeState()
-    state.scenario_engine_lock.acquire()  # simule _attach_scenario_async en cours
+    state.scenario_engine_lock.acquire()  # simule un profil frère / un scénario différé en cours
     try:
         board = chess.Board()
+        result_holder = {}
+
+        def call_from_other_thread():
+            result_holder["result"] = state._opponent_threat(board.fen(), board)
+
+        t = threading.Thread(target=call_from_other_thread, daemon=True)
         t0 = time.perf_counter()
-        result = state._opponent_threat(board.fen(), board)
+        t.start()
+        t.join(timeout=web_bridge.THREAT_LOCK_TIMEOUT_S + 2.0)
         elapsed_ms = (time.perf_counter() - t0) * 1000
-        check(result is None, f"verrou occupé -> doit rendre None immédiatement, reçu {result!r}")
-        check(elapsed_ms < 50, f"acquire(blocking=False) ne doit jamais attendre : {elapsed_ms:.1f}ms")
+        check(not t.is_alive(), "l'appel n'est jamais revenu -- attente illimitée (régression)")
+        check(result_holder.get("result") is None,
+              f"verrou toujours occupé après le timeout -> doit rendre None, reçu {result_holder.get('result')!r}")
+        check(elapsed_ms >= web_bridge.THREAT_LOCK_TIMEOUT_S * 1000 - 20,
+              f"doit avoir réellement attendu ~THREAT_LOCK_TIMEOUT_S avant d'abandonner : {elapsed_ms:.1f}ms")
         check(state._threat_cache_key is None,
               "un skip par contention ne doit PAS être mis en cache (sinon il se fige pour cette position)")
     finally:
@@ -134,10 +151,54 @@ def test_threat_cache_contention():
     check(state._threat_cache_key == board.fen(), "une fois le verrou libre, le calcul doit se faire et être caché")
 
 
+# --- 7. Contention BRÈVE : le second appelant attend, obtient un résultat
+#        (pas None), et un cache-hit après acquisition ne re-sonde pas -----
+def test_threat_lock_bounded_wait_and_recheck():
+    state = _FakeState()
+    board = chess.Board()
+    calls = []
+    real_opponent_threat = prophylaxis.opponent_threat
+
+    def counting_opponent_threat(engine, board_arg, depth=10):
+        calls.append(board_arg.fen())
+        return real_opponent_threat(engine, board_arg, depth=depth)
+
+    prophylaxis.opponent_threat = counting_opponent_threat
+    try:
+        state.scenario_engine_lock.acquire()  # simule un profil frère qui vient de prendre le verrou
+
+        result_holder = {}
+
+        def waiter():
+            result_holder["result"] = state._opponent_threat(board.fen(), board)
+
+        t = threading.Thread(target=waiter, daemon=True)
+        t.start()
+        time.sleep(0.05)  # laisse le waiter se mettre en attente sur le verrou
+        # Le "profil frère" termine SA sonde et remplit le cache pour ce FEN
+        # AVANT de relâcher le verrou -- c'est le cas visé par le re-check
+        # après acquisition : le waiter ne doit pas resonder pour un résultat
+        # déjà en cache.
+        with state.lock:
+            state._threat_cache_key = board.fen()
+            state._threat_cache_value = {"already": "cached"}
+        state.scenario_engine_lock.release()
+
+        t.join(timeout=web_bridge.THREAT_LOCK_TIMEOUT_S + 2.0)
+        check(not t.is_alive(), "le waiter n'est jamais revenu")
+        check(result_holder.get("result") == {"already": "cached"},
+              f"une contention BRÈVE doit rendre le résultat mis en cache par le tenant précédent, reçu {result_holder.get('result')!r}")
+        check(len(calls) == 0,
+              "le re-check du cache après acquisition doit éviter une sonde moteur redondante")
+    finally:
+        prophylaxis.opponent_threat = real_opponent_threat
+
+
 def main():
     for fn in (test_blancs_trait_mat_donne, test_blancs_trait_mat_subi,
                test_noirs_trait_mat_donne_par_noirs, test_pas_de_mat,
-               test_threat_cache_par_fen, test_threat_cache_contention):
+               test_threat_cache_par_fen, test_threat_cache_contention,
+               test_threat_lock_bounded_wait_and_recheck):
         try:
             fn()
         except Exception as e:

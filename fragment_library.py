@@ -1180,7 +1180,7 @@ def _explain_cause(intent, voice, ctx=None):
         san = proph["san"]
         if proph.get("reason") == "captured":
             if voice == CREATIVE:
-                return f"la pièce qui préparait {san} n'est plus là"
+                return f"la pièce qui permettait {san} n'est plus là"
             if voice == CLASSICAL:
                 return f"le coup supprime la pièce qui rendait {san} possible"
             return f"ce coup enlève {san} à l'adversaire"
@@ -1201,14 +1201,14 @@ def _explain_cause(intent, voice, ctx=None):
 
     if getattr(intent, "escapes_attack", False):
         if voice == CREATIVE:
-            return "la pièce s'échappe de la ligne de tir"
+            return "la pièce s'éloigne de la menace qui pesait sur elle"
         if voice == CLASSICAL:
-            return "la pièce quitte l'attaque qu'elle subissait"
-        return "la pièce sort de l'attaque qu'elle subissait"
+            return "le coup soustrait la pièce à l'attaque qu'elle subissait"
+        return "la pièce n'est plus prise pour cible par la pièce qui la menaçait"
 
     if getattr(intent, "becomes_defended", False):
         if voice == CREATIVE:
-            return "la pièce se pose sur une case couverte par les tiennes"
+            return "la pièce se pose sur une case couverte par tes autres pièces"
         if voice == CLASSICAL:
             return "la pièce arrive sur une case défendue, contrairement à sa case de départ"
         return "la pièce arrive sur une case défendue"
