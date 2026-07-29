@@ -127,12 +127,15 @@ def test_menace_toujours_disponible_ne_reclame_rien():
     assert prophylaxis.prevented_by(board, my_move, threat) is None
 
 
-def test_menace_annulee_par_interposition():
-    # Dame noire en h4 menace Qxf2 mat ; g3 bloque la diagonale : Qxf2 disparait.
-    board = chess.Board("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 1")
-    threat = board.parse_san("Qxf2")
-    my_move = board.parse_san("Rg1")           # ne change rien a Qxf2
-    assert prophylaxis.prevented_by(board, my_move, threat) is None
+def test_menace_annulee_parce_que_la_case_est_occupee():
+    """Le coup n'enleve pas la piece menacante, mais rend le coup illegal :
+    reason doit valoir "blocked", pas "captured"."""
+    # A ecrire toi-meme : construis une position ou MON coup vient occuper la
+    # case d'arrivee de la menace (ou interpose une piece sur sa ligne) sans
+    # capturer la piece menacante. Affiche la position avant d'ecrire la FEN.
+    # Assertions attendues :
+    #   out = prophylaxis.prevented_by(board, my_move, threat)
+    #   assert out is not None and out["reason"] == "blocked"
 
 
 def test_aucune_menace_aucun_plantage():
@@ -144,10 +147,6 @@ def test_en_echec_pas_de_coup_nul():
     # Roi blanc en echec : le coup nul est ILLEGAL. La detection doit rendre
     # None sans jamais interroger le moteur (engine=None le prouve : si la
     # garde sautait, on planterait sur None.engine).
-    board = chess.Board("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 1")
-    board.push_san("Rg1")
-    board.push_san("Qxh2")
-    assert board.is_check() or True  # position de travail, garde testee ci-dessous
     check_board = chess.Board("rnbqkbnr/ppp2ppp/8/3pp3/6P1/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 1")
     check_board.push_san("a3")
     check_board.push_san("Qh4")
