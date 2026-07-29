@@ -158,6 +158,11 @@ class FragmentContext:
     eval_cp     : éval en centipawns du point de vue de mon camp (voir
                   ThemeResult.eval_cp) -- certains fragments (INITIATIVE_SHIFT)
                   changent selon que je suis en avantage ou non.
+    explain     : le commentaire a-t-il le DROIT d'expliquer ? Posé par
+                  narration_v2.render selon l'écart entre les deux meilleurs
+                  coups (voir le seuil, Task 4) : quand le coup s'impose de
+                  lui-même, une explication est du bruit. False -> aucune
+                  cause n'est ajoutée.
 
     Tous optionnels : un fragment qui a besoin d'un champ absent retombe sur
     sa formulation générale (jamais d'invention, jamais d'exception).
@@ -167,6 +172,7 @@ class FragmentContext:
     why_motif: Optional[str] = None
     why_detail: Optional[dict] = None
     eval_cp: int = 0
+    explain: bool = True
 
 
 def _f(observation, plan, cause=None):
@@ -1140,6 +1146,76 @@ _INTENT_FUNCS = {
 }
 
 
+# Ordre de priorité des explications : la prophylaxie d'abord (ce que le coup
+# ENLÈVE à l'adversaire -- le seul « pourquoi » profond d'un coup calme), puis
+# le contraste géométrique (ce qu'il CHANGE -- moins profond, toujours vrai).
+# On n'en rend JAMAIS deux : la cause est une apposition, pas un paragraphe.
+#
+# new_squares est calculé (Task 2) mais volontairement PAS narré ici : « le
+# fou contrôle 7 cases de plus » est un comptage vrai et parfaitement creux --
+# le champ reste disponible pour un futur seuil ou une future formulation, il
+# n'a pas sa place dans une phrase aujourd'hui.
+def _explain_cause(intent, voice, ctx=None):
+    """
+    Clause « pourquoi ce coup », ou None. Initiale minuscule, sans ponctuation
+    finale (le tissage compose « observation -- cause »).
+
+    Chaque formulation ci-dessous est adossée à un fait CALCULÉ (voir
+    MoveIntent : prophylaxis, new_attack_square, escapes_attack,
+    becomes_defended). Aucun jugement comparatif : on dit ce qui est compté,
+    jamais que c'est bien.
+
+    Jamais de pronom faisant référence à une pièce nommée ailleurs (son genre
+    dépendrait du type de pièce, invisible ici) : le sujet reste "la pièce"
+    ou "la case", tous deux grammaticalement féminins, pour que les accords
+    soient toujours corrects sans connaître le type de pièce.
+    """
+    if ctx is not None and not getattr(ctx, "explain", True):
+        return None
+    if intent is None:
+        return None
+
+    proph = getattr(intent, "prophylaxis", None)
+    if proph and proph.get("san"):
+        san = proph["san"]
+        if proph.get("reason") == "captured":
+            if voice == CREATIVE:
+                return f"la pièce qui préparait {san} n'est plus là"
+            if voice == CLASSICAL:
+                return f"le coup supprime la pièce qui rendait {san} possible"
+            return f"ce coup enlève {san} à l'adversaire"
+        if voice == CREATIVE:
+            return f"après ce coup, {san} ne passe plus"
+        if voice == CLASSICAL:
+            return f"le coup rend {san} impossible"
+        return f"ce coup empêche {san}"
+
+    target = getattr(intent, "new_attack_square", None)
+    if target is not None:
+        case = _sq(target)
+        if voice == CREATIVE:
+            return f"la pièce adverse en {case} se retrouve sous le feu"
+        if voice == CLASSICAL:
+            return f"le coup crée une attaque sur {case}"
+        return f"ce coup attaque la pièce en {case}"
+
+    if getattr(intent, "escapes_attack", False):
+        if voice == CREATIVE:
+            return "la pièce s'échappe de la ligne de tir"
+        if voice == CLASSICAL:
+            return "la pièce quitte l'attaque qu'elle subissait"
+        return "la pièce sort de l'attaque qu'elle subissait"
+
+    if getattr(intent, "becomes_defended", False):
+        if voice == CREATIVE:
+            return "la pièce se pose sur une case couverte par les tiennes"
+        if voice == CLASSICAL:
+            return "la pièce arrive sur une case défendue, contrairement à sa case de départ"
+        return "la pièce arrive sur une case défendue"
+
+    return None
+
+
 def fragments_for_intent(intent, voice, ctx=None):
     """
     Fragments {observation, cause, plan} décrivant le COUP recommandé (voir
@@ -1171,7 +1247,14 @@ def fragments_for_intent(intent, voice, ctx=None):
     fn = _INTENT_FUNCS.get(intent.kind)
     if fn is None:
         return None  # "quiet" ou inconnu : pas d'intention marquante à raconter
-    return fn(intent, voice, ctx)
+    frag = fn(intent, voice, ctx)
+    # La cause du fragment gagne si elle existe (_frag_capture_free pose le
+    # concept why détecté, plus précis qu'un comptage géométrique). Sinon on
+    # remplit ici, à l'UNIQUE point de passage des onze fragments d'intention,
+    # plutôt que d'éparpiller la même logique dans chacun.
+    if frag is not None and not frag.get("cause"):
+        frag["cause"] = _explain_cause(intent, voice, ctx)
+    return frag
 
 
 def fragments_for(brick, voice, ctx=None):

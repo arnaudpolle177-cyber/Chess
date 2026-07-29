@@ -51,7 +51,12 @@ def _frag_string_constants():
     import ast
     source = open(fragment_library.__file__, encoding="utf-8").read()
     for node in ast.walk(ast.parse(source)):
-        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("_frag_")):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        # _explain_cause n'a pas le préfixe _frag_ (ce n'est pas un fragment
+        # de thème/intention) mais produit du texte AFFICHÉ (la cause) --
+        # sans cette ligne, aucune des 3 gardes qui suivent ne la balaierait.
+        if not (node.name.startswith("_frag_") or node.name == "_explain_cause"):
             continue
         for sub in ast.walk(node):
             if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
@@ -638,6 +643,89 @@ def test_develop_ne_conseille_pas_un_roque_impossible():
             blob = " ".join(v for v in frag.values() if v).lower()
             check("roque" not in blob,
                   f"[{voice}] plus de droit de roque : ne pas le conseiller -> {blob!r}")
+
+
+# --- Cause explicative ------------------------------------------------------
+
+def _mk_intent(**kw):
+    import move_intent as mi
+    base = dict(kind=mi.DEVELOP, forcing=False, from_square=chess.F1,
+                to_square=chess.C4, moved_piece=chess.BISHOP)
+    base.update(kw)
+    return mi.MoveIntent(**base)
+
+
+def test_cause_prophylaxie_nomme_le_coup_empeche():
+    it = _mk_intent(prophylaxis={"san": "Cxf2", "reason": "captured"})
+    for voix in ("popular", "creative", "classical"):
+        frag = fragment_library.fragments_for_intent(it, voix)
+        check(bool(frag["cause"]), voix)
+        check("Cxf2" in frag["cause"], (voix, frag["cause"]))
+
+
+def test_cause_contraste_nouvelle_attaque():
+    it = _mk_intent(new_attack_square=chess.C6)
+    frag = fragment_library.fragments_for_intent(it, "popular")
+    check(bool(frag["cause"]) and "c6" in frag["cause"], frag["cause"])
+
+
+def test_cause_absente_quand_explain_est_faux():
+    ctx = fragment_library.FragmentContext()
+    ctx.explain = False
+    it = _mk_intent(prophylaxis={"san": "Cxf2", "reason": "captured"})
+    frag = fragment_library.fragments_for_intent(it, "popular", ctx)
+    check(not frag["cause"], frag["cause"])
+
+
+def test_cause_absente_quand_aucun_fait():
+    it = _mk_intent()
+    frag = fragment_library.fragments_for_intent(it, "popular")
+    check(not frag["cause"], frag["cause"])
+
+
+def test_cause_nexerce_aucun_jugement():
+    """Meme famille de garde que celle qui surveille 'mieux / meilleur / pire'."""
+    import move_intent as mi
+    interdits = ("mieux", "meilleur", "meilleure", "pire", "la plus faible",
+                 "la plus forte", "excellent", "mauvais")
+    cas = [
+        _mk_intent(prophylaxis={"san": "Cxf2", "reason": "captured"}),
+        _mk_intent(prophylaxis={"san": "d5", "reason": "blocked"}),
+        _mk_intent(new_attack_square=chess.C6),
+        _mk_intent(escapes_attack=True),
+        _mk_intent(becomes_defended=True),
+    ]
+    for it in cas:
+        for voix in ("popular", "creative", "classical"):
+            cause = (fragment_library.fragments_for_intent(it, voix) or {}).get("cause") or ""
+            bas = cause.lower()
+            for mot in interdits:
+                check(mot not in bas, (voix, cause, mot))
+
+
+def test_cause_est_une_clause_pas_une_phrase():
+    """Contrat de fragment : initiale minuscule, pas de point final -- le
+    tissage compose 'observation -- cause' (narration_weaver._lead_sentence)."""
+    cas = [_mk_intent(prophylaxis={"san": "Cxf2", "reason": "captured"}),
+           _mk_intent(new_attack_square=chess.C6),
+           _mk_intent(escapes_attack=True)]
+    for it in cas:
+        for voix in ("popular", "creative", "classical"):
+            cause = (fragment_library.fragments_for_intent(it, voix) or {}).get("cause")
+            if not cause:
+                continue
+            check(cause[0].islower(), cause)
+            check(not cause.endswith((".", "!", "?")), cause)
+
+
+def test_cause_du_fragment_nest_pas_ecrasee():
+    """_frag_capture_free pose deja un concept 'why' plus precis que le
+    contraste geometrique -- il doit gagner."""
+    import move_intent as mi
+    it = _mk_intent(kind=mi.CAPTURE_FREE, forcing=True, captured_piece=chess.KNIGHT,
+                    why_motif="fork", new_attack_square=chess.C6)
+    frag = fragment_library.fragments_for_intent(it, "popular")
+    check(bool(frag["cause"]) and "c6" not in frag["cause"], frag["cause"])
 
 
 def _run():
