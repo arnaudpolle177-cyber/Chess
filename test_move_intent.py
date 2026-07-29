@@ -335,6 +335,58 @@ def test_render_forcing_end_to_end():
               f"render forçant ({profile}): doit mentionner le roi -> {woven['text']!r}")
 
 
+# --- Contraste geometrique (faits comptables, sans moteur) -----------------
+# Chaque fait est un COMPTAGE, donc indiscutable. La frontiere a ne pas
+# franchir : "il vise f7, defendu par le seul roi" est un comptage ; "f7, la
+# case la plus faible" est un jugement.
+
+def _intent(fen, san, **kw):
+    import chess
+    import move_intent as mi
+    board = chess.Board(fen)
+    move = board.parse_san(san)
+    return mi.detect_move_intent(board, {"move_uci": move.uci()}, **kw), board
+
+
+def test_contraste_cases_nouvellement_controlees():
+    # Le fou sort en c4 : il controle bien plus de cases depuis c4 que depuis f1.
+    it, _ = _intent("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1", "Bc4")
+    assert it.new_squares > 0, it.new_squares
+
+
+def test_contraste_fuite_devant_une_piece_moins_chere():
+    # Fou blanc en b5 attaque par le pion a6 : Ba4 le sort de l'attaque.
+    it, _ = _intent("r1bqkbnr/1ppp1ppp/p1n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 1", "Ba4")
+    assert it.escapes_attack is True
+
+
+def test_contraste_pas_de_fuite_quand_rien_nattaque():
+    it, _ = _intent("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1", "Bc4")
+    assert it.escapes_attack is False
+
+
+def test_contraste_piece_adverse_nouvellement_attaquee():
+    # Fb5 attaque le cavalier c6, qui n'etait attaque par rien avant.
+    import chess
+    it, _ = _intent("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1", "Bb5")
+    assert it.new_attack_square == chess.C6, it.new_attack_square
+
+
+def test_contraste_valeurs_neutres_par_defaut():
+    # Un coup de pion sans effet notable ne doit rien affirmer.
+    it, _ = _intent("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "h3")
+    assert it.escapes_attack is False
+    assert it.becomes_defended is False
+    assert it.new_attack_square is None
+
+
+def test_prophylaxie_transmise_telle_quelle():
+    fake = {"san": "Nxf2", "reason": "captured"}
+    it, _ = _intent("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 0 1",
+                    "Bc4", prophylaxis=fake)
+    assert it.prophylaxis == fake
+
+
 def main():
     for fn in (test_check_escape, test_capture_free, test_capture_free_defended_but_winning,
                test_sacrifice, test_promotion, test_mate_prime_sur_tout,
@@ -344,7 +396,13 @@ def main():
                test_intentions_calmes, test_statut_de_colonne_reporte,
                test_capture_is_free_nomme_sa_preuve, test_repositionnement,
                test_castle_qui_donne_echec_reste_gives_check,
-               test_coherence_gate, test_render_forcing_end_to_end):
+               test_coherence_gate, test_render_forcing_end_to_end,
+               test_contraste_cases_nouvellement_controlees,
+               test_contraste_fuite_devant_une_piece_moins_chere,
+               test_contraste_pas_de_fuite_quand_rien_nattaque,
+               test_contraste_piece_adverse_nouvellement_attaquee,
+               test_contraste_valeurs_neutres_par_defaut,
+               test_prophylaxie_transmise_telle_quelle):
         try:
             fn()
         except Exception as e:

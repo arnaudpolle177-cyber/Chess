@@ -161,6 +161,21 @@ class MoveIntent:
                   Lu sur la valeur NUMÉRIQUE chosen["cp"] (encodage
                   engine_analysis.MATE_SCORE), jamais sur la chaîne "Mat en 2"
                   (fragile et dépendante de la langue). None hors MATE.
+    new_squares : nombre de cases que la pièce jouée contrôle DEPUIS son
+                  arrivée et ne contrôlait pas depuis son départ. Comptage pur
+                  (chess.Board.attacks), aucun jugement sur leur valeur.
+    escapes_attack : la pièce jouée était attaquée par une pièce MOINS CHÈRE
+                  qu'elle avant le coup, et ne l'est plus après. La condition
+                  « moins chère » est ce qui rend le fait intéressant : être
+                  attaqué par plus cher que soi n'est pas une menace.
+    becomes_defended : la pièce jouée n'était défendue par personne sur sa case
+                  de départ et l'est sur sa case d'arrivée.
+    new_attack_square : case d'une pièce ADVERSE que la pièce jouée attaque
+                  depuis son arrivée et n'attaquait pas depuis son départ
+                  (None si aucune). La plus chère si plusieurs.
+    prophylaxis : dict {"san", "reason"} rendu par prophylaxis.prevented_by,
+                  ou None. TRANSMIS tel quel par l'appelant, jamais calculé
+                  ici (ce module ne parle pas au moteur).
     """
     kind: str
     forcing: bool
@@ -177,6 +192,11 @@ class MoveIntent:
     why_motif: Optional[str] = None    # motif why_detector reporté tel quel (repli descriptif)
     tags: frozenset = frozenset()      # faits secondaires vrais, ex. "gives_check" (voir docstring)
     mate_in: Optional[int] = None      # MATE : nombre de COUPS avant le mat (1 = mat immédiat)
+    new_squares: int = 0
+    escapes_attack: bool = False
+    becomes_defended: bool = False
+    new_attack_square: Optional[int] = None
+    prophylaxis: Optional[dict] = None
 
 
 def _immediate_material_delta(board, move):
@@ -278,7 +298,61 @@ def _material_delta_over_pv(board, pv_uci):
     return gain, sacrifice_ply
 
 
-def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
+def _geometric_contrast(board, move):
+    """
+    Ce que le coup CHANGE, compté sans moteur. Quatre faits, quatre comptages :
+    cases nouvellement contrôlées, fuite devant une pièce moins chère, pièce
+    qui devient défendue, pièce adverse nouvellement attaquée.
+
+    Retourne un dict prêt à être déversé dans MoveIntent (clés = noms des
+    champs). Best-effort : en cas de coup illisible, tout à sa valeur neutre.
+    """
+    neutral = {"new_squares": 0, "escapes_attack": False,
+               "becomes_defended": False, "new_attack_square": None}
+    piece = board.piece_at(move.from_square)
+    if piece is None:
+        return neutral
+    me = board.turn
+
+    after = board.copy()
+    after.push(move)
+
+    # 1. Cases nouvellement contrôlées par la pièce jouée.
+    before_att = board.attacks(move.from_square)
+    after_att = after.attacks(move.to_square)
+    new_squares = len(after_att & ~before_att)
+
+    # 2. Fuite : attaquée par MOINS CHER qu'elle avant, plus après. Attaquée
+    #    par plus cher que soi n'est pas une menace -- d'où le filtre de valeur.
+    my_value = PIECE_VALUES.get(piece.piece_type, 0)
+    def _attacked_by_cheaper(b, square, color):
+        for sq in b.attackers(not color, square):
+            attacker = b.piece_at(sq)
+            if attacker and PIECE_VALUES.get(attacker.piece_type, 0) < my_value:
+                return True
+        return False
+    escapes = (_attacked_by_cheaper(board, move.from_square, me)
+               and not _attacked_by_cheaper(after, move.to_square, me))
+
+    # 3. Devient défendue (elle ne l'était pas au départ).
+    becomes_defended = (not board.attackers(me, move.from_square)
+                        and bool(after.attackers(me, move.to_square)))
+
+    # 4. Pièce adverse nouvellement attaquée par la pièce jouée -- la plus
+    #    chère si plusieurs, c'est la seule qu'on citera.
+    new_targets = []
+    for sq in after_att & ~before_att:
+        target = after.piece_at(sq)
+        if target is not None and target.color != me:
+            new_targets.append((PIECE_VALUES.get(target.piece_type, 0), sq))
+    new_attack_square = max(new_targets)[1] if new_targets else None
+
+    return {"new_squares": new_squares, "escapes_attack": escapes,
+            "becomes_defended": becomes_defended,
+            "new_attack_square": new_attack_square}
+
+
+def detect_move_intent(board, chosen, why_motif=None, why_detail=None, prophylaxis=None):
     """
     board : position AVANT le coup (chess.Board, même que reçu par la
         narration).
@@ -289,6 +363,9 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
         classification prouve désormais le gain elle-même (case non défendue
         ou bilan de ligne positif -- voir _capture_is_free), donc elle ne
         DÉPEND plus de ce motif. Jamais recalculé ici.
+    prophylaxis : dict {"san", "reason"} rendu par prophylaxis.prevented_by, ou
+        None. Ce module ne parle JAMAIS au moteur -- le fait est calculé par
+        l'appelant (web_bridge) et simplement reporté sur l'intent.
 
     Retourne un MoveIntent, ou None si le coup est illisible (chosen mal formé)
     -- l'appelant retombe alors sur le thème de position, jamais sur un crash.
@@ -332,6 +409,9 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     # branche non-is_mate ne peut plus jamais retomber sur 1.
     mate_in = 1 if is_mate else (max(2, scored_mate) if scored_mate and scored_mate > 0 else None)
     if mate_in:
+        # Pas de contraste géométrique ici : un mat forcé n'a pas besoin d'être
+        # expliqué par des comptages, et le seuil de la Task 4 le supprimerait
+        # de toute façon -- prophylaxis omis pour la même raison (chemin figé).
         return MoveIntent(
             kind=MATE, forcing=True,
             from_square=move.from_square, to_square=move.to_square,
@@ -361,6 +441,11 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
     # -- ces deux-là retournent avant ou sans passer par _mk.)
     tags = frozenset({"gives_check"}) if gives_check else frozenset()
 
+    # Contraste géométrique : les mêmes quatre comptages quel que soit le kind
+    # retenu ci-dessous -> calculés UNE fois et déversés par _mk, plutôt que
+    # répétés dans les dix branches de retour.
+    contrast = _geometric_contrast(board, move)
+
     def _mk(kind, forcing, delta, capture_undefended=False, capture_line_gain=False,
             move_tags=tags, file_status=None):
         return MoveIntent(
@@ -373,6 +458,8 @@ def detect_move_intent(board, chosen, why_motif=None, why_detail=None):
             file_status=file_status,
             why_motif=why_motif,
             tags=move_tags,
+            prophylaxis=prophylaxis,
+            **contrast,
         )
 
     # 1. Sortir d'un échec prime sur tout : c'est le BUT du coup, aucune
