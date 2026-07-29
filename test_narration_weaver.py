@@ -128,7 +128,10 @@ def test_missed_san_survives_weaving():
     lead, supports = ts.select_lead_and_support(
         [brick(MISSED_OPPORTUNITY, 90, swing_cp=90, opponent_better_move_san="Qh5")])
     res = nw.weave(lead, supports, "creative", FragmentContext(eval_cp=40))
-    check("Qh5" in res["text"], f"le SAN réel doit survivre au tissage -> {res['text']!r}")
+    # La brique porte le SAN anglais de python-chess ; l'affichage le
+    # francise (voir fragment_library._san_fr). Ce qui doit survivre au
+    # tissage, c'est la DONNÉE de la brique -- ici sous sa forme affichée.
+    check("Dh5" in res["text"], f"le SAN réel doit survivre au tissage -> {res['text']!r}")
 
 
 def test_all_voices_produce_text():

@@ -150,6 +150,45 @@ class Selection:
     bricks: List[td.ThemeCandidate] = field(default_factory=list)
 
 
+def _followup_from_pv(board, chosen):
+    """
+    {"reply": SAN de la réponse adverse, "next": SAN de MON coup suivant} lus
+    sur la PV du coup recommandé, ou None.
+
+    Ne rend quelque chose QUE si mon coup suivant est CONCRET -- une prise,
+    un échec ou une promotion. Un 3e demi-coup calme ne vaut pas la peine
+    d'être annoncé : « puis joue Cd2 » n'apprend rien et remplacerait un plan
+    utile par une liste de coups, ce que ce projet refuse depuis le début.
+
+    Les deux SAN sont calculés DANS la position où leur coup est légal (on
+    rejoue la ligne), jamais en avance : c'est le même piège que
+    `is_capture` évalué une position trop tôt, qui a déjà coûté deux bugs à
+    ce dépôt. Ligne trop courte, illisible ou désynchronisée -> None, sans
+    exception.
+    """
+    if not chosen:
+        return None
+    pv = chosen.get("pv_uci") or []
+    if len(pv) < 3:
+        return None
+    tmp = board.copy()
+    sans = []
+    interessant = False
+    for i, uci in enumerate(pv[:3]):
+        try:
+            mv = chess.Move.from_uci(uci)
+        except ValueError:
+            return None
+        if mv not in tmp.legal_moves:
+            return None  # ligne désynchronisée : on se tait
+        if i == 2:
+            interessant = (tmp.is_capture(mv) or tmp.gives_check(mv)
+                           or mv.promotion is not None)
+        sans.append(tmp.san(mv))
+        tmp.push(mv)
+    return {"reply": sans[1], "next": sans[2]} if interessant else None
+
+
 def build_selection(board, candidates, swing_cp=None, opponent_better_move_san=None,
                     initiative_trend=None, move_history=None, max_supports=2,
                     require_relation=False):
@@ -270,6 +309,11 @@ def render(selection, profile_id, chosen=None, why_motif=None, why_detail=None,
     if not ctx.explain and 0 < selection.gap_cp < engine_analysis.MATE_CP_THRESHOLD:
         ctx.gain_cp = selection.gap_cp
     ctx.gain_material = None
+    # Coup d'ENCHAÎNEMENT : le 3e demi-coup de la PV, c'est-à-dire MON coup
+    # suivant après la meilleure réponse adverse. Il ne s'AJOUTE pas au
+    # paragraphe -- il remplace le plan générique par un plan concret (voir
+    # fragment_library._followup_plan), donc le nombre de phrases ne bouge pas.
+    ctx.followup = _followup_from_pv(board, chosen) if board is not None else None
 
     # Intention du COUP recommandé (voir move_intent). Calculé par profil
     # (chosen diffère selon le profil) -> différencie enfin les 3 profils et

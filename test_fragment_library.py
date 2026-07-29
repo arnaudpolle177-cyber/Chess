@@ -191,9 +191,15 @@ def test_pawn_structure_cites_real_square():
 
 
 def test_missed_cites_san_when_present():
+    """Le SAN de la brique doit se retrouver dans le texte -- FRANCISÉ : la
+    brique porte le SAN anglais de python-chess (Qh5), l'affichage doit dire
+    Dh5, sinon le lecteur lit une pièce qui n'existe pas. Cette assertion est
+    plus forte que l'ancienne (« Qh5 in observation ») : elle prouve à la
+    fois que la donnée vient bien de la brique et qu'elle est traduite."""
     b = brick(MISSED_OPPORTUNITY, swing_cp=90, opponent_better_move_san="Qh5")
     frag = fragments_for(b, "popular")
-    check("Qh5" in frag["observation"], f"le SAN Qh5 devrait être cité -> {frag['observation']!r}")
+    check("Dh5" in frag["observation"], f"le SAN doit être cité en français -> {frag['observation']!r}")
+    check("Qh5" not in frag["observation"], f"SAN anglais résiduel -> {frag['observation']!r}")
 
 
 def test_missed_no_san_no_invention():
@@ -787,6 +793,30 @@ def test_finale_opposition():
 def test_finale_rois_eloignes_pas_dopposition():
     frag, fields = _endgame_frag("8/8/8/4k3/8/8/4K3/8 w - - 0 1")
     check(fields["opposition"] is False, f"pas d'opposition à 3 cases : {fields}")
+
+
+def test_san_affiche_en_francais():
+    """« Rxd8+ » dans une phrase française se lit ROI prend en d8 alors que
+    c'est une TOUR. Colonnes, roque, prises et suffixes ne bougent pas."""
+    attendu = {"Nbd7": "Cbd7", "Rxd8+": "Txd8+", "e8=Q+": "e8=D+", "Bxh7#": "Fxh7#",
+               "Qh5": "Dh5", "Kf1": "Rf1", "R1e2": "T1e2",
+               "O-O": "O-O", "O-O-O": "O-O-O", "exd5": "exd5", "a4": "a4"}
+    for anglais, francais in attendu.items():
+        check(fl._san_fr(anglais) == francais,
+              f"{anglais} doit s'afficher {francais}, obtenu {fl._san_fr(anglais)}")
+    check(fl._san_fr(None) is None, "None-safe")
+
+
+def test_plan_denchainement_remplace_le_plan_generique():
+    """Le coup d'enchaînement occupe le slot du PLAN (il ne s'ajoute pas), il
+    est conditionnel, et son SAN est francisé."""
+    ctx = FragmentContext()
+    ctx.followup = {"reply": "Qc5", "next": "Rxd8+"}
+    plan = fl._followup_plan("popular", ctx)
+    check("Txd8+" in plan and "Dc5" in plan, f"SAN à franciser -> {plan!r}")
+    check(plan.startswith("si "), f"la formulation doit rester conditionnelle -> {plan!r}")
+    check(fl._followup_plan("popular", FragmentContext()) is None,
+          "sans enchaînement, pas de plan concret")
 
 
 def _run():

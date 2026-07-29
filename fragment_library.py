@@ -289,7 +289,7 @@ def _frag_defense(fields, voice, ctx):
 
 # --- MISSED_OPPORTUNITY ------------------------------------------------
 def _frag_missed(fields, voice, ctx):
-    san = fields.get("opponent_better_move_san")
+    san = _san_fr(fields.get("opponent_better_move_san"))
     swing = fields.get("swing_cp")
     pawns = _pawns(swing)
     ampleur = f"environ {pawns} {_pawns_word(pawns)}" if pawns else None
@@ -1290,6 +1290,58 @@ def _explain_gain(voice, ctx=None):
     return f"les autres coups laissent filer au moins {mots}"
 
 
+# python-chess écrit le SAN en notation ANGLAISE (K/Q/R/B/N). Dans une phrase
+# française, « Rxd8+ » se lit « ROI prend en d8 » alors qu'il s'agit d'une
+# TOUR, et « Bb4 » ne veut rien dire. Ce n'est pas une coquetterie de style :
+# c'est un coup mal lu.
+#
+# Conversion d'AFFICHAGE seulement, appliquée ici, au moment où le SAN entre
+# dans une phrase. engine_analysis n'est PAS touché : son `move_san` est de la
+# DONNÉE (parse_san, historique de coups, identité d'ouverture) -- le traduire
+# casserait tout ce qui le relit.
+_SAN_PIECES_FR = {"K": "R", "Q": "D", "R": "T", "B": "F", "N": "C"}
+
+
+def _san_fr(san):
+    """SAN anglais -> français. Ne touche QUE la lettre de pièce initiale et
+    celle d'une promotion : les colonnes (minuscules), le roque, les prises
+    et les suffixes +/# passent tels quels. None-safe."""
+    if not san:
+        return san
+    out = san
+    if out[0] in _SAN_PIECES_FR:
+        out = _SAN_PIECES_FR[out[0]] + out[1:]
+    i = out.find("=")
+    if i != -1 and i + 1 < len(out) and out[i + 1] in _SAN_PIECES_FR:
+        out = out[:i + 1] + _SAN_PIECES_FR[out[i + 1]] + out[i + 2:]
+    return out
+
+
+def _followup_plan(voice, ctx=None):
+    """
+    Plan CONCRET tiré de la ligne principale (voir
+    narration_v2._followup_from_pv), ou None : « si l'adversaire répond Fxd5,
+    enchaîne par Txd7 ».
+
+    Remplace le plan générique, ne s'y ajoute pas -- le paragraphe garde son
+    nombre de phrases. La formulation est CONDITIONNELLE parce que le fait
+    l'est : mon coup suivant n'arrive que si l'adversaire joue bien la
+    réponse de la ligne. Annoncer « puis prends en d7 » sans cette condition
+    serait une promesse que la position ne garantit pas.
+    """
+    fu = getattr(ctx, "followup", None) if ctx is not None else None
+    if not fu:
+        return None
+    reply, nxt = _san_fr(fu.get("reply")), _san_fr(fu.get("next"))
+    if not reply or not nxt:
+        return None
+    if voice == CREATIVE:
+        return f"si {reply} arrive, tu as {nxt} derrière"
+    if voice == CLASSICAL:
+        return f"sur {reply}, la suite prévue est {nxt}"
+    return f"si l'adversaire répond {reply}, enchaîne par {nxt}"
+
+
 def _explain_cause(intent, voice, ctx=None):
     """
     Clause « pourquoi ce coup », ou None. Initiale minuscule, sans ponctuation
@@ -1312,7 +1364,7 @@ def _explain_cause(intent, voice, ctx=None):
 
     proph = getattr(intent, "prophylaxis", None)
     if proph and proph.get("san"):
-        san = proph["san"]
+        san = _san_fr(proph["san"])
         if proph.get("reason") == "captured":
             if voice == CREATIVE:
                 return f"la pièce qui permettait {san} n'est plus là"
@@ -1399,6 +1451,8 @@ def fragments_for_intent(intent, voice, ctx=None):
         # mutuellement exclusifs par construction (narration_v2 n'arme
         # ctx.explain et ctx.gain_cp que dans des cas disjoints).
         frag["cause"] = _explain_cause(intent, voice, ctx) or _explain_gain(voice, ctx)
+    if frag is not None:
+        frag["plan"] = _followup_plan(voice, ctx) or frag["plan"]
     return frag
 
 
@@ -1427,4 +1481,12 @@ def fragments_for(brick, voice, ctx=None):
         voice = VOICE_FALLBACK
     fn = _FRAGMENT_FUNCS.get(brick.theme, _frag_equal)
     fields = brick.fields if brick.fields else {}
-    return fn(fields, voice, ctx)
+    frag = fn(fields, voice, ctx)
+    # Même substitution que pour les fragments d'intention : le plan concret
+    # tiré de la ligne prime sur le conseil général. Appliqué ici aussi pour
+    # que les coups CALMES (qui retombent sur le tissage de thème) en
+    # profitent -- c'était le trou historique. Sur un fragment SECONDAIRE le
+    # plan n'est jamais lu (le weaver ne prend que l'observation), donc
+    # aucune conséquence de ce côté.
+    frag["plan"] = _followup_plan(voice, ctx) or frag["plan"]
+    return frag
